@@ -1,0 +1,13 @@
+streamlit>=1.40
+opencv-python>=4.10
+numpy>=1.26
+pandas>=2.2
+mediapipe>=1.0.1
+deepface>=0.0.100
+tensorflow>=2.21.0
+pyaudio>=0.2.14
+webrtcvad-wheels>=2.0.14
+Pillow>=10.0
+protobuf>=6.33.6
+# download at powershell admin
+# winget install Gyan.FFmpeg 

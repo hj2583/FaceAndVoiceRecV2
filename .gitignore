@@ -1,0 +1,16 @@
+venv/
+__pycache__/
+*.pyc
+.streamlit/
+faces.db
+face_index.npz
+known_faces/*
+unknown_faces/*
+initialVideo/*
+trackedVideo/*
+logs/*
+!known_faces/.gitkeep
+!unknown_faces/.gitkeep
+!initialVideo/.gitkeep
+!trackedVideo/.gitkeep
+!logs/.gitkeep
