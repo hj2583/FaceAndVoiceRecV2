@@ -80,10 +80,16 @@ RECOGNITION_INTERVAL = 30
 MIN_FACE_SIZE = 25
 
 # Minimum face size before attempting ArcFace recognition.
-MIN_RECOGNITION_FACE_SIZE = 30
+# Lowered to allow best-effort recognition attempts on small/distant
+# faces detected via the long-range tiled pipeline. Low-confidence
+# matches still fall back to "Unknown" through the existing thresholds.
+MIN_RECOGNITION_FACE_SIZE = 15
 
 # Number of faces MediaPipe should detect.
 MAX_FACES = 8
+
+# Minimum face size required for reliable MediaPipe lip landmarks.
+LANDMARK_MIN_FACE_SIZE = 60
 
 # Tracker settings.
 TRACK_MAX_MISSED_FRAMES = 20
@@ -91,7 +97,26 @@ TRACK_DISTANCE_PX = 180
 
 # Recognition debugging
 DEBUG_FACE_SIZE = True
+
+
 # ============================================================
+# Long-range tiled detection (video_processor.py only)
+# ============================================================
+
+# Tile grid used to split a frame: (columns, rows).
+TILE_GRID = (3, 2)
+
+# Fractional overlap between adjacent tiles.
+TILE_OVERLAP = 0.2
+
+# Upscale factor applied to each tile before detection.
+TILE_UPSCALE = 2.0
+
+# Run tiled detection every N frames and rely on tracker continuity between.
+TILED_DETECTION_INTERVAL = 5
+
+# IoU threshold for de-duplicating overlapping tile detections.
+NMS_IOU_THRESHOLD = 0.4
 # Small-face recognition enhancement
 # ============================================================
 
@@ -105,6 +130,29 @@ FACE_UPSCALE_THRESHOLD = 100
 # Example:
 # 60x60 face → 120x120 crop
 FACE_UPSCALE_FACTOR = 2.0
+
+# Target minimum crop dimension for ArcFace input.
+FACE_UPSCALE_TARGET_SIZE = 112
+
+
+# ============================================================
+# Long-range tiled detection (video_processor.py only)
+# ============================================================
+
+# Tile grid used to split a frame: (columns, rows).
+TILE_GRID = (3, 2)
+
+# Fractional overlap between adjacent tiles.
+TILE_OVERLAP = 0.2
+
+# Upscale factor applied to each tile before detection.
+TILE_UPSCALE = 2.0
+
+# Run tiled detection every N frames and rely on tracker continuity between.
+TILED_DETECTION_INTERVAL = 5
+
+# IoU threshold for de-duplicating overlapping tile detections.
+NMS_IOU_THRESHOLD = 0.4
 
 
 # ============================================================
