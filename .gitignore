@@ -17,6 +17,5 @@ logs/*
 .venv/
 3.12venv/
 .vscode/
-docs/
 .worktrees/
 .pytest_cache/
