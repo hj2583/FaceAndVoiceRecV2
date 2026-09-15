@@ -10,6 +10,7 @@ import mediapipe as mp
 import numpy as np
 
 from audio_core import detect_speech_segments
+from detection_core import detect_faces_tiled
 
 from config import (
     ENABLE_TRANSCRIPTION,
@@ -21,6 +22,7 @@ from config import (
 
     MIN_FACE_SIZE,
     MIN_RECOGNITION_FACE_SIZE,
+    LANDMARK_MIN_FACE_SIZE,
 
     FACE_UPSCALE_THRESHOLD,
     FACE_UPSCALE_FACTOR,
@@ -31,6 +33,11 @@ from config import (
     UNKNOWN_CONFIRMATIONS,
     UNKNOWN_MIN_QUALITY,
     UNKNOWN_FACES_DIR,
+    NMS_IOU_THRESHOLD,
+    TILE_GRID,
+    TILE_OVERLAP,
+    TILE_UPSCALE,
+    TILED_DETECTION_INTERVAL,
 )
 
 from database import (
@@ -371,6 +378,23 @@ def prepare_recognition_crop(crop):
     return recognition_crop
 
 
+def _box_iou(box_a, box_b):
+    """Return IoU for two ``(x0, y0, x1, y1)`` boxes."""
+    ax0, ay0, ax1, ay1 = box_a
+    bx0, by0, bx1, by1 = box_b
+    ix0 = max(ax0, bx0)
+    iy0 = max(ay0, by0)
+    ix1 = min(ax1, bx1)
+    iy1 = min(ay1, by1)
+    if ix1 <= ix0 or iy1 <= iy0:
+        return 0.0
+    intersection = (ix1 - ix0) * (iy1 - iy0)
+    area_a = max(0, ax1 - ax0) * max(0, ay1 - ay0)
+    area_b = max(0, bx1 - bx0) * max(0, by1 - by0)
+    union = area_a + area_b - intersection
+    return intersection / union if union > 0 else 0.0
+
+
 # ============================================================
 # Main video processing pipeline
 # ============================================================
@@ -493,6 +517,7 @@ def process_video_pipeline(
     recognition_logs = []
 
     active_speech_logs = []
+    last_tiled_detections = []
 
     # ========================================================
     # Processing
@@ -514,7 +539,25 @@ def process_video_pipeline(
             )
 
             # =================================================
-            # BGR → RGB
+            # Tiled RetinaFace detection
+            # =================================================
+
+            if (
+                not last_tiled_detections
+                or frame_no % TILED_DETECTION_INTERVAL == 1
+            ):
+                last_tiled_detections = detect_faces_tiled(
+                    frame,
+                    tile_grid=TILE_GRID,
+                    overlap_ratio=TILE_OVERLAP,
+                    upscale_factor=TILE_UPSCALE,
+                    nms_iou_threshold=NMS_IOU_THRESHOLD,
+                )
+
+            tiled_detections = last_tiled_detections
+
+            # =================================================
+            # BGR → RGB for landmark enrichment
             # =================================================
 
             rgb = cv2.cvtColor(
@@ -522,72 +565,44 @@ def process_video_pipeline(
                 cv2.COLOR_BGR2RGB,
             )
 
-            # =================================================
-            # MediaPipe image
-            # =================================================
-
-            mp_image = mp.Image(
-                image_format=(
-                    mp.ImageFormat.SRGB
-                ),
-                data=rgb,
-            )
-
-            # =================================================
-            # MediaPipe timestamp
-            # =================================================
-
-            timestamp_ms = int(
-                timestamp * 1000
-            )
-
-            result = (
-                face_landmarker
-                .detect_for_video(
-                    mp_image,
-                    timestamp_ms,
-                )
-            )
+            # Convert timestamp to milliseconds for MediaPipe
+            timestamp_ms = int(timestamp * 1000)
 
             detections = []
-
-            # =================================================
-            # Face detections
-            # =================================================
-
-            for landmarks in result.face_landmarks:
-
-                if not landmarks:
-                    continue
-
-                bbox = bbox_from_landmarks(
-                    landmarks,
-                    frame.shape,
+            landmark_call_offset = 0
+            for x, y, box_width, box_height, _confidence in tiled_detections:
+                bbox = (
+                    int(x),
+                    int(y),
+                    int(x + box_width),
+                    int(y + box_height),
                 )
-
                 x0, y0, x1, y1 = bbox
-
                 face_width = x1 - x0
                 face_height = y1 - y0
-
-                # ------------------------------------------------
-                # Detection/tracking filter.
-                #
-                # This is intentionally separate from
-                # MIN_RECOGNITION_FACE_SIZE.
-                # ------------------------------------------------
-
-                if (
-                    face_width < MIN_FACE_SIZE
-                    or face_height < MIN_FACE_SIZE
-                ):
+                if face_width < MIN_FACE_SIZE or face_height < MIN_FACE_SIZE:
                     continue
 
-                lip_open = (
-                    lip_open_ratio(
-                        landmarks
-                    )
-                )
+                landmarks = None
+                lip_open = None
+                if (
+                    face_width >= LANDMARK_MIN_FACE_SIZE
+                    and face_height >= LANDMARK_MIN_FACE_SIZE
+                ):
+                    crop_rgb = rgb[y0:y1, x0:x1]
+                    if crop_rgb.size:
+                        crop_mp_image = mp.Image(
+                            image_format=mp.ImageFormat.SRGB,
+                            data=crop_rgb,
+                        )
+                        landmark_call_offset += 1
+                        crop_result = face_landmarker.detect_for_video(
+                            crop_mp_image,
+                            timestamp_ms + landmark_call_offset,
+                        )
+                        if crop_result.face_landmarks:
+                            landmarks = crop_result.face_landmarks[0]
+                            lip_open = lip_open_ratio(landmarks)
 
                 detections.append(
                     {
@@ -988,6 +1003,8 @@ def process_video_pipeline(
 
                 if (
                     audio_is_speech
+                    and
+                    track.lip_open is not None
                     and
                     track.lip_open
                     >= LIP_OPEN_THRESHOLD

@@ -10,5 +10,6 @@ webrtcvad-wheels>=2.0.14
 Pillow>=10.0
 protobuf>=6.33.6
 tf-keras
+openai-whisper>=20231117
 # download at powershell admin
 # winget install Gyan.FFmpeg 

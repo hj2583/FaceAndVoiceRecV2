@@ -1,0 +1,251 @@
+"""Long-range face detection helpers.
+
+The geometry and NMS functions are dependency-light so they can be tested
+without loading the RetinaFace model.  Model inference is lazy and failures
+in one tile are isolated from the remaining tiles.
+"""
+
+import logging
+from typing import List, Tuple
+
+import cv2
+import numpy as np
+
+
+logger = logging.getLogger(__name__)
+
+Detection = Tuple[float, float, float, float, float]
+
+
+def _starts(length: int, tile_length: int, count: int) -> List[int]:
+    if count <= 1:
+        return [0]
+    if tile_length >= length:
+        return [0] * count
+
+    step = (length - tile_length) / (count - 1)
+    return [int(round(index * step)) for index in range(count)]
+
+
+def tile_frame(
+    frame: np.ndarray,
+    grid: Tuple[int, int],
+    overlap_ratio: float,
+) -> List[Tuple[np.ndarray, Tuple[int, int], Tuple[int, int]]]:
+    """Split a frame into overlapping tiles that cover its full extent."""
+    if frame is None or frame.size == 0:
+        return []
+
+    cols, rows = grid
+    if cols < 1 or rows < 1:
+        raise ValueError("grid must contain positive column and row counts")
+    if not 0.0 <= overlap_ratio < 1.0:
+        raise ValueError("overlap_ratio must be in the range [0.0, 1.0)")
+
+    height, width = frame.shape[:2]
+    base_width = int(np.ceil(width / cols))
+    base_height = int(np.ceil(height / rows))
+    tile_width = min(width, int(np.ceil(base_width / (1.0 - overlap_ratio))))
+    tile_height = min(height, int(np.ceil(base_height / (1.0 - overlap_ratio))))
+    x_starts = _starts(width, tile_width, cols)
+    y_starts = _starts(height, tile_height, rows)
+
+    tiles = []
+    for row, y_start in enumerate(y_starts):
+        for col, x_start in enumerate(x_starts):
+            y_end = min(height, y_start + tile_height)
+            x_end = min(width, x_start + tile_width)
+            tiles.append(
+                (frame[y_start:y_end, x_start:x_end].copy(),
+                 (col, row),
+                 (x_start, y_start))
+            )
+    return tiles
+
+
+def upscale_tile(tile: np.ndarray, scale_factor: float) -> np.ndarray:
+    """Upscale a tile while preserving its aspect ratio."""
+    if scale_factor <= 0:
+        raise ValueError("scale_factor must be positive")
+    if scale_factor == 1.0:
+        return tile
+
+    height, width = tile.shape[:2]
+    return cv2.resize(
+        tile,
+        (max(1, int(round(width * scale_factor))),
+         max(1, int(round(height * scale_factor)))),
+        interpolation=cv2.INTER_CUBIC if scale_factor > 1 else cv2.INTER_AREA,
+    )
+
+
+def remap_tile_detections(
+    detections: List[Detection],
+    tile_origin: Tuple[int, int],
+    frame_shape: Tuple[int, int],
+    upscale_factor: float,
+) -> List[Detection]:
+    """Map boxes from an upscaled tile into full-frame coordinates."""
+    if upscale_factor <= 0:
+        raise ValueError("upscale_factor must be positive")
+
+    height, width = frame_shape[:2]
+    origin_x, origin_y = tile_origin
+    remapped = []
+
+    for x, y, box_width, box_height, confidence in detections:
+        x = origin_x + x / upscale_factor
+        y = origin_y + y / upscale_factor
+        box_width /= upscale_factor
+        box_height /= upscale_factor
+
+        x = max(0.0, min(float(width), x))
+        y = max(0.0, min(float(height), y))
+        box_width = min(box_width, width - x)
+        box_height = min(box_height, height - y)
+
+        if box_width > 0 and box_height > 0:
+            remapped.append((x, y, box_width, box_height, confidence))
+
+    return remapped
+
+
+def _calculate_iou(box1: Detection, box2: Detection) -> float:
+    x1, y1, width1, height1, _ = box1
+    x2, y2, width2, height2, _ = box2
+    left = max(x1, x2)
+    top = max(y1, y2)
+    right = min(x1 + width1, x2 + width2)
+    bottom = min(y1 + height1, y2 + height2)
+    if right <= left or bottom <= top:
+        return 0.0
+
+    intersection = (right - left) * (bottom - top)
+    union = width1 * height1 + width2 * height2 - intersection
+    return intersection / union if union > 0 else 0.0
+
+
+def nms_merge(
+    detections: List[Detection],
+    iou_threshold: float = 0.4,
+) -> List[Detection]:
+    """Remove lower-confidence boxes that duplicate stronger detections."""
+    if not 0.0 <= iou_threshold <= 1.0:
+        raise ValueError("iou_threshold must be in the range [0.0, 1.0]")
+
+    remaining = sorted(detections, key=lambda detection: detection[4], reverse=True)
+    kept = []
+    while remaining:
+        best = remaining.pop(0)
+        kept.append(best)
+        remaining = [
+            detection
+            for detection in remaining
+            if _calculate_iou(best, detection) <= iou_threshold
+        ]
+    return kept
+
+
+def _detect_faces_opencv(tile: np.ndarray) -> List[Detection]:
+    """Fallback detector using OpenCV cascade classifier."""
+    try:
+        cascade_path = cv2.data.haarcascades + 'haarcascade_frontalface_default.xml'
+        cascade = cv2.CascadeClassifier(cascade_path)
+        if cascade.empty():
+            return []
+        
+        gray = cv2.cvtColor(tile, cv2.COLOR_BGR2GRAY)
+        faces = cascade.detectMultiScale(
+            gray,
+            scaleFactor=1.1,
+            minNeighbors=5,
+            minSize=(20, 20),
+        )
+        
+        detections = []
+        for x, y, w, h in faces:
+            # OpenCV cascade doesn't provide confidence, so use a moderate default
+            detections.append((float(x), float(y), float(w), float(h), 0.7))
+        return detections
+    except Exception as error:
+        logger.warning("OpenCV fallback detection failed: %s", error)
+        return []
+
+
+def _detect_faces_retinaface(tile: np.ndarray) -> List[Detection]:
+    """Run DeepFace RetinaFace lazily and return tile-space boxes.
+    Falls back to OpenCV cascade if RetinaFace fails.
+    """
+    try:
+        from deepface import DeepFace
+
+        faces = DeepFace.extract_faces(
+            img_path=tile,
+            detector_backend="retinaface",
+            enforce_detection=False,
+            expand_percentage=0,
+        )
+    except Exception as error:
+        logger.warning("RetinaFace detection failed, falling back to OpenCV: %s", error)
+        return _detect_faces_opencv(tile)
+
+    detections = []
+    for face in faces:
+        area = face.get("facial_area", {})
+        x = float(area.get("x", 0))
+        y = float(area.get("y", 0))
+        width = float(area.get("w", 0))
+        height = float(area.get("h", 0))
+        confidence = float(face.get("confidence", 0.0))
+        # Filter out very low-confidence detections
+        if width > 0 and height > 0 and confidence >= 0.5:
+            detections.append((x, y, width, height, confidence))
+    return detections
+
+
+def detect_faces_tiled(
+    frame: np.ndarray,
+    tile_grid: Tuple[int, int] = (3, 2),
+    overlap_ratio: float = 0.2,
+    upscale_factor: float = 2.0,
+    nms_iou_threshold: float = 0.4,
+    min_confidence: float = 0.5,
+) -> List[Detection]:
+    """Detect faces in overlapping upscaled tiles and merge duplicate boxes.
+    
+    Includes automatic fallback from RetinaFace to OpenCV if primary detector fails.
+    Filters detections by minimum confidence threshold.
+    """
+    all_detections = []
+
+    try:
+        full_frame_detections = _detect_faces_retinaface(frame)
+        all_detections.extend(
+            remap_tile_detections(
+                full_frame_detections,
+                (0, 0),
+                frame.shape[:2],
+                1.0,
+            )
+        )
+    except Exception as error:
+        logger.warning("Skipping failed full-frame detection: %s", error)
+
+    for tile, _tile_index, origin in tile_frame(frame, tile_grid, overlap_ratio):
+        try:
+            upscaled = upscale_tile(tile, upscale_factor)
+            detections = _detect_faces_retinaface(upscaled)
+            # Filter by confidence before remapping
+            detections = [d for d in detections if d[4] >= min_confidence]
+            all_detections.extend(
+                remap_tile_detections(
+                    detections,
+                    origin,
+                    frame.shape[:2],
+                    upscale_factor,
+                )
+            )
+        except Exception as error:
+            logger.warning("Skipping failed detection tile at %s: %s", origin, error)
+
+    return nms_merge(all_detections, nms_iou_threshold)

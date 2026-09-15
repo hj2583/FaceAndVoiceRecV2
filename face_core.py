@@ -5,11 +5,12 @@ from pathlib import Path
 
 import cv2
 import numpy as np
-from deepface import DeepFace
 
 from config import (
     AMBIGUITY_MARGIN,
     EMBEDDING_DIM,
+    FACE_UPSCALE_TARGET_SIZE,
+    FACE_UPSCALE_THRESHOLD,
     INDEX_PATH,
     RECOGNITION_THRESHOLD,
     UNKNOWN_MATCH_THRESHOLD,
@@ -21,6 +22,7 @@ from database import (
     list_embeddings,
     list_unknown_samples_with_embeddings,
 )
+from face_backend import get_face_backend
 
 logging.basicConfig(
     level=logging.INFO,
@@ -49,9 +51,6 @@ def face_quality(face_crop):
         return 0.0
 
     h, w = face_crop.shape[:2]
-
-    if h < 50 or w < 50:
-        return 0.0
 
     gray = cv2.cvtColor(
         face_crop,
@@ -83,16 +82,36 @@ def face_quality(face_crop):
     return float(quality)
 
 def build_face_model():
-    """
-    Explicitly load ArcFace once. DeepFace caches the model internally too.
-    """
+    """Explicitly load the active face recognition model once."""
     global _MODEL_READY
     with _MODEL_LOCK:
         if not _MODEL_READY:
             logging.info("Loading ArcFace model...")
-            DeepFace.build_model("ArcFace")
+            backend = get_face_backend()
+            backend.build_model("ArcFace")
             _MODEL_READY = True
             logging.info("ArcFace model loaded.")
+
+
+def preprocess_face_for_recognition(
+    face_crop,
+    target_size=FACE_UPSCALE_TARGET_SIZE,
+    upscale_threshold=FACE_UPSCALE_THRESHOLD,
+):
+    """Upscale small face crops while preserving their aspect ratio."""
+    if face_crop is None or face_crop.size == 0:
+        return face_crop
+
+    height, width = face_crop.shape[:2]
+    if max(height, width) >= upscale_threshold:
+        return face_crop
+
+    scale = target_size / max(height, width)
+    return cv2.resize(
+        face_crop,
+        (max(1, int(round(width * scale))), max(1, int(round(height * scale)))),
+        interpolation=cv2.INTER_CUBIC,
+    )
 
 
 def extract_embedding(face_crop):
@@ -101,20 +120,9 @@ def extract_embedding(face_crop):
 
     try:
         build_face_model()
-
-        result = DeepFace.represent(
-            img_path=face_crop,
-            model_name="ArcFace",
-            detector_backend="skip",
-            enforce_detection=False,
-            align=True,
-        )
-
-        if not result:
-            return None
-
-        embedding = _normalize(result[0]["embedding"])
-
+        face_crop = preprocess_face_for_recognition(face_crop)
+        backend = get_face_backend()
+        embedding = backend.extract_embedding(face_crop)
         if embedding is None:
             return None
 

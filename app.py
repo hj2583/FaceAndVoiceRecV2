@@ -1,5 +1,6 @@
 import json
 import os
+import sqlite3
 import subprocess
 import sys
 from pathlib import Path
@@ -28,6 +29,7 @@ from database import (
 )
 from face_core import FaceIndex
 from video_processor import process_video_pipeline
+from transcription_core import process_meeting_transcription
 
 
 st.set_page_config(
@@ -160,6 +162,14 @@ def render_video():
             status.success("Processing completed.")
         except Exception as exc:
             st.exception(exc)
+
+    if st.button("📝 Transcribe Selected Video"):
+        with st.spinner("Extracting audio and transcribing..."):
+            try:
+                meeting_id = process_meeting_transcription(input_path)
+                st.success(f"Transcription completed for meeting {meeting_id}.")
+            except Exception as exc:
+                st.error(f"Transcription failed: {exc}")
 
     col1, col2 = st.columns(2)
 
@@ -757,6 +767,61 @@ def render_audio_logs():
     )
 
 
+def render_transcripts():
+    st.header("📝 Meeting Transcripts")
+    with sqlite3.connect(DB_PATH) as connection:
+        meetings = connection.execute(
+            """
+            SELECT meeting_id, video_path, transcription_status, error_log
+            FROM meetings ORDER BY created_at DESC
+            """
+        ).fetchall()
+
+    if not meetings:
+        st.info("No meetings have been transcribed yet.")
+        return
+
+    options = {
+        meeting_id: f"{Path(video_path).name} ({status})"
+        for meeting_id, video_path, status, _error in meetings
+    }
+    selected_id = st.selectbox(
+        "Meeting",
+        list(options),
+        format_func=lambda meeting_id: options[meeting_id],
+    )
+
+    with sqlite3.connect(DB_PATH) as connection:
+        rows = connection.execute(
+            """
+            SELECT speaker_label, start_ms, end_ms, text, confidence
+            FROM transcription_segments
+            WHERE meeting_id=? ORDER BY start_ms
+            """,
+            (selected_id,),
+        ).fetchall()
+
+    if not rows:
+        st.info("This meeting has no transcript segments.")
+        return
+
+    st.dataframe(
+        pd.DataFrame(
+            [
+                {
+                    "Speaker": speaker,
+                    "Start": fmt_time(start_ms / 1000),
+                    "End": fmt_time(end_ms / 1000),
+                    "Text": text,
+                    "Confidence": confidence,
+                }
+                for speaker, start_ms, end_ms, text, confidence in rows
+            ]
+        ),
+        use_container_width=True,
+    )
+
+
 def main():
     st.title("🎥 AI Face + Active Speaker Recognition")
 
@@ -771,6 +836,7 @@ def main():
             "🎬 Video",
             "👤 Face Database",
             "🔊 Audio Logs",
+            "📝 Transcripts",
         ]
     )
 
@@ -785,6 +851,9 @@ def main():
 
     with tabs[3]:
         render_audio_logs()
+
+    with tabs[4]:
+        render_transcripts()
 
 
 if __name__ == "__main__":

@@ -35,6 +35,17 @@ for directory in (
 
 
 # ============================================================
+# Face backend selection
+# ============================================================
+
+# Choose the preferred backend for detection and embedding extraction.
+# Supported values: "deepface", "uniface"
+# Keep DeepFace as the default because it is the verified working runtime in this project.
+FACE_BACKEND = "uniface"
+FACE_BACKEND_FALLBACK = "uniface"
+
+
+# ============================================================
 # Face embedding
 # ============================================================
 
@@ -117,6 +128,9 @@ TILED_DETECTION_INTERVAL = 5
 
 # IoU threshold for de-duplicating overlapping tile detections.
 NMS_IOU_THRESHOLD = 0.4
+
+
+# ============================================================
 # Small-face recognition enhancement
 # ============================================================
 
@@ -133,26 +147,6 @@ FACE_UPSCALE_FACTOR = 2.0
 
 # Target minimum crop dimension for ArcFace input.
 FACE_UPSCALE_TARGET_SIZE = 112
-
-
-# ============================================================
-# Long-range tiled detection (video_processor.py only)
-# ============================================================
-
-# Tile grid used to split a frame: (columns, rows).
-TILE_GRID = (3, 2)
-
-# Fractional overlap between adjacent tiles.
-TILE_OVERLAP = 0.2
-
-# Upscale factor applied to each tile before detection.
-TILE_UPSCALE = 2.0
-
-# Run tiled detection every N frames and rely on tracker continuity between.
-TILED_DETECTION_INTERVAL = 5
-
-# IoU threshold for de-duplicating overlapping tile detections.
-NMS_IOU_THRESHOLD = 0.4
 
 
 # ============================================================
@@ -214,5 +208,13 @@ OUTPUT_FPS_FALLBACK = 30.0
 # Optional transcription
 # ============================================================
 
-ENABLE_TRANSCRIPTION = False
+ENABLE_TRANSCRIPTION = True
 WHISPER_MODEL = "small"
+
+TRANSCRIPTION_CLEANUP_LEVEL = "basic"
+TRANSCRIPTS_DIR = BASE_DIR / "transcripts"
+TRANSCRIPTS_DIR.mkdir(parents=True, exist_ok=True)
+
+# Minimum fraction of a speech segment covered by one face track before
+# assigning that face as the speaker.
+SPEAKER_FACE_OVERLAP_THRESHOLD = 0.8

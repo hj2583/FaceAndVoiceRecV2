@@ -14,5 +14,9 @@ logs/*
 !initialVideo/.gitkeep
 !trackedVideo/.gitkeep
 !logs/.gitkeep
-
+.venv/
+3.12venv/
+.vscode/
+docs/
 .worktrees/
+.pytest_cache/

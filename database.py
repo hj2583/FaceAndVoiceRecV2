@@ -93,6 +93,38 @@ def init_db():
             )
         """)
 
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS meetings (
+                meeting_id INTEGER PRIMARY KEY AUTOINCREMENT,
+                video_path TEXT NOT NULL UNIQUE,
+                created_at TEXT NOT NULL,
+                processed_at TEXT,
+                transcription_status TEXT NOT NULL DEFAULT 'pending',
+                error_log TEXT
+            )
+        """)
+
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS transcription_segments (
+                segment_id INTEGER PRIMARY KEY AUTOINCREMENT,
+                meeting_id INTEGER NOT NULL,
+                speaker_label TEXT NOT NULL,
+                person_id INTEGER,
+                start_ms INTEGER NOT NULL,
+                end_ms INTEGER NOT NULL,
+                text TEXT NOT NULL,
+                confidence REAL,
+                created_at TEXT NOT NULL,
+                FOREIGN KEY(meeting_id) REFERENCES meetings(meeting_id),
+                FOREIGN KEY(person_id) REFERENCES persons(person_id)
+            )
+        """)
+
+        conn.execute("""
+            CREATE INDEX IF NOT EXISTS idx_transcription_meeting
+            ON transcription_segments(meeting_id)
+        """)
+
         conn.commit()
 
 
