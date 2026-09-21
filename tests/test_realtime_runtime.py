@@ -76,3 +76,15 @@ def test_validation_errors():
         DetectionScheduler(0)
     with pytest.raises(ValueError):
         RollingFps(0)
+
+
+def test_rolling_fps_small_duration_guard():
+    # regression test: when timestamps differ by a tiny positive epsilon,
+    # RollingFps.tick should not return an absurdly large value but should
+    # instead guard and return 0.0
+    r = RollingFps(1.0)
+    r.tick(0.0)
+    # next timestamp is a tiny epsilon away
+    tiny = 1e-9
+    v = r.tick(tiny)
+    assert v == 0.0

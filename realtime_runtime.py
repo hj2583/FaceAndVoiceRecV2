@@ -4,6 +4,8 @@ from typing import Callable, Deque, List, Any
 
 logger = logging.getLogger(__name__)
 
+# small epsilon to avoid absurd FPS values when duration is tiny but > 0
+_DURATION_EPSILON = 1e-6
 
 class DetectionScheduler:
     def __init__(self, interval: int):
@@ -45,7 +47,11 @@ class RollingFps:
             return 0.0
 
         duration = self._q[-1] - self._q[0]
-        if duration == 0:
+        # guard against zero or extremely small durations which would
+        # produce an absurdly large FPS value due to floating point
+        # and input noise. Use a small epsilon and return 0.0 in those
+        # edge cases to preserve scheduling semantics.
+        if duration == 0 or duration < _DURATION_EPSILON:
             return 0.0
 
         return (count - 1) / duration
