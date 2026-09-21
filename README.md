@@ -72,6 +72,12 @@ streamlit run app.py
 
 ```
 
+## Realtime Mode Behavior
+
+Realtime mode uses lightweight OpenCV face detection to keep the native camera window responsive. Uploaded-video mode retains the heavier long-range detector. The window displays rolling FPS; Q or Escape stops it. If microphone initialization fails, face detection continues with `MIC: UNAVAILABLE` and active-speaker estimation is disabled.
+
+If realtime startup fails immediately, Streamlit shows an actionable error message. Detailed child-process output is written to `logs/realtime-*.log` for troubleshooting.
+
 ---
 
 ## 4. First-Time Face Registration Workflow
