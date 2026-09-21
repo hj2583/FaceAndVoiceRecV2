@@ -8,6 +8,16 @@ from pathlib import Path
 from PIL import Image
 
 import numpy as np
+
+# NumPy 1.26 removes some legacy aliases used by older third-party code.
+# Keep a compatibility layer in place before importing pandas/streamlit.
+if not hasattr(np, "long"):
+    np.long = np.int_
+if not hasattr(np, "float"):
+    np.float = float
+if not hasattr(np, "complex"):
+    np.complex = complex
+
 import pandas as pd
 import streamlit as st
 
@@ -516,8 +526,11 @@ def render_database():
                             try:
 
                                 emb = np.load(
-                                    sample["embedding_path"]
+                                    sample["embedding_path"],
+                                    allow_pickle=True,
                                 )
+                                if emb.dtype == object:
+                                    emb = np.asarray(emb.tolist(), dtype=np.float32)
 
                                 if emb is None:
                                     continue
@@ -556,8 +569,11 @@ def render_database():
                                 try:
 
                                     emb = np.load(
-                                        embedding_path
+                                        embedding_path,
+                                        allow_pickle=True,
                                     )
+                                    if emb.dtype == object:
+                                        emb = np.asarray(emb.tolist(), dtype=np.float32)
 
                                     from face_core import (
                                         save_embedding_for_person,
@@ -665,8 +681,11 @@ def render_database():
                             try:
 
                                 emb = np.load(
-                                    sample["embedding_path"]
+                                    sample["embedding_path"],
+                                    allow_pickle=True,
                                 )
+                                if emb.dtype == object:
+                                    emb = np.asarray(emb.tolist(), dtype=np.float32)
 
                                 save_embedding_for_person(
                                     new_name,
@@ -696,8 +715,11 @@ def render_database():
                             ):
 
                                 emb = np.load(
-                                    embedding_path
+                                    embedding_path,
+                                    allow_pickle=True,
                                 )
+                                if emb.dtype == object:
+                                    emb = np.asarray(emb.tolist(), dtype=np.float32)
 
                                 save_embedding_for_person(
                                     new_name,

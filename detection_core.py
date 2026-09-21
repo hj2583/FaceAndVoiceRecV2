@@ -11,6 +11,16 @@ from typing import List, Tuple
 import cv2
 import numpy as np
 
+try:
+    from deepface import DeepFace
+except Exception:  # pragma: no cover - runtime dependency may be absent
+    class _MissingDeepFace:
+        @staticmethod
+        def extract_faces(*args, **kwargs):
+            raise RuntimeError("DeepFace is not installed")
+
+    DeepFace = _MissingDeepFace()
+
 
 logger = logging.getLogger(__name__)
 
@@ -177,7 +187,8 @@ def _detect_faces_retinaface(tile: np.ndarray) -> List[Detection]:
     Falls back to OpenCV cascade if RetinaFace fails.
     """
     try:
-        from deepface import DeepFace
+        if DeepFace is None:
+            raise RuntimeError("DeepFace is not installed")
 
         faces = DeepFace.extract_faces(
             img_path=tile,
@@ -220,6 +231,7 @@ def detect_faces_tiled(
 
     try:
         full_frame_detections = _detect_faces_retinaface(frame)
+        full_frame_detections = [d for d in full_frame_detections if d[4] >= min_confidence]
         all_detections.extend(
             remap_tile_detections(
                 full_frame_detections,

@@ -29,3 +29,9 @@ def test_min_recognition_face_size_lowered_for_long_range():
 
 def test_face_upscale_target_size_matches_arcface_input():
     assert config.FACE_UPSCALE_TARGET_SIZE == 112
+
+
+def test_face_backend_defaults_prefer_uniface_with_deepface_fallback():
+    assert config.FACE_BACKEND == "uniface"
+    assert config.FACE_BACKEND_FALLBACK == "deepface"
+    assert config.FACE_BACKEND_STRICT_COMPATIBILITY is True

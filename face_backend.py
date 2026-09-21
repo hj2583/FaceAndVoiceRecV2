@@ -12,8 +12,10 @@ logger = logging.getLogger(__name__)
 
 def _normalize(vector):
     vector = np.asarray(vector, dtype=np.float32).reshape(-1)
+    if vector.size == 0 or not np.all(np.isfinite(vector)):
+        return None
     norm = np.linalg.norm(vector)
-    if norm <= 1e-8:
+    if not np.isfinite(norm) or norm <= 1e-8:
         return None
     return (vector / norm).astype(np.float32)
 
@@ -134,10 +136,10 @@ class UniFaceBackend(BaseFaceBackend):
             return None
 
         try:
-            detected = self._impl.analyze(face_crop)
-            if not detected:
-                return None
-            embedding = np.asarray(detected[0].embedding, dtype=np.float32).reshape(-1)
+            embedding = np.asarray(
+                self._impl.recognizer.get_embedding(face_crop),
+                dtype=np.float32,
+            ).reshape(-1)
             normalized = _normalize(embedding)
             if normalized is None:
                 return None

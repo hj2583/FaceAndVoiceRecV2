@@ -40,9 +40,10 @@ for directory in (
 
 # Choose the preferred backend for detection and embedding extraction.
 # Supported values: "deepface", "uniface"
-# Keep DeepFace as the default because it is the verified working runtime in this project.
+# For a UniFace test run, prefer UniFace and keep DeepFace as the fallback.
 FACE_BACKEND = "uniface"
-FACE_BACKEND_FALLBACK = "uniface"
+FACE_BACKEND_FALLBACK = "deepface"
+FACE_BACKEND_STRICT_COMPATIBILITY = True
 
 
 # ============================================================

@@ -19,6 +19,7 @@ from database import (
     add_embedding,
     create_person,
     create_unknown,
+    get_conn,
     list_embeddings,
     list_unknown_samples_with_embeddings,
 )
@@ -35,10 +36,22 @@ _MODEL_READY = False
 
 def _normalize(vector):
     vector = np.asarray(vector, dtype=np.float32).reshape(-1)
+    if vector.size == 0 or not np.all(np.isfinite(vector)):
+        return None
     norm = np.linalg.norm(vector)
-    if norm <= 1e-8:
+    if not np.isfinite(norm) or norm <= 1e-8:
         return None
     return (vector / norm).astype(np.float32)
+
+
+def _load_embedding_file(path):
+    """Load an embedding saved by older code paths or by UniFace object arrays."""
+    data = np.load(path, allow_pickle=True)
+
+    if isinstance(data, np.ndarray) and data.dtype == object:
+        data = np.asarray(data.tolist(), dtype=np.float32)
+
+    return np.asarray(data, dtype=np.float32).reshape(-1)
 
 def face_quality(face_crop):
     """
@@ -157,7 +170,7 @@ class FaceIndex:
         with self.lock:
             if INDEX_PATH.exists():
                 try:
-                    data = np.load(INDEX_PATH, allow_pickle=False)
+                    data = np.load(INDEX_PATH, allow_pickle=True)
                     ids = np.asarray(data["ids"], dtype=np.int64)
                     embeddings = np.asarray(data["embeddings"], dtype=np.float32)
 
@@ -186,7 +199,7 @@ class FaceIndex:
                 continue
 
             try:
-                emb = np.load(path).astype(np.float32).reshape(-1)
+                emb = _load_embedding_file(path)
                 emb = _normalize(emb)
                 if emb is None or len(emb) != EMBEDDING_DIM:
                     continue
@@ -242,16 +255,40 @@ class FaceIndex:
             best_idx = int(order[0])
             best_score = float(similarities[best_idx])
 
-            second_score = (
-                float(similarities[order[1]])
-                if len(order) > 1
-                else -1.0
+            embedding_ids = [int(self.ids[index]) for index in order]
+            placeholders = ",".join("?" for _ in embedding_ids)
+            with get_conn() as conn:
+                person_rows = conn.execute(
+                    "SELECT embedding_id, person_id "
+                    "FROM face_embeddings "
+                    f"WHERE embedding_id IN ({placeholders})",
+                    embedding_ids,
+                ).fetchall()
+
+            person_by_embedding = {
+                int(embedding_id): int(person_id)
+                for embedding_id, person_id in person_rows
+            }
+            best_person_id = person_by_embedding.get(
+                int(self.ids[best_idx]),
+                int(self.ids[best_idx]),
             )
+
+            second_score = -1.0
+            for candidate_idx in order[1:]:
+                candidate_id = int(self.ids[candidate_idx])
+                candidate_person_id = person_by_embedding.get(
+                    candidate_id,
+                    candidate_id,
+                )
+                if candidate_person_id != best_person_id:
+                    second_score = float(similarities[candidate_idx])
+                    break
 
             if best_score < threshold:
                 return None
 
-            if len(order) > 1 and (best_score - second_score) < AMBIGUITY_MARGIN:
+            if second_score >= 0.0 and (best_score - second_score) < AMBIGUITY_MARGIN:
                 return None
 
             return {
@@ -268,6 +305,10 @@ def save_embedding_for_person(person_name, embedding, image_path=None, quality=0
     """
     from config import KNOWN_FACES_DIR
 
+    normalized_embedding = _normalize(embedding)
+    if normalized_embedding is None or len(normalized_embedding) != EMBEDDING_DIM:
+        raise ValueError("Invalid face embedding")
+
     person_id = create_person(person_name)
 
     embedding_dir = KNOWN_FACES_DIR / str(person_id)
@@ -275,7 +316,7 @@ def save_embedding_for_person(person_name, embedding, image_path=None, quality=0
 
     embedding_id_placeholder = "new"
     path = embedding_dir / f"{embedding_id_placeholder}.npy"
-    np.save(path, _normalize(embedding))
+    np.save(path, normalized_embedding)
 
     embedding_id = add_embedding(
         person_id=person_id,
@@ -332,13 +373,8 @@ def find_matching_unknown(query_embedding):
             continue
 
         try:
-            stored_embedding = np.load(
-                path
-            ).astype(np.float32)
-
-            stored_embedding = _normalize(
-                stored_embedding
-            )
+            stored_embedding = _load_embedding_file(path)
+            stored_embedding = _normalize(stored_embedding)
 
             if stored_embedding is None:
                 continue
