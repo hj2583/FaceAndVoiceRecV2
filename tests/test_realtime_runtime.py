@@ -31,6 +31,7 @@ def test_interval_reuses_detections():
 
     out4 = sched.update(4, 4, det)
     assert out4 == det.detections
+    assert len(det.calls) == 2
 
 
 def test_detector_exception_clears_state(tmp_path, caplog):

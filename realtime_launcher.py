@@ -45,20 +45,36 @@ def launch_realtime(
     if os.name == "nt":
         popen_kwargs["creationflags"] = subprocess.CREATE_NEW_CONSOLE
 
+    exit_code: int | None = None
+
     try:
         log_dir.mkdir(parents=True, exist_ok=True)
         with log_path.open("wb") as output:
             popen_kwargs["stdout"] = output
             process = popen(command, **popen_kwargs)
             try:
-                process.wait(timeout=startup_timeout)
+                exit_code = process.wait(timeout=startup_timeout)
             except subprocess.TimeoutExpired:
                 return LaunchResult(True, process.pid, None, log_path)
     except OSError as exc:
         fallback_log_path = log_path if log_path is not None else Path(log_dir) / "realtime-launch.log"
         return LaunchResult(False, None, str(exc), fallback_log_path)
 
-    error = _read_tail(log_path)
+    try:
+        error = _read_tail(log_path)
+    except OSError as exc:
+        exit_label = f"exit code {exit_code}" if exit_code is not None else "unknown exit code"
+        error = (
+            "Realtime process exited during startup "
+            f"({exit_label}), and launcher could not read startup log tail: {exc}. "
+            f"Check log file at {log_path}."
+        )
+        return LaunchResult(False, process.pid, error, log_path)
+
     if not error:
-        error = "Realtime process exited during startup. See log for details."
+        exit_label = f"exit code {exit_code}" if exit_code is not None else "unknown exit code"
+        error = (
+            "Realtime process exited during startup "
+            f"({exit_label}). Log was empty. Check log file at {log_path}."
+        )
     return LaunchResult(False, process.pid, error, log_path)

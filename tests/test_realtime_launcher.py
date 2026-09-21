@@ -41,6 +41,51 @@ def test_launch_realtime_returns_tail_for_immediate_failure(tmp_path):
     assert len(result.error.encode("utf-8")) <= 4096
 
 
+def test_launch_realtime_includes_exit_code_when_tail_is_empty(tmp_path):
+    process = Mock(pid=2222)
+    process.wait.return_value = 3
+
+    def fake_popen(*args, **kwargs):
+        kwargs["stdout"].flush()
+        return process
+
+    result = launch_realtime(
+        Path("realtime.py"), 0, tmp_path, tmp_path, popen=fake_popen
+    )
+
+    assert result.started is False
+    assert result.pid == 2222
+    assert "exit code 3" in result.error
+    assert "Log was empty" in result.error
+
+
+def test_launch_realtime_returns_actionable_error_when_tail_unreadable(tmp_path, monkeypatch):
+    process = Mock(pid=3333)
+    process.wait.return_value = 5
+
+    def fake_popen(*args, **kwargs):
+        kwargs["stdout"].write(b"startup output")
+        kwargs["stdout"].flush()
+        return process
+
+    import realtime_launcher
+    monkeypatch.setattr(
+        realtime_launcher,
+        "_read_tail",
+        Mock(side_effect=OSError("tail read denied")),
+    )
+
+    result = launch_realtime(
+        Path("realtime.py"), 0, tmp_path, tmp_path, popen=fake_popen
+    )
+
+    assert result.started is False
+    assert result.pid == 3333
+    assert "exit code 5" in result.error
+    assert "could not read startup log tail" in result.error
+    assert "tail read denied" in result.error
+
+
 def test_launch_realtime_returns_error_when_popen_raises_oserror(tmp_path):
     def failing_popen(*args, **kwargs):
         raise OSError("spawn failed")
