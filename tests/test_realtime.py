@@ -28,20 +28,6 @@ def test_start_realtime_vad_contains_startup_failure():
     assert available is False
 
 
-def test_audio_state_switches_to_unavailable_when_worker_dies():
-    class _DeadVad:
-        def __init__(self):
-            self.available = False
-
-    vad = _DeadVad()
-    audio_available = True
-
-    if vad is not None and audio_available and not getattr(vad, "available", False):
-        audio_available = False
-
-    assert audio_available is False
-
-
 def test_run_detects_vad_becoming_unavailable(monkeypatch):
     import realtime
 
@@ -149,38 +135,6 @@ def test_run_detects_vad_becoming_unavailable(monkeypatch):
     realtime.run(camera=0, width=160, height=120)
 
     assert "MIC: UNAVAILABLE" in mic_lines
-
-
-def test_cleanup_continues_when_vad_stop_raises():
-    cleanup_steps = []
-    vad = Mock()
-    vad.stop.side_effect = RuntimeError("stop failed")
-    cap = Mock()
-    mesh = Mock()
-
-    try:
-        try:
-            vad.stop()
-        except Exception:
-            cleanup_steps.append("vad_error")
-
-        try:
-            cap.release()
-            cleanup_steps.append("cap_released")
-        except Exception:
-            cleanup_steps.append("cap_error")
-
-        try:
-            mesh.close()
-            cleanup_steps.append("mesh_closed")
-        except Exception:
-            cleanup_steps.append("mesh_error")
-    finally:
-        pass
-
-    assert "vad_error" in cleanup_steps
-    assert "cap_released" in cleanup_steps
-    assert "mesh_closed" in cleanup_steps
 
 
 def test_run_continues_cleanup_when_vad_stop_raises(monkeypatch):

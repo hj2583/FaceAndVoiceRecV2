@@ -131,15 +131,22 @@ class RealtimeVAD:
 
         # Startup handshake for async worker.
         self.startup_event = threading.Event()
+        self.startup_succeeded = False
         self.available = False
         self.startup_error = None
 
     def start(self, startup_timeout=2.0):
         check_audio_dependencies()
 
+        if self.thread is not None and self.thread.is_alive():
+            raise RuntimeError(
+                "Realtime VAD worker is already running"
+            )
+
         # Reset state in case the same object is started again.
         self.stop_event.clear()
         self.startup_event.clear()
+        self.startup_succeeded = False
         self.available = False
         self.startup_error = None
         self.speaking = False
@@ -157,7 +164,7 @@ class RealtimeVAD:
             self.stop()
             raise RuntimeError("Microphone startup timed out")
 
-        if not self.available:
+        if not self.startup_succeeded:
             message = (
                 str(self.startup_error)
                 if self.startup_error
@@ -253,6 +260,7 @@ class RealtimeVAD:
             )
 
             self.available = True
+            self.startup_succeeded = True
             self.startup_event.set()
 
             while not self.stop_event.is_set():
@@ -274,7 +282,8 @@ class RealtimeVAD:
                 self._emit(speech)
 
         except Exception as error:
-            self.startup_error = error
+            if not self.startup_succeeded:
+                self.startup_error = error
             logging.exception(
                 "Realtime microphone VAD failed"
             )
@@ -285,7 +294,8 @@ class RealtimeVAD:
             if self.speaking:
                 self.speaking = False
                 self._emit(False)
-            self.startup_event.set()
+            if not self.startup_event.is_set():
+                self.startup_event.set()
 
             if stream:
 
