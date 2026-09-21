@@ -1,8 +1,5 @@
 import json
-import os
 import sqlite3
-import subprocess
-import sys
 from pathlib import Path
 
 from PIL import Image
@@ -38,6 +35,7 @@ from database import (
     resolve_unknown,
 )
 from face_core import FaceIndex
+from realtime_launcher import launch_realtime
 from video_processor import process_video_pipeline
 from transcription_core import process_meeting_transcription
 
@@ -80,22 +78,21 @@ def render_realtime():
     )
 
     if st.button("▶ Start Realtime Recognition", type="primary"):
-        script = Path(__file__).parent / "realtime.py"
+        with st.spinner("Starting realtime recognition..."):
+            result = launch_realtime(
+                script=Path(__file__).parent / "realtime.py",
+                camera=int(camera),
+                cwd=Path(__file__).parent,
+                log_dir=LOG_DIR,
+            )
 
-        creationflags = 0
-        if os.name == "nt":
-            creationflags = subprocess.CREATE_NEW_CONSOLE
-
-        subprocess.Popen(
-            [sys.executable, str(script), "--camera", str(camera)],
-            cwd=str(Path(__file__).parent),
-            creationflags=creationflags,
-        )
-
-        st.success(
-            "Realtime recognition started. A camera window should appear. "
-            "Press Q/ESC in that window to stop."
-        )
+        if result.started:
+            st.success(
+                "Realtime recognition started. A camera window should appear. "
+                "Press Q/ESC in that window to stop."
+            )
+        else:
+            st.error(f"Realtime recognition failed to start:\n\n{result.error}")
 
     st.markdown("---")
     st.subheader("Recent Audio Logs")
