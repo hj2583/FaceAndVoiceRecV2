@@ -39,3 +39,10 @@ def test_face_backend_defaults_prefer_uniface_with_deepface_fallback():
     assert config.FACE_BACKEND == "uniface"
     assert config.FACE_BACKEND_FALLBACK == "deepface"
     assert config.FACE_BACKEND_STRICT_COMPATIBILITY is True
+
+
+def test_realtime_detection_defaults_prioritize_responsiveness():
+    assert config.REALTIME_DETECTION_INTERVAL == 3
+    assert config.REALTIME_HAAR_SCALE_FACTOR > 1.0
+    assert config.REALTIME_HAAR_MIN_NEIGHBORS >= 1
+    assert config.REALTIME_FPS_WINDOW_SECONDS == 1.0
