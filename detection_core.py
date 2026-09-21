@@ -10,6 +10,7 @@ import threading
 from typing import List, Tuple
 
 import cv2
+import os
 import numpy as np
 
 
@@ -28,7 +29,11 @@ def _get_opencv_cascade():
     if _OPENCV_CASCADE is None:
         with _OPENCV_CASCADE_LOCK:
             if _OPENCV_CASCADE is None:
-                cascade_path = cv2.data.haarcascades + 'haarcascade_frontalface_default.xml'
+                # Build the cascade path portably so tests can override cv2.data.haarcascades
+                cascade_filename = 'haarcascade_frontalface_default.xml'
+                base = getattr(cv2, "data", None)
+                haar_dir = getattr(base, "haarcascades", "") if base is not None else ""
+                cascade_path = os.path.join(haar_dir, cascade_filename)
                 _OPENCV_CASCADE = cv2.CascadeClassifier(cascade_path)
     return _OPENCV_CASCADE
 

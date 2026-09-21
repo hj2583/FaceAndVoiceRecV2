@@ -13,6 +13,19 @@ Test summary:
 - Command: `python -m pytest tests/test_config.py tests/test_detection_core.py -q -v`
 - Result: 25 passed in 0.16s
 
+Fix details performed:
+
+- Tests: Replaced Mock-based module injection of `deepface` with `types.ModuleType` module-like doubles in [tests/test_detection_core.py](tests/test_detection_core.py#L96-L114) and [tests/test_detection_core.py](tests/test_detection_core.py#L129-L148) to more accurately simulate import-time module behavior. This prevents importing the real `deepface` package while allowing `DeepFace.extract_faces` to be called normally.
+- Code: Made Haar cascade path construction portable in `detection_core.py` by using `os.path.join` and safe attribute access (`getattr(cv2, "data", None)` / `getattr(..., "haarcascades", "")`) so tests can override `cv2.data.haarcascades` when monkeypatching `cv2`. Change location: [detection_core.py](detection_core.py#L24-L32).
+
+Test run (exact):
+
+```
+python -m pytest tests/test_config.py tests/test_detection_core.py -q -q
+
+25 passed
+```
+
 Self-review:
 - Implemented `REALTIME_*` configuration constants in `config.py` as requested.
 - Added a public `detect_faces_opencv()` that uses a cached OpenCV `CascadeClassifier` with a lock.

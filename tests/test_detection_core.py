@@ -99,13 +99,20 @@ def test_detect_faces_filters_low_confidence_detections():
         }
     ]
     
-    # Patch DeepFace.extract_faces to the current backend boundary used by _detect_faces_retinaface
-    # Inject a fake deepface module to avoid importing the real dependency
-    fake_deepface = Mock()
-    fake_deepface.DeepFace = Mock()
-    fake_deepface.DeepFace.extract_faces = Mock(return_value=fake_response)
+    # Inject a fake deepface module using types.ModuleType to avoid importing
+    # the real dependency. This more closely models the module import boundary.
+    import types
     import sys
-    with patch.dict(sys.modules, {"deepface": fake_deepface}):
+
+    module = types.ModuleType("deepface")
+
+    class DeepFace:
+        @staticmethod
+        def extract_faces(*_args, **_kwargs):
+            return fake_response
+
+    module.DeepFace = DeepFace
+    with patch.dict(sys.modules, {"deepface": module}):
         detections = _detect_faces_retinaface(tile)
     
     # Only the high-confidence detection should be returned
@@ -128,11 +135,18 @@ def test_detect_faces_falls_back_to_opencv_when_retinaface_fails():
 
     with patch("detection_core._get_opencv_cascade", return_value=cascade):
         # Inject a fake deepface module that raises to trigger fallback
-        fake_deepface = Mock()
-        fake_deepface.DeepFace = Mock()
-        fake_deepface.DeepFace.extract_faces = Mock(side_effect=RuntimeError("TensorFlow error"))
+        import types
         import sys
-        with patch.dict(sys.modules, {"deepface": fake_deepface}):
+
+        module = types.ModuleType("deepface")
+
+        class DeepFace:
+            @staticmethod
+            def extract_faces(*_args, **_kwargs):
+                raise RuntimeError("TensorFlow error")
+
+        module.DeepFace = DeepFace
+        with patch.dict(sys.modules, {"deepface": module}):
             detections = _detect_faces_retinaface(tile)
     
     # Fallback should return OpenCV results (might be empty on blank test image)
