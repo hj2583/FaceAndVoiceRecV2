@@ -206,6 +206,13 @@ SPEECH_RELEASE_FRAMES = 4
 OUTPUT_FPS_FALLBACK = 30.0
 
 
+# Realtime mode favors display responsiveness over long-range detection.
+REALTIME_DETECTION_INTERVAL = 3
+REALTIME_HAAR_SCALE_FACTOR = 1.1
+REALTIME_HAAR_MIN_NEIGHBORS = 5
+REALTIME_FPS_WINDOW_SECONDS = 1.0
+
+
 # ============================================================
 # Optional transcription
 # ============================================================

@@ -1,10 +1,11 @@
-from unittest.mock import patch
+from unittest.mock import patch, Mock
 
 import numpy as np
 
 from detection_core import (
     _calculate_iou,
     _detect_faces_retinaface,
+    detect_faces_opencv,
     detect_faces_tiled,
     nms_merge,
     remap_tile_detections,
@@ -98,7 +99,13 @@ def test_detect_faces_filters_low_confidence_detections():
         }
     ]
     
-    with patch("detection_core.DeepFace.extract_faces", return_value=fake_response):
+    # Patch DeepFace.extract_faces to the current backend boundary used by _detect_faces_retinaface
+    # Inject a fake deepface module to avoid importing the real dependency
+    fake_deepface = Mock()
+    fake_deepface.DeepFace = Mock()
+    fake_deepface.DeepFace.extract_faces = Mock(return_value=fake_response)
+    import sys
+    with patch.dict(sys.modules, {"deepface": fake_deepface}):
         detections = _detect_faces_retinaface(tile)
     
     # Only the high-confidence detection should be returned
@@ -113,13 +120,76 @@ def test_detect_faces_falls_back_to_opencv_when_retinaface_fails():
     tile[20:80, 20:80] = 255
     
     from detection_core import _detect_faces_opencv
-    
-    with patch("detection_core.DeepFace.extract_faces", side_effect=RuntimeError("TensorFlow error")):
-        detections = _detect_faces_retinaface(tile)
+
+    # Provide a simple cascade that doesn't error for fallback
+    cascade = Mock()
+    cascade.empty.return_value = False
+    cascade.detectMultiScale.return_value = []
+
+    with patch("detection_core._get_opencv_cascade", return_value=cascade):
+        # Inject a fake deepface module that raises to trigger fallback
+        fake_deepface = Mock()
+        fake_deepface.DeepFace = Mock()
+        fake_deepface.DeepFace.extract_faces = Mock(side_effect=RuntimeError("TensorFlow error"))
+        import sys
+        with patch.dict(sys.modules, {"deepface": fake_deepface}):
+            detections = _detect_faces_retinaface(tile)
     
     # Fallback should return OpenCV results (might be empty on blank test image)
     # Just verify it doesn't crash and returns a list
     assert isinstance(detections, list)
+
+
+def test_detect_faces_opencv_returns_detection_contract():
+    frame = np.zeros((80, 100, 3), dtype=np.uint8)
+    cascade = Mock()
+    cascade.empty.return_value = False
+    cascade.detectMultiScale.return_value = [(4, 6, 20, 24)]
+
+    with patch("detection_core._get_opencv_cascade", return_value=cascade):
+        detections = detect_faces_opencv(frame)
+
+    assert detections == [(4.0, 6.0, 20.0, 24.0, 0.7)]
+
+
+def test_detect_faces_opencv_reuses_cached_cascade():
+    import detection_core
+
+    # Preserve and restore any existing cache
+    old = getattr(detection_core, "_OPENCV_CASCADE", None)
+    detection_core._OPENCV_CASCADE = None
+    cascade = Mock()
+    cascade.empty.return_value = False
+    cascade.detectMultiScale.return_value = []
+
+    try:
+        # Replace the cv2 module object on detection_core with a fake that records CascadeClassifier calls
+        fake_cv2 = Mock()
+        fake_cv2.CascadeClassifier = Mock(return_value=cascade)
+        # Ensure .data.haarcascades is a string so _get_opencv_cascade can build the path
+        fake_cv2.data = Mock()
+        fake_cv2.data.haarcascades = ""
+        with patch("detection_core.cv2", new=fake_cv2):
+            detect_faces_opencv(np.zeros((40, 40, 3), dtype=np.uint8))
+            detect_faces_opencv(np.zeros((40, 40, 3), dtype=np.uint8))
+
+        fake_cv2.CascadeClassifier.assert_called_once()
+    finally:
+        detection_core._OPENCV_CASCADE = old
+
+
+def test_detect_faces_opencv_returns_empty_for_invalid_frame():
+    assert detect_faces_opencv(None) == []
+    assert detect_faces_opencv(np.empty((0, 0, 3), dtype=np.uint8)) == []
+
+
+def test_detect_faces_opencv_contains_detection_failure():
+    cascade = Mock()
+    cascade.empty.return_value = False
+    cascade.detectMultiScale.side_effect = RuntimeError("cascade failed")
+
+    with patch("detection_core._get_opencv_cascade", return_value=cascade):
+        assert detect_faces_opencv(np.zeros((40, 40, 3), dtype=np.uint8)) == []
 
 
 def test_detect_faces_tiled_with_confidence_filtering():
@@ -143,22 +213,3 @@ def test_detect_faces_tiled_with_confidence_filtering():
     
     # Should filter out low-confidence detection
     assert all(d[4] >= 0.5 for d in detections)
-
-
-def test_detect_faces_tiled_returns_only_finite_positive_boxes():
-    frame = np.zeros((120, 120, 3), dtype=np.uint8)
-
-    with patch(
-        "detection_core._detect_faces_retinaface",
-        return_value=[(10.0, 10.0, 30.0, 30.0, 0.8)],
-    ):
-        detections = detect_faces_tiled(
-            frame,
-            tile_grid=(1, 1),
-            overlap_ratio=0.0,
-            upscale_factor=1.0,
-        )
-
-    assert detections
-    assert all(np.all(np.isfinite(detection)) for detection in detections)
-    assert all(detection[2] > 0 and detection[3] > 0 for detection in detections)

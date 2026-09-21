@@ -6,26 +6,31 @@ in one tile are isolated from the remaining tiles.
 """
 
 import logging
-import time
+import threading
 from typing import List, Tuple
 
 import cv2
 import numpy as np
 
-try:
-    from deepface import DeepFace
-except Exception:  # pragma: no cover - runtime dependency may be absent
-    class _MissingDeepFace:
-        @staticmethod
-        def extract_faces(*args, **kwargs):
-            raise RuntimeError("DeepFace is not installed")
-
-    DeepFace = _MissingDeepFace()
-
 
 logger = logging.getLogger(__name__)
 
 Detection = Tuple[float, float, float, float, float]
+
+
+# Lightweight cached OpenCV cascade for fallback/realtime detection
+_OPENCV_CASCADE = None
+_OPENCV_CASCADE_LOCK = threading.Lock()
+
+
+def _get_opencv_cascade():
+    global _OPENCV_CASCADE
+    if _OPENCV_CASCADE is None:
+        with _OPENCV_CASCADE_LOCK:
+            if _OPENCV_CASCADE is None:
+                cascade_path = cv2.data.haarcascades + 'haarcascade_frontalface_default.xml'
+                _OPENCV_CASCADE = cv2.CascadeClassifier(cascade_path)
+    return _OPENCV_CASCADE
 
 
 def _starts(length: int, tile_length: int, count: int) -> List[int]:
@@ -160,11 +165,10 @@ def nms_merge(
 def _detect_faces_opencv(tile: np.ndarray) -> List[Detection]:
     """Fallback detector using OpenCV cascade classifier."""
     try:
-        cascade_path = cv2.data.haarcascades + 'haarcascade_frontalface_default.xml'
-        cascade = cv2.CascadeClassifier(cascade_path)
-        if cascade.empty():
+        cascade = _get_opencv_cascade()
+        if cascade is None or cascade.empty():
             return []
-        
+
         gray = cv2.cvtColor(tile, cv2.COLOR_BGR2GRAY)
         faces = cascade.detectMultiScale(
             gray,
@@ -172,7 +176,7 @@ def _detect_faces_opencv(tile: np.ndarray) -> List[Detection]:
             minNeighbors=5,
             minSize=(20, 20),
         )
-        
+
         detections = []
         for x, y, w, h in faces:
             # OpenCV cascade doesn't provide confidence, so use a moderate default
@@ -183,13 +187,48 @@ def _detect_faces_opencv(tile: np.ndarray) -> List[Detection]:
         return []
 
 
+def detect_faces_opencv(
+    frame: np.ndarray,
+    scale_factor: float = 1.1,
+    min_neighbors: int = 5,
+    min_size: tuple[int, int] = (20, 20),
+) -> List[Detection]:
+    """Lightweight public OpenCV-backed detector with caching.
+
+    Returns a list of Detection tuples `(x, y, width, height, confidence)`.
+    """
+    if frame is None or getattr(frame, "size", 0) == 0:
+        return []
+
+    try:
+        cascade = _get_opencv_cascade()
+        if cascade is None or cascade.empty():
+            logger.warning("OpenCV face cascade is unavailable")
+            return []
+
+        gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+        faces = cascade.detectMultiScale(
+            gray,
+            scaleFactor=scale_factor,
+            minNeighbors=min_neighbors,
+            minSize=min_size,
+        )
+
+        detections: List[Detection] = []
+        for x, y, w, h in faces:
+            detections.append((float(x), float(y), float(w), float(h), 0.7))
+        return detections
+    except Exception as error:
+        logger.warning("OpenCV face detection failed: %s", error)
+        return []
+
+
 def _detect_faces_retinaface(tile: np.ndarray) -> List[Detection]:
     """Run DeepFace RetinaFace lazily and return tile-space boxes.
     Falls back to OpenCV cascade if RetinaFace fails.
     """
     try:
-        if DeepFace is None:
-            raise RuntimeError("DeepFace is not installed")
+        from deepface import DeepFace
 
         faces = DeepFace.extract_faces(
             img_path=tile,
@@ -228,11 +267,11 @@ def detect_faces_tiled(
     Includes automatic fallback from RetinaFace to OpenCV if primary detector fails.
     Filters detections by minimum confidence threshold.
     """
-    started_at = time.perf_counter()
     all_detections = []
 
     try:
         full_frame_detections = _detect_faces_retinaface(frame)
+        # Apply confidence filtering to full-frame detections as well
         full_frame_detections = [d for d in full_frame_detections if d[4] >= min_confidence]
         all_detections.extend(
             remap_tile_detections(
@@ -262,13 +301,4 @@ def detect_faces_tiled(
         except Exception as error:
             logger.warning("Skipping failed detection tile at %s: %s", origin, error)
 
-    merged = nms_merge(all_detections, nms_iou_threshold)
-    logger.debug(
-        "Tiled face detection: frame=%sx%s candidates=%d detections=%d elapsed=%.3fs",
-        frame.shape[1],
-        frame.shape[0],
-        len(all_detections),
-        len(merged),
-        time.perf_counter() - started_at,
-    )
-    return merged
+    return nms_merge(all_detections, nms_iou_threshold)
