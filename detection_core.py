@@ -6,6 +6,7 @@ in one tile are isolated from the remaining tiles.
 """
 
 import logging
+import time
 from typing import List, Tuple
 
 import cv2
@@ -227,6 +228,7 @@ def detect_faces_tiled(
     Includes automatic fallback from RetinaFace to OpenCV if primary detector fails.
     Filters detections by minimum confidence threshold.
     """
+    started_at = time.perf_counter()
     all_detections = []
 
     try:
@@ -260,4 +262,13 @@ def detect_faces_tiled(
         except Exception as error:
             logger.warning("Skipping failed detection tile at %s: %s", origin, error)
 
-    return nms_merge(all_detections, nms_iou_threshold)
+    merged = nms_merge(all_detections, nms_iou_threshold)
+    logger.debug(
+        "Tiled face detection: frame=%sx%s candidates=%d detections=%d elapsed=%.3fs",
+        frame.shape[1],
+        frame.shape[0],
+        len(all_detections),
+        len(merged),
+        time.perf_counter() - started_at,
+    )
+    return merged

@@ -27,6 +27,10 @@ def test_min_recognition_face_size_lowered_for_long_range():
     assert config.MIN_RECOGNITION_FACE_SIZE <= 15
 
 
+def test_detection_face_size_is_lower_than_recognition_gate():
+    assert config.MIN_FACE_SIZE < config.MIN_RECOGNITION_FACE_SIZE
+
+
 def test_face_upscale_target_size_matches_arcface_input():
     assert config.FACE_UPSCALE_TARGET_SIZE == 112
 

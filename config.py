@@ -87,9 +87,10 @@ RECOGNITION_INTERVAL = 30
 # Face detection / tracking
 # ============================================================
 
-# Minimum face size allowed into the tracking pipeline
-# a face this small.
-MIN_FACE_SIZE = 25
+# Minimum face size allowed into the tracking pipeline. This is intentionally
+# lower than the recognition gate so distant faces can still be detected and
+# tracked while remaining Unknown when they lack enough detail.
+MIN_FACE_SIZE = 12
 
 # Minimum face size before attempting ArcFace recognition.
 # Lowered to allow best-effort recognition attempts on small/distant

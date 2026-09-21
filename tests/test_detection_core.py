@@ -143,3 +143,22 @@ def test_detect_faces_tiled_with_confidence_filtering():
     
     # Should filter out low-confidence detection
     assert all(d[4] >= 0.5 for d in detections)
+
+
+def test_detect_faces_tiled_returns_only_finite_positive_boxes():
+    frame = np.zeros((120, 120, 3), dtype=np.uint8)
+
+    with patch(
+        "detection_core._detect_faces_retinaface",
+        return_value=[(10.0, 10.0, 30.0, 30.0, 0.8)],
+    ):
+        detections = detect_faces_tiled(
+            frame,
+            tile_grid=(1, 1),
+            overlap_ratio=0.0,
+            upscale_factor=1.0,
+        )
+
+    assert detections
+    assert all(np.all(np.isfinite(detection)) for detection in detections)
+    assert all(detection[2] > 0 and detection[3] > 0 for detection in detections)

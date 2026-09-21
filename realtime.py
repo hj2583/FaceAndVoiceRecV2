@@ -17,9 +17,16 @@ from config import (
 
     MIN_FACE_SIZE,
     MIN_RECOGNITION_FACE_SIZE,
+    LANDMARK_MIN_FACE_SIZE,
 
     FACE_UPSCALE_THRESHOLD,
     FACE_UPSCALE_FACTOR,
+
+    TILE_GRID,
+    TILE_OVERLAP,
+    TILE_UPSCALE,
+    TILED_DETECTION_INTERVAL,
+    NMS_IOU_THRESHOLD,
 
     MAX_FACES,
 
@@ -53,6 +60,8 @@ from video_processor import (
     bbox_from_landmarks,
     lip_open_ratio,
 )
+
+from detection_core import detect_faces_tiled
 
 
 # ============================================================
@@ -320,6 +329,8 @@ def run(
 
     last_recognition_log = {}
 
+    last_tiled_detections = []
+
     try:
 
         while True:
@@ -337,92 +348,61 @@ def run(
 
             timestamp = time.monotonic()
 
-            # =================================================
-            # BGR → RGB
-            # =================================================
+            timestamp_ms = int(frame_no * 1000 / actual_fps)
 
-            rgb = cv2.cvtColor(
-                frame,
-                cv2.COLOR_BGR2RGB,
-            )
-
-            # =================================================
-            # MediaPipe image
-            # =================================================
-
-            mp_image = mp.Image(
-                image_format=(
-                    mp.ImageFormat.SRGB
-                ),
-                data=rgb,
-            )
-
-            timestamp_ms = int(
-                frame_no
-                * 1000
-                / actual_fps
-            )
-
-            result = (
-                mesh.detect_for_video(
-                    mp_image,
-                    timestamp_ms,
+            if (
+                not last_tiled_detections
+                or frame_no % TILED_DETECTION_INTERVAL == 1
+            ):
+                last_tiled_detections = detect_faces_tiled(
+                    frame,
+                    tile_grid=TILE_GRID,
+                    overlap_ratio=TILE_OVERLAP,
+                    upscale_factor=TILE_UPSCALE,
+                    nms_iou_threshold=NMS_IOU_THRESHOLD,
                 )
-            )
 
+            rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
             detections = []
 
-            # =================================================
-            # Face detections
-            # =================================================
-
-            for landmarks in (
-                result.face_landmarks
-            ):
-
-                if not landmarks:
-                    continue
-
-                bbox = bbox_from_landmarks(
-                    landmarks,
-                    frame.shape,
-                )
-
-                x0, y0, x1, y1 = bbox
-
-                face_width = (
-                    x1 - x0
-                )
-
-                face_height = (
-                    y1 - y0
-                )
-
-                # ------------------------------------------------
-                # Detection/tracking minimum.
-                # ------------------------------------------------
+            for x, y, box_width, box_height, _confidence in last_tiled_detections:
+                x0 = max(0, int(x))
+                y0 = max(0, int(y))
+                x1 = min(frame.shape[1], int(x + box_width))
+                y1 = min(frame.shape[0], int(y + box_height))
+                face_width = x1 - x0
+                face_height = y1 - y0
 
                 if (
-                    face_width
-                    < MIN_FACE_SIZE
-                    or
-                    face_height
-                    < MIN_FACE_SIZE
+                    face_width < MIN_FACE_SIZE
+                    or face_height < MIN_FACE_SIZE
                 ):
                     continue
 
-                detections.append(
-                    {
-                        "bbox": bbox,
-
-                        "landmarks": landmarks,
-
-                        "lip_open":
-                            lip_open_ratio(
-                                landmarks
+                landmarks = None
+                lip_open = None
+                if (
+                    face_width >= LANDMARK_MIN_FACE_SIZE
+                    and face_height >= LANDMARK_MIN_FACE_SIZE
+                ):
+                    crop_rgb = rgb[y0:y1, x0:x1]
+                    if crop_rgb.size:
+                        crop_result = mesh.detect_for_video(
+                            mp.Image(
+                                image_format=mp.ImageFormat.SRGB,
+                                data=crop_rgb,
                             ),
-                    }
-                )
+                            timestamp_ms,
+                        )
+                        if crop_result.face_landmarks:
+                            landmarks = crop_result.face_landmarks[0]
+                            lip_open = lip_open_ratio(landmarks)
+
+                detections.append({
+                    "bbox": (x0, y0, x1, y1),
+                    "landmarks": landmarks,
+                    "lip_open": lip_open,
+                })
 
             # =================================================
             # Tracking
