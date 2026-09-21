@@ -18,4 +18,5 @@ logs/*
 3.12venv/
 .vscode/
 .worktrees/
+.superpowers/
 .pytest_cache/
