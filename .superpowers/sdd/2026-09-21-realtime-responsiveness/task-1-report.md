@@ -26,6 +26,14 @@ python -m pytest tests/test_config.py tests/test_detection_core.py -q -q
 25 passed
 ```
 
+Additional runs for regression fix and focused suite:
+
+```
+python -m pytest tests/test_config.py::test_config_exists tests/test_detection_core.py::test_get_opencv_cascade_handles_none_haarcascades -q -q
+
+2 passed
+```
+
 Self-review:
 - Implemented `REALTIME_*` configuration constants in `config.py` as requested.
 - Added a public `detect_faces_opencv()` that uses a cached OpenCV `CascadeClassifier` with a lock.

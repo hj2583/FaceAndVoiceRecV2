@@ -192,6 +192,44 @@ def test_detect_faces_opencv_reuses_cached_cascade():
         detection_core._OPENCV_CASCADE = old
 
 
+def test_get_opencv_cascade_handles_none_haarcascades(monkeypatch):
+    """Regression: _get_opencv_cascade should not pass None to os.path.join.
+
+    Some test doubles or OpenCV builds may set `cv2.data.haarcascades` to
+    None; ensure our function normalizes that to an empty string and still
+    constructs a CascadeClassifier safely.
+    """
+    import detection_core
+
+    # Reset cache
+    old = getattr(detection_core, "_OPENCV_CASCADE", None)
+    detection_core._OPENCV_CASCADE = None
+
+    try:
+        fake_cv2 = Mock()
+        # Make cv2.data exist but haarcascades is explicitly None
+        fake_cv2.data = Mock()
+        fake_cv2.data.haarcascades = None
+
+        # CascadeClassifier should be constructed with some path; return a simple mock
+        cascade = Mock()
+        cascade.empty.return_value = False
+        fake_cv2.CascadeClassifier = Mock(return_value=cascade)
+
+        with patch("detection_core.cv2", new=fake_cv2):
+            got = detection_core._get_opencv_cascade()
+
+        # Should return our mocked cascade and not raise
+        assert got is cascade
+        fake_cv2.CascadeClassifier.assert_called_once()
+        # Verify the argument passed was a string (path)
+        arg = fake_cv2.CascadeClassifier.call_args[0][0]
+        assert isinstance(arg, str)
+        assert arg.endswith('haarcascade_frontalface_default.xml')
+    finally:
+        detection_core._OPENCV_CASCADE = old
+
+
 def test_detect_faces_opencv_returns_empty_for_invalid_frame():
     assert detect_faces_opencv(None) == []
     assert detect_faces_opencv(np.empty((0, 0, 3), dtype=np.uint8)) == []

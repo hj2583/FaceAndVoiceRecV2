@@ -32,7 +32,11 @@ def _get_opencv_cascade():
                 # Build the cascade path portably so tests can override cv2.data.haarcascades
                 cascade_filename = 'haarcascade_frontalface_default.xml'
                 base = getattr(cv2, "data", None)
-                haar_dir = getattr(base, "haarcascades", "") if base is not None else ""
+                # Ensure we always pass a string to os.path.join. Some OpenCV
+                # builds (or test doubles) may provide `haarcascades = None`;
+                # coerce falsy/None values to an empty string so join() never
+                # receives None as an argument.
+                haar_dir = (getattr(base, "haarcascades", "") or "") if base is not None else ""
                 cascade_path = os.path.join(haar_dir, cascade_filename)
                 _OPENCV_CASCADE = cv2.CascadeClassifier(cascade_path)
     return _OPENCV_CASCADE
