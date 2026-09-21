@@ -4,7 +4,6 @@ import time
 from pathlib import Path
 
 import cv2
-import mediapipe as mp
 import numpy as np
 
 from audio_core import RealtimeVAD
@@ -21,12 +20,10 @@ from config import (
 
     FACE_UPSCALE_THRESHOLD,
     FACE_UPSCALE_FACTOR,
-
-    TILE_GRID,
-    TILE_OVERLAP,
-    TILE_UPSCALE,
-    TILED_DETECTION_INTERVAL,
-    NMS_IOU_THRESHOLD,
+    REALTIME_DETECTION_INTERVAL,
+    REALTIME_FPS_WINDOW_SECONDS,
+    REALTIME_HAAR_MIN_NEIGHBORS,
+    REALTIME_HAAR_SCALE_FACTOR,
 
     MAX_FACES,
 
@@ -56,12 +53,8 @@ from tracking import (
     CentroidTracker,
 )
 
-from video_processor import (
-    bbox_from_landmarks,
-    lip_open_ratio,
-)
-
-from detection_core import detect_faces_tiled
+from detection_core import detect_faces_opencv
+from realtime_runtime import DetectionScheduler, RollingFps
 
 
 # ============================================================
@@ -84,11 +77,22 @@ class SpeakingState:
         self.value = value
 
 
+def start_realtime_vad(callback, vad_factory=RealtimeVAD):
+    try:
+        vad = vad_factory(callback=callback)
+        vad.start()
+        return vad, True
+    except Exception:
+        logging.exception("Realtime microphone is unavailable")
+        return None, False
+
+
 # ============================================================
 # MediaPipe Face Landmarker
 # ============================================================
 
 def create_face_landmarker():
+    import mediapipe as mp
 
     model_path = (
         Path(__file__).resolve().parent
@@ -289,49 +293,61 @@ def run(
         actual_fps,
     )
 
-    # ========================================================
-    # Face index
-    # ========================================================
-
-    index = FaceIndex()
-
-    tracker = CentroidTracker()
-
-    # ========================================================
-    # Realtime VAD
-    # ========================================================
-
-    audio_state = (
-        SpeakingState()
-    )
-
-    vad = RealtimeVAD(
-        callback=audio_state.set
-    )
-
-    vad.start()
-
-    # ========================================================
-    # MediaPipe
-    # ========================================================
-
-    mesh = create_face_landmarker()
-
-    # ========================================================
-    # Runtime state
-    # ========================================================
-
-    frame_no = 0
-
+    index = None
+    tracker = None
+    vad = None
+    mesh = None
+    last_speaker_id = None
     last_speech_start = None
 
-    last_speaker_id = None
+    audio_state = SpeakingState()
+    audio_available = False
 
-    last_recognition_log = {}
-
-    last_tiled_detections = []
+    window_name = "AI Face + Active Speaker Recognition"
 
     try:
+
+        # ========================================================
+        # Face index
+        # ========================================================
+
+        index = FaceIndex()
+
+        tracker = CentroidTracker()
+
+        # ========================================================
+        # Realtime VAD
+        # ========================================================
+
+        vad, audio_available = start_realtime_vad(
+            callback=audio_state.set
+        )
+
+        # ========================================================
+        # MediaPipe
+        # ========================================================
+
+        import mediapipe as mp
+        mesh = create_face_landmarker()
+        from video_processor import lip_open_ratio
+
+        # ========================================================
+        # Runtime state
+        # ========================================================
+
+        frame_no = 0
+
+        last_recognition_log = {}
+
+        face_detections = []
+
+        detection_scheduler = DetectionScheduler(
+            REALTIME_DETECTION_INTERVAL
+        )
+
+        fps_counter = RollingFps(
+            REALTIME_FPS_WINDOW_SECONDS
+        )
 
         while True:
 
@@ -347,25 +363,24 @@ def run(
             frame_no += 1
 
             timestamp = time.monotonic()
+            display_fps = fps_counter.tick(timestamp)
 
             timestamp_ms = int(frame_no * 1000 / actual_fps)
 
-            if (
-                not last_tiled_detections
-                or frame_no % TILED_DETECTION_INTERVAL == 1
-            ):
-                last_tiled_detections = detect_faces_tiled(
-                    frame,
-                    tile_grid=TILE_GRID,
-                    overlap_ratio=TILE_OVERLAP,
-                    upscale_factor=TILE_UPSCALE,
-                    nms_iou_threshold=NMS_IOU_THRESHOLD,
+            face_detections = detection_scheduler.update(
+                frame_no,
+                frame,
+                lambda image: detect_faces_opencv(
+                    image,
+                    scale_factor=REALTIME_HAAR_SCALE_FACTOR,
+                    min_neighbors=REALTIME_HAAR_MIN_NEIGHBORS,
                 )
+            )
 
             rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
             detections = []
 
-            for x, y, box_width, box_height, _confidence in last_tiled_detections:
+            for x, y, box_width, box_height, _confidence in face_detections:
                 x0 = max(0, int(x))
                 y0 = max(0, int(y))
                 x1 = min(frame.shape[1], int(x + box_width))
@@ -944,7 +959,8 @@ def run(
                 # =================================================
 
                 if (
-                    audio_state.value
+                    audio_available
+                    and audio_state.value
                     and
                     track.lip_open
                     >= LIP_OPEN_THRESHOLD
@@ -1078,7 +1094,8 @@ def run(
             # =====================================================
 
             if (
-                audio_state.value
+                audio_available
+                and audio_state.value
                 and
                 candidates
             ):
@@ -1154,6 +1171,7 @@ def run(
                     and
                     last_speech_start
                     is not None
+                    and tracker is not None
                 ):
 
                     speaker_name = next(
@@ -1195,6 +1213,16 @@ def run(
 
                 last_speech_start = None
 
+            cv2.putText(
+                frame,
+                f"FPS: {display_fps:.1f}",
+                (20, 30),
+                cv2.FONT_HERSHEY_SIMPLEX,
+                0.7,
+                (255, 255, 255),
+                2,
+            )
+
             # =================================================
             # Microphone status
             # =================================================
@@ -1202,10 +1230,14 @@ def run(
             cv2.putText(
                 frame,
                 (
-                    "MIC: SPEECH"
-                    if audio_state.value
-                    else
-                    "MIC: SILENT"
+                    "MIC: UNAVAILABLE"
+                    if not audio_available
+                    else (
+                        "MIC: SPEECH"
+                        if audio_state.value
+                        else
+                        "MIC: SILENT"
+                    )
                 ),
                 (
                     20,
@@ -1215,7 +1247,7 @@ def run(
                 0.7,
                 (
                     (0, 255, 0)
-                    if audio_state.value
+                    if (audio_available and audio_state.value)
                     else
                     (255, 255, 255)
                 ),
@@ -1226,10 +1258,7 @@ def run(
             # Display
             # =================================================
 
-            cv2.imshow(
-                "AI Face + Active Speaker Recognition",
-                frame,
-            )
+            cv2.imshow(window_name, frame)
 
             key = (
                 cv2.waitKey(1)
@@ -1240,6 +1269,18 @@ def run(
                 key == ord("q")
                 or key == 27
             ):
+                break
+
+            try:
+                if (
+                    cv2.getWindowProperty(
+                        window_name,
+                        cv2.WND_PROP_VISIBLE,
+                    )
+                    < 1
+                ):
+                    break
+            except cv2.error:
                 break
 
     finally:
@@ -1254,6 +1295,7 @@ def run(
             and
             last_speech_start
             is not None
+            and tracker is not None
         ):
 
             speaker_name = next(
@@ -1295,11 +1337,13 @@ def run(
         # Cleanup
         # =====================================================
 
-        vad.stop()
+        if vad is not None:
+            vad.stop()
 
         cap.release()
 
-        mesh.close()
+        if mesh is not None:
+            mesh.close()
 
         cv2.destroyAllWindows()
 
@@ -1320,6 +1364,10 @@ if __name__ == "__main__":
 
     args = parser.parse_args()
 
-    run(
-        camera=args.camera
-    )
+    try:
+        run(
+            camera=args.camera
+        )
+    except Exception:
+        logging.exception("Realtime recognition failed")
+        raise SystemExit(1)
