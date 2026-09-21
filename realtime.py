@@ -245,6 +245,7 @@ def run(
         )
 
     if not cap.isOpened():
+        cap.release()
 
         raise RuntimeError(
             f"Could not open camera {camera}. "
@@ -364,6 +365,17 @@ def run(
 
             timestamp = time.monotonic()
             display_fps = fps_counter.tick(timestamp)
+
+            if (
+                vad is not None
+                and audio_available
+                and not getattr(vad, "available", False)
+            ):
+                audio_available = False
+                audio_state.set(False)
+                logging.warning(
+                    "Realtime microphone became unavailable during processing"
+                )
 
             timestamp_ms = int(frame_no * 1000 / actual_fps)
 
@@ -961,6 +973,7 @@ def run(
                 if (
                     audio_available
                     and audio_state.value
+                    and track.lip_open is not None
                     and
                     track.lip_open
                     >= LIP_OPEN_THRESHOLD
@@ -1130,7 +1143,7 @@ def run(
                             f"SPEAKING: "
                             f"{speaker.person_name}"
                         ),
-                        (20, 40),
+                        (20, 60),
                         cv2.FONT_HERSHEY_SIMPLEX,
                         0.9,
                         (0, 255, 0),
@@ -1289,63 +1302,78 @@ def run(
         # Save final audio event
         # =====================================================
 
-        if (
-            last_speaker_id
-            is not None
-            and
-            last_speech_start
-            is not None
-            and tracker is not None
-        ):
+        try:
+            if (
+                last_speaker_id
+                is not None
+                and
+                last_speech_start
+                is not None
+                and tracker is not None
+            ):
 
-            speaker_name = next(
-                (
-                    t.person_name
-                    for t
-                    in tracker.tracks.values()
-                    if (
-                        t.person_id
-                        == last_speaker_id
-                    )
-                ),
-                "Unknown",
-            )
+                speaker_name = next(
+                    (
+                        t.person_name
+                        for t
+                        in tracker.tracks.values()
+                        if (
+                            t.person_id
+                            == last_speaker_id
+                        )
+                    ),
+                    "Unknown",
+                )
 
-            speaker_confidence = next(
-                (
-                    t.confidence
-                    for t
-                    in tracker.tracks.values()
-                    if (
-                        t.person_id
-                        == last_speaker_id
-                    )
-                ),
-                0.0,
-            )
+                speaker_confidence = next(
+                    (
+                        t.confidence
+                        for t
+                        in tracker.tracks.values()
+                        if (
+                            t.person_id
+                            == last_speaker_id
+                        )
+                    ),
+                    0.0,
+                )
 
-            log_audio(
-                last_speech_start,
-                time.time(),
-                last_speaker_id,
-                speaker_name,
-                speaker_confidence,
-                "realtime",
-            )
+                log_audio(
+                    last_speech_start,
+                    time.time(),
+                    last_speaker_id,
+                    speaker_name,
+                    speaker_confidence,
+                    "realtime",
+                )
+        except Exception:
+            logging.exception("Failed to save final realtime audio event")
 
         # =====================================================
         # Cleanup
         # =====================================================
 
-        if vad is not None:
-            vad.stop()
+        try:
+            if vad is not None:
+                vad.stop()
+        except Exception:
+            logging.exception("Failed to stop realtime VAD")
 
-        cap.release()
+        try:
+            cap.release()
+        except Exception:
+            logging.exception("Failed to release realtime camera")
 
-        if mesh is not None:
-            mesh.close()
+        try:
+            if mesh is not None:
+                mesh.close()
+        except Exception:
+            logging.exception("Failed to close face landmarker")
 
-        cv2.destroyAllWindows()
+        try:
+            cv2.destroyAllWindows()
+        except Exception:
+            logging.exception("Failed to destroy OpenCV windows")
 
 
 # ============================================================

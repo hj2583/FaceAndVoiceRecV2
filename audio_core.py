@@ -171,8 +171,12 @@ class RealtimeVAD:
 
         if self.thread:
             self.thread.join(timeout=2)
-
-        self.thread = None
+            if self.thread.is_alive():
+                logging.warning(
+                    "Realtime VAD worker did not stop within timeout"
+                )
+            else:
+                self.thread = None
 
     def _emit(self, state):
         """
@@ -228,14 +232,17 @@ class RealtimeVAD:
         return self.speaking
 
     def _run(self):
-        vad = webrtcvad.Vad(
-            self.aggressiveness
-        )
-
-        audio = pyaudio.PyAudio()
+        vad = None
+        audio = None
         stream = None
 
         try:
+
+            vad = webrtcvad.Vad(
+                self.aggressiveness
+            )
+
+            audio = pyaudio.PyAudio()
 
             stream = audio.open(
                 format=pyaudio.paInt16,
@@ -275,6 +282,9 @@ class RealtimeVAD:
         finally:
 
             self.available = False
+            if self.speaking:
+                self.speaking = False
+                self._emit(False)
             self.startup_event.set()
 
             if stream:
@@ -287,7 +297,13 @@ class RealtimeVAD:
                         "Failed to close microphone stream"
                     )
 
-            audio.terminate()
+            if audio is not None:
+                try:
+                    audio.terminate()
+                except Exception:
+                    logging.exception(
+                        "Failed to terminate PyAudio"
+                    )
 
 def read_wav_pcm(wav_path):
     with wave.open(str(wav_path), "rb") as wf:
