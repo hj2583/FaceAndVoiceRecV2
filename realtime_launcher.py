@@ -4,6 +4,7 @@ from pathlib import Path
 import os
 import subprocess
 import sys
+import uuid
 
 
 @dataclass(frozen=True)
@@ -30,9 +31,10 @@ def launch_realtime(
     startup_timeout: float = 1.0,
     popen=subprocess.Popen,
 ) -> LaunchResult:
-    log_dir.mkdir(parents=True, exist_ok=True)
+    log_path: Path | None = None
     stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S%fZ")
-    log_path = Path(log_dir) / f"realtime-{stamp}.log"
+    unique = uuid.uuid4().hex
+    log_path = Path(log_dir) / f"realtime-{stamp}-{unique}.log"
 
     command = [sys.executable, str(script), "--camera", str(camera)]
     popen_kwargs = {
@@ -43,13 +45,18 @@ def launch_realtime(
     if os.name == "nt":
         popen_kwargs["creationflags"] = subprocess.CREATE_NEW_CONSOLE
 
-    with log_path.open("wb") as output:
-        popen_kwargs["stdout"] = output
-        process = popen(command, **popen_kwargs)
-        try:
-            process.wait(timeout=startup_timeout)
-        except subprocess.TimeoutExpired:
-            return LaunchResult(True, process.pid, None, log_path)
+    try:
+        log_dir.mkdir(parents=True, exist_ok=True)
+        with log_path.open("wb") as output:
+            popen_kwargs["stdout"] = output
+            process = popen(command, **popen_kwargs)
+            try:
+                process.wait(timeout=startup_timeout)
+            except subprocess.TimeoutExpired:
+                return LaunchResult(True, process.pid, None, log_path)
+    except OSError as exc:
+        fallback_log_path = log_path if log_path is not None else Path(log_dir) / "realtime-launch.log"
+        return LaunchResult(False, None, str(exc), fallback_log_path)
 
     error = _read_tail(log_path)
     if not error:
