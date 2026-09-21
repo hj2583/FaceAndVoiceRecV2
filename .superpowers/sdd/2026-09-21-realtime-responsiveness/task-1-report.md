@@ -23,7 +23,7 @@ Test run (exact):
 ```
 python -m pytest tests/test_config.py tests/test_detection_core.py -q -q
 
-25 passed
+26 passed
 ```
 
 Additional runs for regression fix and focused suite:
