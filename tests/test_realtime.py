@@ -111,7 +111,7 @@ def test_run_detects_vad_becoming_unavailable(monkeypatch):
     monkeypatch.setattr(realtime, "CentroidTracker", lambda: _Tracker())
     monkeypatch.setattr(realtime, "start_realtime_vad", _start_realtime_vad)
     monkeypatch.setattr(realtime, "create_face_landmarker", lambda: _Mesh())
-    monkeypatch.setattr(realtime, "detect_faces_opencv", lambda *_args, **_kwargs: [])
+    monkeypatch.setattr(realtime, "detect_faces_realtime", lambda *_args, **_kwargs: [])
     monkeypatch.setattr(realtime, "log_recognition", lambda *_args, **_kwargs: None)
     monkeypatch.setattr(realtime, "log_audio", lambda *_args, **_kwargs: None)
     monkeypatch.setattr(realtime.cv2, "cvtColor", lambda image, _code: image)
@@ -223,7 +223,7 @@ def test_run_continues_cleanup_when_vad_stop_raises(monkeypatch):
 
     monkeypatch.setattr(realtime, "start_realtime_vad", _start_realtime_vad)
     monkeypatch.setattr(realtime, "create_face_landmarker", lambda: mesh)
-    monkeypatch.setattr(realtime, "detect_faces_opencv", lambda *_args, **_kwargs: [(10, 10, 40, 40, 0.9)])
+    monkeypatch.setattr(realtime, "detect_faces_realtime", lambda *_args, **_kwargs: [(10, 10, 40, 40, 0.9)])
     monkeypatch.setattr(realtime, "extract_embedding", lambda *_args, **_kwargs: None)
     monkeypatch.setattr(realtime, "face_quality", lambda *_args, **_kwargs: 0.0)
     monkeypatch.setattr(realtime, "log_recognition", lambda *_args, **_kwargs: None)
@@ -339,7 +339,7 @@ def test_speaking_banner_drawn_below_fps_line(monkeypatch):
 
     monkeypatch.setattr(realtime, "start_realtime_vad", _start_realtime_vad)
     monkeypatch.setattr(realtime, "create_face_landmarker", lambda: _Mesh())
-    monkeypatch.setattr(realtime, "detect_faces_opencv", lambda *_args, **_kwargs: [(10, 10, 60, 60, 0.9)])
+    monkeypatch.setattr(realtime, "detect_faces_realtime", lambda *_args, **_kwargs: [(10, 10, 60, 60, 0.9)])
     monkeypatch.setattr(realtime, "extract_embedding", lambda *_args, **_kwargs: None)
     monkeypatch.setattr(realtime, "face_quality", lambda *_args, **_kwargs: 0.0)
     monkeypatch.setattr(realtime, "log_recognition", lambda *_args, **_kwargs: None)
@@ -440,7 +440,7 @@ def test_run_detection_scheduler_calls_detector_twice_for_four_frames_interval_t
 
     monkeypatch.setattr(realtime, "start_realtime_vad", _start_realtime_vad)
     monkeypatch.setattr(realtime, "create_face_landmarker", lambda: _Mesh())
-    monkeypatch.setattr(realtime, "detect_faces_opencv", _detector)
+    monkeypatch.setattr(realtime, "detect_faces_realtime", _detector)
     monkeypatch.setattr(realtime, "log_recognition", lambda *_args, **_kwargs: None)
     monkeypatch.setattr(realtime, "log_audio", lambda *_args, **_kwargs: None)
     monkeypatch.setattr(realtime.cv2, "cvtColor", lambda image, _code: image)
@@ -464,3 +464,96 @@ def test_run_detection_scheduler_calls_detector_twice_for_four_frames_interval_t
     realtime.run(camera=0, width=160, height=120)
 
     assert detector_calls["count"] == 2
+
+
+def test_run_uses_increasing_landmark_timestamps_for_multiple_faces(monkeypatch):
+    import realtime
+
+    frame = np.zeros((160, 240, 3), dtype=np.uint8)
+
+    class _Cap:
+        def __init__(self):
+            self.calls = 0
+
+        def isOpened(self):
+            return True
+
+        def set(self, *_args, **_kwargs):
+            return True
+
+        def get(self, prop):
+            if prop == cv2.CAP_PROP_FPS:
+                return 30.0
+            if prop == cv2.CAP_PROP_FRAME_WIDTH:
+                return 240.0
+            if prop == cv2.CAP_PROP_FRAME_HEIGHT:
+                return 160.0
+            return 0.0
+
+        def read(self):
+            self.calls += 1
+            if self.calls == 1:
+                return True, frame.copy()
+            return False, None
+
+        def release(self):
+            return None
+
+    class _Mesh:
+        def __init__(self):
+            self.timestamps = []
+
+        def detect_for_video(self, _image, timestamp_ms):
+            self.timestamps.append(timestamp_ms)
+            return SimpleNamespace(face_landmarks=[])
+
+        def close(self):
+            return None
+
+    class _Tracker:
+        def update(self, _detections, _frame_no):
+            return []
+
+    class _Vad:
+        available = True
+
+        def stop(self):
+            return None
+
+    mesh = _Mesh()
+    monkeypatch.setattr(realtime.cv2, "VideoCapture", lambda *_args, **_kwargs: _Cap())
+    monkeypatch.setattr(realtime, "FaceIndex", lambda: object())
+    monkeypatch.setattr(realtime, "CentroidTracker", lambda: _Tracker())
+    monkeypatch.setattr(realtime, "start_realtime_vad", lambda callback: (_Vad(), True))
+    monkeypatch.setattr(realtime, "create_face_landmarker", lambda: mesh)
+    monkeypatch.setattr(
+        realtime,
+        "detect_faces_realtime",
+        lambda *_args, **_kwargs: [
+            (10, 10, 70, 70, 0.9),
+            (130, 10, 70, 70, 0.9),
+        ],
+    )
+    monkeypatch.setattr(realtime.cv2, "cvtColor", lambda image, _code: image)
+    monkeypatch.setattr(realtime.cv2, "imshow", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(realtime.cv2, "waitKey", lambda *_args, **_kwargs: 0)
+    monkeypatch.setattr(realtime.cv2, "getWindowProperty", lambda *_args, **_kwargs: 1)
+    monkeypatch.setattr(realtime.cv2, "rectangle", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(realtime.cv2, "putText", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(realtime.cv2, "destroyAllWindows", lambda: None)
+    monkeypatch.setattr(realtime, "ensure_opencv_face_detector_available", lambda: None)
+
+    dummy_mp = SimpleNamespace(
+        ImageFormat=SimpleNamespace(SRGB=1),
+        Image=lambda image_format, data: data,
+    )
+    import sys
+    fake_video_processor = ModuleType("video_processor")
+    fake_video_processor.lip_open_ratio = lambda _landmarks: 0.0
+    monkeypatch.setitem(sys.modules, "video_processor", fake_video_processor)
+    monkeypatch.setitem(sys.modules, "mediapipe", dummy_mp)
+
+    realtime.run(camera=0, width=240, height=160)
+
+    assert len(mesh.timestamps) == 2
+    assert mesh.timestamps[0] < mesh.timestamps[1]

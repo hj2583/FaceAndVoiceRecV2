@@ -1,4 +1,5 @@
 import numpy as np
+import cv2
 
 import face_core
 from face_core import face_quality, preprocess_face_for_recognition
@@ -39,3 +40,19 @@ def test_load_embedding_file_handles_legacy_object_array(tmp_path):
 
 def test_normalize_rejects_non_finite_embedding():
     assert face_core._normalize(np.array([np.nan, 1.0])) is None
+
+
+def test_load_or_extract_embedding_repairs_invalid_saved_embedding(tmp_path, monkeypatch):
+    embedding_path = tmp_path / "sample.npy"
+    image_path = tmp_path / "sample.jpg"
+    np.save(embedding_path, None)
+    cv2.imwrite(str(image_path), np.zeros((32, 32, 3), dtype=np.uint8))
+
+    expected = np.ones(512, dtype=np.float32)
+    monkeypatch.setattr(face_core, "extract_embedding", lambda _image: expected)
+
+    result = face_core.load_or_extract_embedding(embedding_path, image_path)
+
+    np.testing.assert_allclose(result, expected)
+    repaired = np.load(embedding_path)
+    np.testing.assert_allclose(repaired, expected)

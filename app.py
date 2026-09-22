@@ -671,6 +671,7 @@ def render_database():
                         # --------------------------------------------
 
                         from face_core import (
+                            load_or_extract_embedding,
                             save_embedding_for_person,
                         )
 
@@ -678,12 +679,12 @@ def render_database():
 
                             try:
 
-                                emb = np.load(
+                                emb = load_or_extract_embedding(
                                     sample["embedding_path"],
-                                    allow_pickle=True,
+                                    sample["image_path"],
                                 )
-                                if emb.dtype == object:
-                                    emb = np.asarray(emb.tolist(), dtype=np.float32)
+                                if emb is None:
+                                    raise ValueError("Could not extract a valid face embedding from sample image")
 
                                 save_embedding_for_person(
                                     new_name,
@@ -712,12 +713,12 @@ def render_database():
                                 and os.path.exists(embedding_path)
                             ):
 
-                                emb = np.load(
+                                emb = load_or_extract_embedding(
                                     embedding_path,
-                                    allow_pickle=True,
+                                    best_image,
                                 )
-                                if emb.dtype == object:
-                                    emb = np.asarray(emb.tolist(), dtype=np.float32)
+                                if emb is None:
+                                    raise ValueError("Could not extract a valid face embedding from sample image")
 
                                 save_embedding_for_person(
                                     new_name,

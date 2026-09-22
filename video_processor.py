@@ -4,9 +4,9 @@ import os
 import subprocess
 import tempfile
 from pathlib import Path
+from types import SimpleNamespace
 
 import cv2
-import mediapipe as mp
 import numpy as np
 
 from audio_core import detect_speech_segments
@@ -28,7 +28,6 @@ from config import (
     FACE_UPSCALE_FACTOR,
 
     TRACKED_VIDEO_DIR,
-    MAX_FACES,
 
     UNKNOWN_CONFIRMATIONS,
     UNKNOWN_MIN_QUALITY,
@@ -192,101 +191,60 @@ def convert_h264(input_path, output_path):
 
 
 # ============================================================
-# MediaPipe Face Landmarker
+# UniFace Face Landmarker
 # ============================================================
+
+class _UniFaceLandmarker:
+    """Adapts UniFace SCRFD + FaceMesh to a MediaPipe-FaceLandmarker-like API."""
+
+    def __init__(self, detector, mesher):
+        self._detector = detector
+        self._mesher = mesher
+
+    def detect_for_video(self, image, _timestamp_ms=None):
+        if image is None or image.size == 0:
+            return SimpleNamespace(face_landmarks=[])
+
+        faces = self._detector.detect(image)
+        if not faces:
+            return SimpleNamespace(face_landmarks=[])
+
+        face = max(faces, key=lambda f: f.confidence)
+        results = self._mesher.predict(image, [face])
+        if not results:
+            return SimpleNamespace(face_landmarks=[])
+
+        h, w = image.shape[:2]
+        points = results[0].points_2d
+        landmarks = [
+            SimpleNamespace(x=float(px) / w, y=float(py) / h)
+            for px, py in points
+        ]
+        return SimpleNamespace(face_landmarks=[landmarks])
+
+    def close(self):
+        return None
+
 
 def create_face_landmarker():
-    """
-    Create MediaPipe FaceLandmarker.
+    """Create a UniFace-backed face landmark provider (SCRFD + FaceMesh)."""
 
-    The face_landmarker.task model must exist in the same
-    directory as this Python file.
-    """
+    from uniface.constants import SCRFDWeights
+    from uniface.detection import SCRFD
+    from uniface.landmark import FaceMesh
+    from face_backend import _require_cuda_session, get_cuda_providers
 
-    model_path = (
-        Path(__file__).resolve().parent
-        / "face_landmarker.task"
+    providers = get_cuda_providers()
+    detector = SCRFD(
+        model_name=SCRFDWeights.SCRFD_500M_KPS,
+        confidence_threshold=0.3,
+        providers=providers,
     )
+    _require_cuda_session(detector.session, "FaceMesh detector")
+    mesher = FaceMesh(providers=providers)
+    _require_cuda_session(mesher.session, "FaceMesh model")
 
-    if not model_path.exists():
-        raise FileNotFoundError(
-            f"MediaPipe Face Landmarker model not found: "
-            f"{model_path}"
-        )
-
-    base_options = mp.tasks.BaseOptions(
-        model_asset_path=str(model_path)
-    )
-
-    options = mp.tasks.vision.FaceLandmarkerOptions(
-        base_options=base_options,
-
-        running_mode=(
-            mp.tasks.vision.RunningMode.VIDEO
-        ),
-
-        num_faces=MAX_FACES,
-
-        min_face_detection_confidence=0.4,
-
-        min_face_presence_confidence=0.4,
-
-        min_tracking_confidence=0.5,
-
-        output_face_blendshapes=False,
-
-        output_facial_transformation_matrixes=False,
-    )
-
-    return (
-        mp.tasks.vision.FaceLandmarker
-        .create_from_options(options)
-    )
-
-
-# ============================================================
-# Bounding box
-# ============================================================
-
-def bbox_from_landmarks(
-    face_landmarks,
-    frame_shape,
-    padding=0.15,
-):
-    """
-    Create a bounding box from MediaPipe face landmarks.
-    """
-
-    h, w = frame_shape[:2]
-
-    xs = np.array(
-        [lm.x for lm in face_landmarks]
-    )
-
-    ys = np.array(
-        [lm.y for lm in face_landmarks]
-    )
-
-    x0 = int(xs.min() * w)
-    x1 = int(xs.max() * w)
-
-    y0 = int(ys.min() * h)
-    y1 = int(ys.max() * h)
-
-    px = int(
-        (x1 - x0) * padding
-    )
-
-    py = int(
-        (y1 - y0) * padding
-    )
-
-    return (
-        max(0, x0 - px),
-        max(0, y0 - py),
-        min(w, x1 + px),
-        min(h, y1 + py),
-    )
+    return _UniFaceLandmarker(detector, mesher)
 
 
 # ============================================================
@@ -297,7 +255,7 @@ def lip_open_ratio(face_landmarks):
     """
     Calculate mouth opening ratio.
 
-    MediaPipe face landmark indexes:
+    UniFace FaceMesh is index-compatible with MediaPipe's mesh:
 
         13  = upper inner lip
         14  = lower inner lip
@@ -497,7 +455,7 @@ def process_video_pipeline(
                 pass
 
     # ========================================================
-    # MediaPipe
+    # Face landmarks
     # ========================================================
 
     face_landmarker = (
@@ -539,7 +497,7 @@ def process_video_pipeline(
             )
 
             # =================================================
-            # Tiled RetinaFace detection
+            # Tiled UniFace detection
             # =================================================
 
             if (
@@ -565,7 +523,7 @@ def process_video_pipeline(
                 cv2.COLOR_BGR2RGB,
             )
 
-            # Convert timestamp to milliseconds for MediaPipe
+            # Monotonically increasing timestamp for the landmarker's video-mode API
             timestamp_ms = int(timestamp * 1000)
 
             detections = []
@@ -591,13 +549,9 @@ def process_video_pipeline(
                 ):
                     crop_rgb = rgb[y0:y1, x0:x1]
                     if crop_rgb.size:
-                        crop_mp_image = mp.Image(
-                            image_format=mp.ImageFormat.SRGB,
-                            data=crop_rgb,
-                        )
                         landmark_call_offset += 1
                         crop_result = face_landmarker.detect_for_video(
-                            crop_mp_image,
+                            crop_rgb,
                             timestamp_ms + landmark_call_offset,
                         )
                         if crop_result.face_landmarks:

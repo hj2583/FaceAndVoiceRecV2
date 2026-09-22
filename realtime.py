@@ -1,7 +1,6 @@
 import argparse
 import logging
 import time
-from pathlib import Path
 
 import cv2
 import numpy as np
@@ -24,8 +23,6 @@ from config import (
     REALTIME_FPS_WINDOW_SECONDS,
     REALTIME_HAAR_MIN_NEIGHBORS,
     REALTIME_HAAR_SCALE_FACTOR,
-
-    MAX_FACES,
 
     UNKNOWN_FACES_DIR,
     UNKNOWN_MIN_TRACK_FRAMES,
@@ -53,7 +50,8 @@ from tracking import (
     CentroidTracker,
 )
 
-from detection_core import detect_faces_opencv
+from detection_core import ensure_opencv_face_detector_available
+from face_backend import get_face_backend
 from realtime_runtime import DetectionScheduler, RollingFps
 
 
@@ -88,54 +86,17 @@ def start_realtime_vad(callback, vad_factory=RealtimeVAD):
 
 
 # ============================================================
-# MediaPipe Face Landmarker
+# Face Landmarker
 # ============================================================
 
 def create_face_landmarker():
-    import mediapipe as mp
+    from video_processor import create_face_landmarker as _create_face_landmarker
 
-    model_path = (
-        Path(__file__).resolve().parent
-        / "face_landmarker.task"
-    )
+    return _create_face_landmarker()
 
-    if not model_path.exists():
 
-        raise FileNotFoundError(
-            f"MediaPipe Face Landmarker model not found: "
-            f"{model_path}"
-        )
-
-    base_options = mp.tasks.BaseOptions(
-        model_asset_path=str(model_path)
-    )
-
-    options = (
-        mp.tasks.vision.FaceLandmarkerOptions(
-            base_options=base_options,
-
-            running_mode=(
-                mp.tasks.vision.RunningMode.VIDEO
-            ),
-
-            num_faces=MAX_FACES,
-
-            min_face_detection_confidence=0.4,
-
-            min_face_presence_confidence=0.4,
-
-            min_tracking_confidence=0.5,
-
-            output_face_blendshapes=False,
-
-            output_facial_transformation_matrixes=False,
-        )
-    )
-
-    return (
-        mp.tasks.vision.FaceLandmarker
-        .create_from_options(options)
-    )
+def detect_faces_realtime(image):
+    return get_face_backend().detect_faces_realtime(image)
 
 
 # ============================================================
@@ -325,10 +286,9 @@ def run(
         )
 
         # ========================================================
-        # MediaPipe
+        # Face landmarks
         # ========================================================
 
-        import mediapipe as mp
         mesh = create_face_landmarker()
         from video_processor import lip_open_ratio
 
@@ -341,6 +301,7 @@ def run(
         last_recognition_log = {}
 
         face_detections = []
+        last_landmark_timestamp_ms = -1
 
         detection_scheduler = DetectionScheduler(
             REALTIME_DETECTION_INTERVAL
@@ -382,11 +343,7 @@ def run(
             face_detections = detection_scheduler.update(
                 frame_no,
                 frame,
-                lambda image: detect_faces_opencv(
-                    image,
-                    scale_factor=REALTIME_HAAR_SCALE_FACTOR,
-                    min_neighbors=REALTIME_HAAR_MIN_NEIGHBORS,
-                )
+                detect_faces_realtime,
             )
 
             rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
@@ -414,12 +371,14 @@ def run(
                 ):
                     crop_rgb = rgb[y0:y1, x0:x1]
                     if crop_rgb.size:
-                        crop_result = mesh.detect_for_video(
-                            mp.Image(
-                                image_format=mp.ImageFormat.SRGB,
-                                data=crop_rgb,
-                            ),
+                        landmark_timestamp_ms = max(
                             timestamp_ms,
+                            last_landmark_timestamp_ms + 1,
+                        )
+                        last_landmark_timestamp_ms = landmark_timestamp_ms
+                        crop_result = mesh.detect_for_video(
+                            crop_rgb,
+                            landmark_timestamp_ms,
                         )
                         if crop_result.face_landmarks:
                             landmarks = crop_result.face_landmarks[0]
@@ -773,6 +732,13 @@ def run(
                             quality
                             >= UNKNOWN_MIN_QUALITY
                         ):
+
+                            if track.embedding is None:
+                                logging.debug(
+                                    "Skipping unknown sample without a valid embedding: track=%s",
+                                    track.track_id,
+                                )
+                                continue
 
                             unknown_dir = (
                                 UNKNOWN_FACES_DIR

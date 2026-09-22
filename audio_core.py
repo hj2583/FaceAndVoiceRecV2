@@ -3,16 +3,17 @@ import threading
 import wave
 
 import numpy as np
+import torch
 
 try:
-    import pyaudio
+    import sounddevice as sd
 except Exception:
-    pyaudio = None
+    sd = None
 
 try:
-    import webrtcvad
+    from silero_vad import load_silero_vad
 except Exception:
-    webrtcvad = None
+    load_silero_vad = None
 
 
 # ============================================================
@@ -23,8 +24,8 @@ SAMPLE_RATE = 16000
 CHANNELS = 1
 SAMPLE_WIDTH = 2
 
-# WebRTC VAD supports 10, 20, or 30 ms frames.
-FRAME_MS = 20
+# Silero VAD requires exactly 512 samples per call at 16kHz (32 ms).
+FRAME_MS = 32
 
 FRAME_SAMPLES = int(
     SAMPLE_RATE * FRAME_MS / 1000
@@ -39,15 +40,9 @@ FRAME_BYTES = (
 # VAD configuration
 # ============================================================
 
-# WebRTC VAD aggressiveness:
-#
-# 0 = least aggressive
-# 1 = mild
-# 2 = balanced
-# 3 = most aggressive
-#
-# 2 is a good default for general speech recognition.
-VAD_AGGRESSIVENESS = 2
+# Silero VAD outputs a speech probability in [0, 1] per frame.
+# 0.5 is the model's recommended default decision threshold.
+VAD_SPEECH_THRESHOLD = 0.5
 
 
 # ------------------------------------------------------------
@@ -57,14 +52,14 @@ VAD_AGGRESSIVENESS = 2
 # Number of consecutive speech frames required before
 # realtime mode changes from silent -> speaking.
 #
-# 3 frames × 20 ms = 60 ms
+# 3 frames × 32 ms = 96 ms
 REALTIME_SPEECH_CONFIRM_FRAMES = 3
 
 
 # Number of consecutive silent frames required before
 # realtime mode changes from speaking -> silent.
 #
-# 8 frames × 20 ms = 160 ms
+# 8 frames × 32 ms = 256 ms
 #
 # This prevents tiny pauses between words from causing
 # speech state to flicker.
@@ -93,10 +88,29 @@ SPEECH_MERGE_GAP_MS = 250
 
 
 def check_audio_dependencies():
-    if pyaudio is None:
-        raise RuntimeError("PyAudio is not installed.")
-    if webrtcvad is None:
-        raise RuntimeError("webrtcvad is not installed.")
+    if sd is None:
+        raise RuntimeError("sounddevice is not installed.")
+    if load_silero_vad is None:
+        raise RuntimeError("silero-vad is not installed.")
+
+
+def _speech_probability(model, frame_bytes, sample_rate=SAMPLE_RATE):
+    """
+    Run Silero VAD on one raw PCM16 frame and return a speech probability.
+
+    `model` is expected to be callable as `model(tensor, sample_rate)`,
+    matching Silero VAD's `load_silero_vad()` return value.
+    """
+
+    audio = np.frombuffer(frame_bytes, dtype=np.int16).astype(np.float32) / 32768.0
+
+    if audio.size < FRAME_SAMPLES:
+        audio = np.pad(audio, (0, FRAME_SAMPLES - audio.size))
+
+    with torch.no_grad():
+        result = model(torch.from_numpy(audio), sample_rate)
+
+    return float(result.item()) if hasattr(result, "item") else float(result)
 
 
 class RealtimeVAD:
@@ -114,10 +128,10 @@ class RealtimeVAD:
     def __init__(
         self,
         callback=None,
-        aggressiveness=VAD_AGGRESSIVENESS,
+        threshold=VAD_SPEECH_THRESHOLD,
     ):
         self.callback = callback
-        self.aggressiveness = aggressiveness
+        self.threshold = threshold
 
         self.stop_event = threading.Event()
         self.thread = None
@@ -200,7 +214,7 @@ class RealtimeVAD:
 
     def _update_speech_state(self, raw_speech):
         """
-        Convert raw WebRTC VAD output into a stable speech state.
+        Convert raw Silero VAD output into a stable speech state.
 
         This prevents:
             True -> False -> True -> False
@@ -239,25 +253,20 @@ class RealtimeVAD:
         return self.speaking
 
     def _run(self):
-        vad = None
-        audio = None
         stream = None
 
         try:
 
-            vad = webrtcvad.Vad(
-                self.aggressiveness
-            )
+            model = load_silero_vad()
 
-            audio = pyaudio.PyAudio()
-
-            stream = audio.open(
-                format=pyaudio.paInt16,
+            stream = sd.RawInputStream(
+                samplerate=SAMPLE_RATE,
                 channels=CHANNELS,
-                rate=SAMPLE_RATE,
-                input=True,
-                frames_per_buffer=FRAME_SAMPLES,
+                dtype="int16",
+                blocksize=FRAME_SAMPLES,
             )
+
+            stream.start()
 
             self.available = True
             self.startup_succeeded = True
@@ -265,15 +274,14 @@ class RealtimeVAD:
 
             while not self.stop_event.is_set():
 
-                data = stream.read(
+                data, _overflowed = stream.read(
                     FRAME_SAMPLES,
-                    exception_on_overflow=False,
                 )
 
-                raw_speech = vad.is_speech(
-                    data,
-                    SAMPLE_RATE,
-                )
+                raw_speech = _speech_probability(
+                    model,
+                    bytes(data),
+                ) >= self.threshold
 
                 speech = self._update_speech_state(
                     bool(raw_speech)
@@ -300,19 +308,11 @@ class RealtimeVAD:
             if stream:
 
                 try:
-                    stream.stop_stream()
+                    stream.stop()
                     stream.close()
                 except Exception:
                     logging.exception(
                         "Failed to close microphone stream"
-                    )
-
-            if audio is not None:
-                try:
-                    audio.terminate()
-                except Exception:
-                    logging.exception(
-                        "Failed to terminate PyAudio"
                     )
 
 def read_wav_pcm(wav_path):
@@ -335,7 +335,7 @@ def detect_speech_segments(
     wav_path,
     min_segment_ms=MIN_SPEECH_SEGMENT_MS,
     padding_ms=SPEECH_START_PADDING_MS,
-    aggressiveness=VAD_AGGRESSIVENESS,
+    threshold=VAD_SPEECH_THRESHOLD,
 ):
     """
     Detect clean speech segments from a WAV file.
@@ -350,7 +350,7 @@ def detect_speech_segments(
 
         WAV
           ↓
-        WebRTC VAD
+        Silero VAD
           ↓
         speech/silence state smoothing
           ↓
@@ -367,9 +367,7 @@ def detect_speech_segments(
         wav_path
     )
 
-    vad = webrtcvad.Vad(
-        aggressiveness
-    )
+    model = load_silero_vad()
 
     bytes_per_frame = FRAME_BYTES
 
@@ -393,10 +391,10 @@ def detect_speech_segments(
             (i + 1) * bytes_per_frame
         ]
 
-        speech = vad.is_speech(
+        speech = _speech_probability(
+            model,
             frame,
-            SAMPLE_RATE,
-        )
+        ) >= threshold
 
         states.append(
             bool(speech)

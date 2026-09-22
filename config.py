@@ -35,18 +35,6 @@ for directory in (
 
 
 # ============================================================
-# Face backend selection
-# ============================================================
-
-# Choose the preferred backend for detection and embedding extraction.
-# Supported values: "deepface", "uniface"
-# For a UniFace test run, prefer UniFace and keep DeepFace as the fallback.
-FACE_BACKEND = "uniface"
-FACE_BACKEND_FALLBACK = "deepface"
-FACE_BACKEND_STRICT_COMPATIBILITY = True
-
-
-# ============================================================
 # Face embedding
 # ============================================================
 

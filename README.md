@@ -1,3 +1,136 @@
+# Face and Voice Recognition
+
+Streamlit application for face recognition, active-speaker estimation, and optional video transcription.
+## Supported Windows setup
+
+The default setup uses UniFace (ONNX Runtime) for face detection and recognition, with an optional NVIDIA CUDA GPU tier.
+- Python 3.10+ 64-bit (UniFace supports up to Python 3.14)
+- UniFace SCRFD detector + ArcFace recognizer (ONNX Runtime, NVIDIA CUDA)
+- UniFace FaceMesh landmarks
+- OpenCV face detection and video handling
+- SQLite and NumPy face index storage
+- Silero VAD (via sounddevice mic capture) and Whisper for audio features
+
+Use `requirements-gpu.txt` for the NVIDIA CUDA tier. The root `requirements.txt` is kept identical for compatibility with existing setup commands.
+## Installation
+
+Open PowerShell in the repository directory.
+### 1. Install prerequisites
+
+Install Python 3.10 64-bit and FFmpeg. For Python:
+
+```powershell
+winget install --id Python.Python.3.10 --exact
+```
+
+FFmpeg must be available on `PATH`:
+```powershell
+ffmpeg -version
+```
+
+### 2. Create the environment
+
+The repository's `directmlvenv` folder is ignored by Git and can be recreated safely. Remove it first only when rebuilding the environment.
+```powershell
+py -3.12 -m venv directmlvenv
+.\directmlvenv\Scripts\python.exe -m pip install --upgrade pip
+.\directmlvenv\Scripts\python.exe -m pip install --no-cache-dir -r requirements-gpu.txt
+```
+
+### 3. Verify the GPU provider
+
+```powershell
+.\directmlvenv\Scripts\python.exe -c "import onnxruntime as ort; print(ort.get_available_providers())"
+```
+
+`CUDAExecutionProvider` appearing in the list only means the plugin loaded; onnxruntime still silently falls back to CPU per-session if the actual CUDA Toolkit/cuDNN runtime DLLs are missing. Run a real detection once (e.g. start the app) and check the console for `CUDAExecutionProvider` load errors like `cublasLt64_13.dll ... missing` — if you see one, install the matching CUDA Toolkit + cuDNN redistributables (not just the GPU driver) from NVIDIA.
+
+### 4. Start the application
+```powershell
+.\directmlvenv\Scripts\python.exe -m streamlit run .\app.py
+```
+
+Open the URL printed by Streamlit. Realtime mode opens a local camera window; press `Q` or `Esc` to stop it.
+
+GPU execution is required. If CUDA/cuDNN cannot be loaded, the application now fails during UniFace initialization instead of silently consuming the CPU.
+## Recognition workflow
+
+1. Start the application and open the face database view.
+2. Create a person or process a video containing an unknown person.
+3. Unknown tracks are saved under `unknown_faces/`.
+4. Assign an unknown track to a person in the UI.
+5. Rebuild or reload the face index when prompted.
+6. Run realtime or uploaded-video recognition again.
+
+Recognition uses cosine similarity against normalized 512-dimensional ArcFace (UniFace) embeddings. The default acceptance threshold is `0.70`; tune it in `config.py` for the camera, lighting, and distance used by your application.
+Active-speaker detection is visual speaker estimation, not voice identity recognition. It combines Silero VAD speech activity with visible lip movement. Whisper transcription is optional and requires FFmpeg for audio extraction.
+
+## Important data
+
+Do not delete these while you want to preserve recognition data:
+
+- `known_faces/`: labeled face images
+- `unknown_faces/`: unresolved face samples and embeddings
+- `faces.db`: SQLite people, embeddings, and logs
+- `face_index.npz`: cached NumPy embedding index
+
+Generated outputs can be removed and regenerated:
+- `trackedVideo/`
+- `transcripts/`
+- `logs/`
+- `__pycache__/`
+- `.pytest_cache/`
+
+The `initialVideo/` folder contains user-provided input videos. Delete its contents only when those source videos are no longer needed.
+
+## Tests and diagnostics
+
+Run the tests with the CPU environment or any environment containing the test dependencies:
+
+```powershell
+.\directmlvenv\Scripts\python.exe -m pytest -q
+```
+
+Check installed package consistency:
+
+```powershell
+.\directmlvenv\Scripts\python.exe -m pip check
+```
+
+Useful diagnostics:
+```powershell
+.\directmlvenv\Scripts\python.exe -c "import onnxruntime as ort; print(ort.__version__, ort.get_available_providers())"
+.\directmlvenv\Scripts\python.exe -c "import cv2; print(cv2.__version__, cv2.data.haarcascades)"
+```
+
+If realtime startup fails, inspect the newest `logs/realtime-*.log` file. If the microphone is unavailable, face recognition can continue while active-speaker estimation is disabled.
+
+## Project layout
+
+| Path | Role |
+| --- | --- |
+| `app.py` | Streamlit entry point |
+| `realtime.py` | Camera, tracking, recognition, and active-speaker loop |
+| `realtime_launcher.py` | Starts realtime mode in a child process |
+| `video_processor.py` | Uploaded-video pipeline |
+| `face_core.py` | Embedding index and recognition |
+| `face_backend.py` | UniFace (SCRFD + ArcFace) backend |
+| `detection_core.py` | Detection and OpenCV fallback |
+| `audio_core.py` | Microphone and VAD processing |
+| `transcription_core.py` | Whisper and transcript handling |
+| `database.py` | SQLite persistence |
+| `config.py` | Application settings |
+| `tests/` | Automated tests |
+
+## Cleanup
+
+The following PowerShell command removes only caches and generated outputs. It does not remove face data, the database, source videos, or virtual environments:
+
+```powershell
+Remove-Item .\__pycache__, .\.pytest_cache, .\logs\*.log, .\transcripts\* -Recurse -Force -ErrorAction SilentlyContinue
+```
+
+To remove processed videos, review them first and then delete only the selected files from `trackedVideo/`.
 Here is your Markdown cleaned up, formatted, and visually structured for clarity and scannability.
 
 ---
@@ -9,11 +142,11 @@ This version intentionally removes FAISS.
 ## System Architecture
 
 * **Streamlit UI:** Web interface
-* **DeepFace (ArcFace):** Face embedding extraction
-* **MediaPipe Face Mesh:** Landmark detection
+* **UniFace (SCRFD + ArcFace):** Face detection + embedding extraction
+* **UniFace FaceMesh:** Landmark detection
 * **NumPy:** Cosine-similarity indexing
 * **SQLite:** Shared database
-* **WebRTC VAD:** Audio Voice Activity Detection (mic & video)
+* **Silero VAD:** Audio Voice Activity Detection (mic & video)
 * **Lip Movement + VAD:** Active speaker estimation
 * **FFmpeg:** Video audio extraction & H.264 rendering
 
@@ -40,13 +173,7 @@ pip install -r requirements.txt
 
 ```
 
-> **Note:** PyAudio can be a difficult dependency on Windows. If normal installation fails, install a matching PyAudio wheel for your Python version, then run:
-> ```powershell
-> pip install webrtcvad-wheels
-> 
-> ```
-> 
-> 
+> **Note:** sounddevice depends on the PortAudio library; on Windows it ships bundled with the wheel, so no extra system install is normally required.
 
 ---
 
@@ -136,7 +263,6 @@ FaceAndVoiceRec/
 ├── database.py
 ├── face_core.py
 ├── face_index.npz
-├── face_landmarker.task
 ├── faces.db
 ├── realtime.py
 ├── video_processor.py
@@ -176,7 +302,7 @@ FaceAndVoiceRec/
 
 
 * **VAD Configuration**
-* `VAD_AGGRESSIVENESS`
+* `VAD_SPEECH_THRESHOLD`
 * `REALTIME_SPEECH_CONFIRM_FRAMES`
 * `REALTIME_SILENCE_CONFIRM_FRAMES`
 * `MIN_SPEECH_SEGMENT_MS`
@@ -265,10 +391,10 @@ FaceAndVoiceRec/
 1. Open camera (*MSMF*, *DirectShow*, or *OpenCV default*)
 2. Load `FaceIndex`
 3. Start `VAD`
-4. Load MediaPipe
+4. Load face landmarker
 5. **Frame Processing Loop:**
 * Read frame
-* MediaPipe detection
+* Face landmark detection
 * Create bounding boxes
 * Centroid tracking
 * Face recognition
@@ -282,7 +408,7 @@ FaceAndVoiceRec/
 * Save final audio event
 * Stop VAD
 * Release camera
-* Close MediaPipe
+* Close face landmarker
 * Destroy windows
 
 

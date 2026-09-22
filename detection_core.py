@@ -42,6 +42,16 @@ def _get_opencv_cascade():
     return _OPENCV_CASCADE
 
 
+def ensure_opencv_face_detector_available():
+    cascade = _get_opencv_cascade()
+    if cascade is None or cascade.empty():
+        raise RuntimeError(
+            "OpenCV Haar cascade data is unavailable. "
+            "Install a supported OpenCV wheel with: "
+            "python -m pip install \"opencv-contrib-python>=4.10,<4.12\""
+        )
+
+
 def _starts(length: int, tile_length: int, count: int) -> List[int]:
     if count <= 1:
         return [0]
@@ -232,35 +242,20 @@ def detect_faces_opencv(
         return []
 
 
-def _detect_faces_retinaface(tile: np.ndarray) -> List[Detection]:
-    """Run DeepFace RetinaFace lazily and return tile-space boxes.
-    Falls back to OpenCV cascade if RetinaFace fails.
+def _detect_faces_uniface(tile: np.ndarray) -> List[Detection]:
+    """Run the UniFace SCRFD detector lazily and return tile-space boxes.
+    Falls back to OpenCV cascade if UniFace fails.
     """
     try:
-        from deepface import DeepFace
+        from face_backend import get_face_backend
 
-        faces = DeepFace.extract_faces(
-            img_path=tile,
-            detector_backend="retinaface",
-            enforce_detection=False,
-            expand_percentage=0,
-        )
+        detections = get_face_backend().detect_faces(tile)
     except Exception as error:
-        logger.warning("RetinaFace detection failed, falling back to OpenCV: %s", error)
+        logger.warning("UniFace detection failed, falling back to OpenCV: %s", error)
         return _detect_faces_opencv(tile)
 
-    detections = []
-    for face in faces:
-        area = face.get("facial_area", {})
-        x = float(area.get("x", 0))
-        y = float(area.get("y", 0))
-        width = float(area.get("w", 0))
-        height = float(area.get("h", 0))
-        confidence = float(face.get("confidence", 0.0))
-        # Filter out very low-confidence detections
-        if width > 0 and height > 0 and confidence >= 0.5:
-            detections.append((x, y, width, height, confidence))
-    return detections
+    # Filter out very low-confidence detections
+    return [d for d in detections if d[4] >= 0.5]
 
 
 def detect_faces_tiled(
@@ -273,13 +268,13 @@ def detect_faces_tiled(
 ) -> List[Detection]:
     """Detect faces in overlapping upscaled tiles and merge duplicate boxes.
     
-    Includes automatic fallback from RetinaFace to OpenCV if primary detector fails.
+    Includes automatic fallback from UniFace to OpenCV if primary detector fails.
     Filters detections by minimum confidence threshold.
     """
     all_detections = []
 
     try:
-        full_frame_detections = _detect_faces_retinaface(frame)
+        full_frame_detections = _detect_faces_uniface(frame)
         # Apply confidence filtering to full-frame detections as well
         full_frame_detections = [d for d in full_frame_detections if d[4] >= min_confidence]
         all_detections.extend(
@@ -296,7 +291,7 @@ def detect_faces_tiled(
     for tile, _tile_index, origin in tile_frame(frame, tile_grid, overlap_ratio):
         try:
             upscaled = upscale_tile(tile, upscale_factor)
-            detections = _detect_faces_retinaface(upscaled)
+            detections = _detect_faces_uniface(upscaled)
             # Filter by confidence before remapping
             detections = [d for d in detections if d[4] >= min_confidence]
             all_detections.extend(

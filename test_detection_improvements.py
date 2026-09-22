@@ -35,19 +35,19 @@ def test_video_processor_timestamp_fix():
     print("✓ video_processor.py correctly calculates timestamp_ms from timestamp")
 
 
-def test_retinaface_has_fallback():
-    """Verify _detect_faces_retinaface has fallback logic to OpenCV."""
+def test_uniface_has_fallback():
+    """Verify _detect_faces_uniface has fallback logic to OpenCV."""
     with open("detection_core.py", "r") as f:
         content = f.read()
     
     # Check that both functions exist
     assert "_detect_faces_opencv" in content
-    assert "_detect_faces_retinaface" in content
+    assert "_detect_faces_uniface" in content
     
-    # Check that fallback is called within the RetinaFace function
-    retinaface_section = content[content.find("def _detect_faces_retinaface"):content.find("def _detect_faces_retinaface")+2000]
-    assert "except" in retinaface_section and "return" in retinaface_section
-    print("✓ RetinaFace has OpenCV fallback in exception handler")
+    # Check that fallback is called within the UniFace function
+    uniface_section = content[content.find("def _detect_faces_uniface"):content.find("def _detect_faces_uniface")+2000]
+    assert "except" in uniface_section and "return" in uniface_section
+    print("✓ UniFace has OpenCV fallback in exception handler")
 
 
 def test_confidence_filtering_in_tiled():
@@ -68,7 +68,7 @@ if __name__ == "__main__":
         test_opencv_fallback_exists()
         test_detect_faces_tiled_has_min_confidence_param()
         test_video_processor_timestamp_fix()
-        test_retinaface_has_fallback()
+        test_uniface_has_fallback()
         test_confidence_filtering_in_tiled()
         
         print("\n✓ All detection improvement checks passed!\n")

@@ -1,4 +1,5 @@
 import config
+from pathlib import Path
 
 
 def test_tile_grid_is_two_dimensional():
@@ -35,10 +36,13 @@ def test_face_upscale_target_size_matches_arcface_input():
     assert config.FACE_UPSCALE_TARGET_SIZE == 112
 
 
-def test_face_backend_defaults_prefer_uniface_with_deepface_fallback():
-    assert config.FACE_BACKEND == "uniface"
-    assert config.FACE_BACKEND_FALLBACK == "deepface"
-    assert config.FACE_BACKEND_STRICT_COMPATIBILITY is True
+def test_opencv_dependency_excludes_wheels_without_haar_data():
+    requirements = (
+        Path(__file__).resolve().parent.parent / "requirements.txt"
+    ).read_text(encoding="utf-8")
+
+    assert "opencv-contrib-python>=4.10,<4.12" in requirements
+    assert "opencv-python>=4.10,<4.12" not in requirements
 
 
 def test_realtime_detection_defaults_prioritize_responsiveness():

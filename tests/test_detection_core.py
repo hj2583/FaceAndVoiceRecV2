@@ -1,12 +1,14 @@
 from unittest.mock import patch, Mock
 
 import numpy as np
+import pytest
 
 from detection_core import (
     _calculate_iou,
-    _detect_faces_retinaface,
+    _detect_faces_uniface,
     detect_faces_opencv,
     detect_faces_tiled,
+    ensure_opencv_face_detector_available,
     nms_merge,
     remap_tile_detections,
     tile_frame,
@@ -77,7 +79,7 @@ def test_detect_faces_tiled_runs_a_full_frame_pass_in_addition_to_tiles():
         seen_shapes.append(image.shape[:2])
         return []
 
-    with patch("detection_core._detect_faces_retinaface", side_effect=fake_detect):
+    with patch("detection_core._detect_faces_uniface", side_effect=fake_detect):
         detect_faces_tiled(frame, (3, 2), 0.2, 2.0, 0.4)
 
     assert len(seen_shapes) == 7
@@ -85,47 +87,30 @@ def test_detect_faces_tiled_runs_a_full_frame_pass_in_addition_to_tiles():
 
 
 def test_detect_faces_filters_low_confidence_detections():
-    """Ensure low-confidence RetinaFace detections are filtered."""
+    """Ensure low-confidence UniFace detections are filtered."""
     tile = np.zeros((64, 64, 3), dtype=np.uint8)
-    
-    fake_response = [
-        {
-            "facial_area": {"x": 4, "y": 6, "w": 12, "h": 14},
-            "confidence": 0.3,  # Below 0.5 threshold
-        },
-        {
-            "facial_area": {"x": 20, "y": 20, "w": 15, "h": 15},
-            "confidence": 0.9,  # Above 0.5 threshold
-        }
+
+    fake_detections = [
+        (4.0, 6.0, 12.0, 14.0, 0.3),  # Below 0.5 threshold
+        (20.0, 20.0, 15.0, 15.0, 0.9),  # Above 0.5 threshold
     ]
-    
-    # Inject a fake deepface module using types.ModuleType to avoid importing
-    # the real dependency. This more closely models the module import boundary.
-    import types
-    import sys
 
-    module = types.ModuleType("deepface")
+    fake_backend = Mock()
+    fake_backend.detect_faces.return_value = fake_detections
+    with patch("face_backend.get_face_backend", return_value=fake_backend):
+        detections = _detect_faces_uniface(tile)
 
-    class DeepFace:
-        @staticmethod
-        def extract_faces(*_args, **_kwargs):
-            return fake_response
-
-    module.DeepFace = DeepFace
-    with patch.dict(sys.modules, {"deepface": module}):
-        detections = _detect_faces_retinaface(tile)
-    
     # Only the high-confidence detection should be returned
     assert len(detections) == 1
     assert detections[0][4] == 0.9
 
 
-def test_detect_faces_falls_back_to_opencv_when_retinaface_fails():
-    """Ensure OpenCV cascade fallback works when RetinaFace raises exception."""
+def test_detect_faces_falls_back_to_opencv_when_uniface_fails():
+    """Ensure OpenCV cascade fallback works when UniFace raises an exception."""
     tile = np.zeros((100, 100, 3), dtype=np.uint8)
     # Draw a simple white rectangle to simulate a face region
     tile[20:80, 20:80] = 255
-    
+
     from detection_core import _detect_faces_opencv
 
     # Provide a simple cascade that doesn't error for fallback
@@ -134,21 +119,11 @@ def test_detect_faces_falls_back_to_opencv_when_retinaface_fails():
     cascade.detectMultiScale.return_value = []
 
     with patch("detection_core._get_opencv_cascade", return_value=cascade):
-        # Inject a fake deepface module that raises to trigger fallback
-        import types
-        import sys
+        fake_backend = Mock()
+        fake_backend.detect_faces.side_effect = RuntimeError("ONNX runtime error")
+        with patch("face_backend.get_face_backend", return_value=fake_backend):
+            detections = _detect_faces_uniface(tile)
 
-        module = types.ModuleType("deepface")
-
-        class DeepFace:
-            @staticmethod
-            def extract_faces(*_args, **_kwargs):
-                raise RuntimeError("TensorFlow error")
-
-        module.DeepFace = DeepFace
-        with patch.dict(sys.modules, {"deepface": module}):
-            detections = _detect_faces_retinaface(tile)
-    
     # Fallback should return OpenCV results (might be empty on blank test image)
     # Just verify it doesn't crash and returns a list
     assert isinstance(detections, list)
@@ -244,18 +219,27 @@ def test_detect_faces_opencv_contains_detection_failure():
         assert detect_faces_opencv(np.zeros((40, 40, 3), dtype=np.uint8)) == []
 
 
+def test_ensure_opencv_face_detector_available_rejects_missing_cascade():
+    cascade = Mock()
+    cascade.empty.return_value = True
+
+    with patch("detection_core._get_opencv_cascade", return_value=cascade):
+        with pytest.raises(RuntimeError, match="Haar cascade data is unavailable"):
+            ensure_opencv_face_detector_available()
+
+
 def test_detect_faces_tiled_with_confidence_filtering():
     """Ensure detect_faces_tiled passes through confidence filtering."""
     frame = np.zeros((120, 120, 3), dtype=np.uint8)
     frame[20:80, 20:80] = 255  # Simulate face region
     
-    # Mock RetinaFace to return mixed-confidence detections
+    # Mock UniFace to return mixed-confidence detections
     mixed_detections = [
         (10.0, 10.0, 30.0, 30.0, 0.3),  # Low confidence
         (40.0, 40.0, 30.0, 30.0, 0.8),  # High confidence
     ]
     
-    with patch("detection_core._detect_faces_retinaface", return_value=mixed_detections):
+    with patch("detection_core._detect_faces_uniface", return_value=mixed_detections):
         detections = detect_faces_tiled(
             frame,
             tile_grid=(1, 1),

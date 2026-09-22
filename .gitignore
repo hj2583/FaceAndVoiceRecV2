@@ -20,3 +20,7 @@ logs/*
 .worktrees/
 .superpowers/
 .pytest_cache/
+directmlvenv/
+*.db-shm
+*.db-wal
+*.log

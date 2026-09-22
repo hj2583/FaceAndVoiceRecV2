@@ -154,6 +154,28 @@ def extract_embedding(face_crop):
         return None
 
 
+def load_or_extract_embedding(embedding_path, image_path):
+    """Load a valid sample embedding, rebuilding it from the image if needed."""
+    try:
+        embedding = _load_embedding_file(Path(embedding_path))
+        normalized = _normalize(embedding)
+        if normalized is not None and len(normalized) == EMBEDDING_DIM:
+            return normalized
+    except Exception:
+        logging.warning("Invalid sample embedding: %s", embedding_path)
+
+    image = cv2.imread(str(image_path))
+    if image is None:
+        return None
+
+    rebuilt = extract_embedding(image)
+    if rebuilt is None:
+        return None
+
+    np.save(embedding_path, rebuilt)
+    return rebuilt
+
+
 class FaceIndex:
     """
     Small/medium face database index implemented with NumPy.
