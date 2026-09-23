@@ -52,6 +52,7 @@ from tracking import (
 
 from detection_core import ensure_opencv_face_detector_available
 from face_backend import get_face_backend
+from frame_pipeline import run_threaded_pipeline
 from realtime_runtime import DetectionScheduler, RollingFps
 
 
@@ -73,6 +74,10 @@ class SpeakingState:
 
     def set(self, value):
         self.value = value
+
+
+class _WindowClosed(Exception):
+    """Signals that the display window was closed by the user."""
 
 
 def start_realtime_vad(callback, vad_factory=RealtimeVAD):
@@ -311,7 +316,7 @@ def run(
             REALTIME_FPS_WINDOW_SECONDS
         )
 
-        while True:
+        def _read_frame():
 
             # =================================================
             # Read camera frame
@@ -319,8 +324,10 @@ def run(
 
             ok, frame = cap.read()
 
-            if not ok:
-                break
+            return frame if ok else None
+
+        def _process(frame):
+            nonlocal frame_no, face_detections, last_landmark_timestamp_ms, last_speaker_id, last_speech_start, audio_available
 
             frame_no += 1
 
@@ -1233,6 +1240,10 @@ def run(
                 2,
             )
 
+            return frame
+
+        def _write_frame(frame):
+
             # =================================================
             # Display
             # =================================================
@@ -1248,7 +1259,7 @@ def run(
                 key == ord("q")
                 or key == 27
             ):
-                break
+                raise _WindowClosed()
 
             try:
                 if (
@@ -1258,9 +1269,20 @@ def run(
                     )
                     < 1
                 ):
-                    break
+                    raise _WindowClosed()
             except cv2.error:
-                break
+                raise _WindowClosed()
+
+        try:
+            run_threaded_pipeline(
+                _read_frame,
+                _process,
+                _write_frame,
+                drop_oldest=True,
+                poll_interval=0.05,
+            )
+        except _WindowClosed:
+            pass
 
     finally:
 
