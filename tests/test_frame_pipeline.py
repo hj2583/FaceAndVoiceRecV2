@@ -4,7 +4,7 @@ import time
 
 import pytest
 
-from frame_pipeline import run_threaded_pipeline
+from frame_pipeline import _dequeue, _enqueue, run_threaded_pipeline
 
 
 def test_preserves_order_and_count_with_blocking_queues():
@@ -84,3 +84,43 @@ def test_drop_oldest_keeps_latest_item_when_consumer_is_slow():
     assert written[0] == produced[0]
     assert written[-1] == produced[-1]
     assert len(written) < len(produced)
+
+
+def test_enqueue_blocks_instead_of_dropping_before_first_item_is_consumed():
+    """Mechanism-level test for the drop_oldest startup handshake.
+
+    Reproduces the exact race the handshake guards against: a producer that
+    tries to overwrite a full maxsize=1 queue before the consumer has ever
+    dequeued from it. Before the fix, `_enqueue` would silently drop the
+    still-unconsumed first item via `_put_latest`; the handshake must instead
+    block the second producer until the first item has been consumed.
+    """
+    q = queue.Queue(maxsize=1)
+    stop_event = threading.Event()
+    first_consumed = threading.Event()
+    second_put_attempted = threading.Event()
+    second_put_done = threading.Event()
+
+    assert _enqueue(q, "first", stop_event, True, 0.02, first_consumed)
+
+    def _try_overwrite():
+        second_put_attempted.set()
+        _enqueue(q, "second", stop_event, True, 0.02, first_consumed)
+        second_put_done.set()
+
+    thread = threading.Thread(target=_try_overwrite)
+    thread.start()
+    assert second_put_attempted.wait(timeout=2.0)
+
+    # The producer must still be blocked: "first" must not have been
+    # overwritten before anyone consumed it.
+    time.sleep(0.1)
+    assert not second_put_done.is_set()
+
+    ok, item = _dequeue(q, stop_event, 0.02, first_consumed)
+    assert ok
+    assert item == "first"
+
+    thread.join(timeout=2.0)
+    assert not thread.is_alive()
+    assert second_put_done.is_set()

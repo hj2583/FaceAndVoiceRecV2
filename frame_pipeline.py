@@ -1,7 +1,6 @@
 import logging
 import queue
 import threading
-import time
 
 logger = logging.getLogger(__name__)
 
@@ -47,14 +46,29 @@ def _put_latest(q, item):
                 pass
 
 
-def _enqueue(q, item, stop_event, drop_oldest, poll_interval):
+def _enqueue(q, item, stop_event, drop_oldest, poll_interval, first_consumed=None):
     # The end-of-stream sentinel must never be dropped in favor of a data
     # item still waiting to be consumed, even in drop_oldest mode, or the
     # last real item would be silently lost. Only real items use drop-oldest
     # overwrite semantics; the sentinel always waits for a free slot.
     if drop_oldest and item is not _SENTINEL:
-        _put_latest(q, item)
-        return True
+        if first_consumed is None or first_consumed.is_set():
+            _put_latest(q, item)
+            return True
+        # Deterministic startup handshake: until the consumer has actually
+        # dequeued at least one item from this queue, block on a full queue
+        # instead of overwriting it, so the very first item can never be
+        # silently dropped by a producer that outruns the consumer's startup.
+        while not stop_event.is_set():
+            if first_consumed.is_set():
+                _put_latest(q, item)
+                return True
+            try:
+                q.put(item, timeout=poll_interval)
+                return True
+            except queue.Full:
+                continue
+        return False
     while not stop_event.is_set():
         try:
             q.put(item, timeout=poll_interval)
@@ -64,11 +78,14 @@ def _enqueue(q, item, stop_event, drop_oldest, poll_interval):
     return False
 
 
-def _dequeue(q, stop_event, poll_interval):
+def _dequeue(q, stop_event, poll_interval, first_consumed=None):
     """Returns (True, item) on success, (False, None) if stop_event fired first."""
     while not stop_event.is_set():
         try:
-            return True, q.get(timeout=poll_interval)
+            item = q.get(timeout=poll_interval)
+            if first_consumed is not None:
+                first_consumed.set()
+            return True, item
         except queue.Empty:
             continue
     return False, None
@@ -93,8 +110,12 @@ def run_threaded_pipeline(
     of the reader blocking if the compute/writer stages fall behind.
 
     When drop_oldest is True, both internal queues have maxsize=1 and silently
-    replace the queued item when full: the newest item always wins, and no
-    stage ever blocks waiting for a slow downstream consumer.
+    replace the queued item when full: the newest item always wins. As a
+    one-time startup handshake, the reader/compute stage blocks on a full
+    queue until the downstream stage has dequeued at least one item from it,
+    so the very first item can never be silently dropped by a producer that
+    outruns the consumer's startup; after that first item has been consumed,
+    no stage ever blocks waiting for a slow downstream consumer again.
 
     Raises the first exception encountered in any stage, after all three
     threads have stopped and been joined.
@@ -105,47 +126,37 @@ def run_threaded_pipeline(
 
     stop_event = threading.Event()
     error_box = PipelineErrorBox()
-    compute_ready = threading.Event()
-    writer_ready = threading.Event()
+    raw_first_consumed = threading.Event() if drop_oldest else None
+    out_first_consumed = threading.Event() if drop_oldest else None
 
     def _reader():
-        # Wait for the downstream stages to be actively dequeuing before
-        # producing, so a fast reader can't race past them and overwrite
-        # the drop_oldest queues before anything has consumed an item.
-        compute_ready.wait()
-        writer_ready.wait()
-        first_item = True
         while not stop_event.is_set():
             frame = read_frame()
             if frame is None:
                 _enqueue(raw_q, _SENTINEL, stop_event, drop_oldest, poll_interval)
                 return
-            if not _enqueue(raw_q, frame, stop_event, drop_oldest, poll_interval):
+            if not _enqueue(
+                raw_q, frame, stop_event, drop_oldest, poll_interval, raw_first_consumed
+            ):
                 return
-            if drop_oldest and first_item:
-                # Give the downstream stages a real chance to drain this
-                # first item before subsequent items start overwriting the
-                # single-slot queues.
-                first_item = False
-                time.sleep(poll_interval)
 
     def _compute():
-        compute_ready.set()
         while True:
-            ok, frame = _dequeue(raw_q, stop_event, poll_interval)
+            ok, frame = _dequeue(raw_q, stop_event, poll_interval, raw_first_consumed)
             if not ok:
                 return
             if frame is _SENTINEL:
                 _enqueue(out_q, _SENTINEL, stop_event, drop_oldest, poll_interval)
                 return
             processed = process_frame(frame)
-            if not _enqueue(out_q, processed, stop_event, drop_oldest, poll_interval):
+            if not _enqueue(
+                out_q, processed, stop_event, drop_oldest, poll_interval, out_first_consumed
+            ):
                 return
 
     def _writer():
-        writer_ready.set()
         while True:
-            ok, frame = _dequeue(out_q, stop_event, poll_interval)
+            ok, frame = _dequeue(out_q, stop_event, poll_interval, out_first_consumed)
             if not ok:
                 return
             if frame is _SENTINEL:
