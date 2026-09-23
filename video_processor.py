@@ -52,6 +52,7 @@ from face_core import (
 )
 
 from tracking import CentroidTracker
+from frame_pipeline import run_threaded_pipeline
 
 
 # ============================================================
@@ -481,666 +482,657 @@ def process_video_pipeline(
     # Processing
     # ========================================================
 
-    try:
+    def _read_frame():
+        ok, frame = cap.read()
+        return frame if ok else None
 
-        while True:
+    def _process(frame):
+        nonlocal frame_no, last_tiled_detections
 
-            ok, frame = cap.read()
+        frame_no += 1
 
-            if not ok:
-                break
+        timestamp = (
+            frame_no / fps
+        )
 
-            frame_no += 1
+        # =================================================
+        # Tiled UniFace detection
+        # =================================================
 
-            timestamp = (
-                frame_no / fps
+        if (
+            not last_tiled_detections
+            or frame_no % TILED_DETECTION_INTERVAL == 1
+        ):
+            last_tiled_detections = detect_faces_tiled(
+                frame,
+                tile_grid=TILE_GRID,
+                overlap_ratio=TILE_OVERLAP,
+                upscale_factor=TILE_UPSCALE,
+                nms_iou_threshold=NMS_IOU_THRESHOLD,
             )
 
+        tiled_detections = last_tiled_detections
+
+        # =================================================
+        # BGR → RGB for landmark enrichment
+        # =================================================
+
+        rgb = cv2.cvtColor(
+            frame,
+            cv2.COLOR_BGR2RGB,
+        )
+
+        # Monotonically increasing timestamp for the landmarker's video-mode API
+        timestamp_ms = int(timestamp * 1000)
+
+        detections = []
+        landmark_call_offset = 0
+        for x, y, box_width, box_height, _confidence in tiled_detections:
+            bbox = (
+                int(x),
+                int(y),
+                int(x + box_width),
+                int(y + box_height),
+            )
+            x0, y0, x1, y1 = bbox
+            face_width = x1 - x0
+            face_height = y1 - y0
+            if face_width < MIN_FACE_SIZE or face_height < MIN_FACE_SIZE:
+                continue
+
+            landmarks = None
+            lip_open = None
+            if (
+                face_width >= LANDMARK_MIN_FACE_SIZE
+                and face_height >= LANDMARK_MIN_FACE_SIZE
+            ):
+                crop_rgb = rgb[y0:y1, x0:x1]
+                if crop_rgb.size:
+                    landmark_call_offset += 1
+                    crop_result = face_landmarker.detect_for_video(
+                        crop_rgb,
+                        timestamp_ms + landmark_call_offset,
+                    )
+                    if crop_result.face_landmarks:
+                        landmarks = crop_result.face_landmarks[0]
+                        lip_open = lip_open_ratio(landmarks)
+
+            detections.append(
+                {
+                    "bbox": bbox,
+                    "landmarks": landmarks,
+                    "lip_open": lip_open,
+                }
+            )
+
+        # =================================================
+        # Tracking
+        # =================================================
+
+        assignments = tracker.update(
+            detections,
+            frame_no,
+        )
+
+        # =================================================
+        # Audio speech state
+        # =================================================
+
+        audio_is_speech = any(
+            start <= timestamp <= end
+            for start, end in speech_segments
+        )
+
+        speaking_candidates = []
+
+        # =================================================
+        # Process tracked faces
+        # =================================================
+
+        for detection, track in assignments:
+
+            # ------------------------------------------------
+            # Initialize recognition state
+            # ------------------------------------------------
+
+            if not hasattr(
+                track,
+                "recognition_failures",
+            ):
+                track.recognition_failures = 0
+
+            if not hasattr(
+                track,
+                "last_good_embedding",
+            ):
+                track.last_good_embedding = None
+
+            if not hasattr(
+                track,
+                "last_good_similarity",
+            ):
+                track.last_good_similarity = 0.0
+
+            if not hasattr(
+                track,
+                "unknown_confirmations",
+            ):
+                track.unknown_confirmations = 0
+
+            if not hasattr(
+                track,
+                "registered_unknown",
+            ):
+                track.registered_unknown = False
+
+            # ------------------------------------------------
+            # Bounding box
+            # ------------------------------------------------
+
+            x0, y0, x1, y1 = (
+                detection["bbox"]
+            )
+
+            face_width = x1 - x0
+            face_height = y1 - y0
+
+            crop = frame[
+                y0:y1,
+                x0:x1,
+            ]
+
+            if crop.size == 0:
+                continue
+
             # =================================================
-            # Tiled UniFace detection
+            # Face recognition
+            # =================================================
+
+            can_recognize = (
+                face_width
+                >= MIN_RECOGNITION_FACE_SIZE
+                and
+                face_height
+                >= MIN_RECOGNITION_FACE_SIZE
+            )
+
+            should_recognize = (
+                track.embedding is None
+                or
+                frame_no
+                % RECOGNITION_INTERVAL
+                == 0
+            )
+
+            if (
+                can_recognize
+                and should_recognize
+            ):
+
+                recognition_crop = (
+                    prepare_recognition_crop(
+                        crop
+                    )
+                )
+
+                if recognition_crop is not None:
+
+                    embedding = (
+                        extract_embedding(
+                            recognition_crop
+                        )
+                    )
+
+                    if embedding is not None:
+
+                        match = (
+                            index.search(
+                                embedding
+                            )
+                        )
+
+                        similarity = (
+                            match.get(
+                                "similarity",
+                                0.0,
+                            )
+                            if match
+                            else 0.0
+                        )
+
+                        # =================================================
+                        # Valid recognition
+                        # =================================================
+
+                        if (
+                            match
+                            and
+                            similarity
+                            >= RECOGNITION_THRESHOLD
+                        ):
+
+                            from database import (
+                                get_conn,
+                            )
+
+                            with get_conn() as conn:
+
+                                row = conn.execute(
+                                    """
+                                    SELECT
+                                        p.person_id,
+                                        p.name
+                                    FROM face_embeddings fe
+                                    JOIN persons p
+                                        ON p.person_id =
+                                           fe.person_id
+                                    WHERE fe.embedding_id = ?
+                                    """,
+                                    (
+                                        match[
+                                            "embedding_id"
+                                        ],
+                                    ),
+                                ).fetchone()
+
+                            if row:
+
+                                track.person_id = (
+                                    int(row[0])
+                                )
+
+                                track.person_name = (
+                                    row[1]
+                                )
+
+                                track.confidence = (
+                                    float(
+                                        similarity
+                                    )
+                                )
+
+                                track.embedding = (
+                                    embedding
+                                )
+
+                                track.last_good_embedding = (
+                                    embedding
+                                )
+
+                                track.last_good_similarity = (
+                                    float(
+                                        similarity
+                                    )
+                                )
+
+                                track.recognition_failures = 0
+
+                                track.unknown_confirmations = 0
+
+                        # =================================================
+                        # Recognition failed
+                        # =================================================
+
+                        else:
+
+                            track.recognition_failures += 1
+
+                            # ------------------------------------------------
+                            # Already recognized:
+                            # temporarily keep identity.
+                            # ------------------------------------------------
+
+                            if (
+                                track.person_id
+                                is not None
+                            ):
+
+                                if (
+                                    track.recognition_failures
+                                    <= MAX_RECOGNITION_FAILURES
+                                ):
+
+                                    if (
+                                        track.last_good_embedding
+                                        is not None
+                                    ):
+
+                                        track.embedding = (
+                                            track.last_good_embedding
+                                        )
+
+                                logging.debug(
+                                    "Temporary recognition "
+                                    "failure: track=%s "
+                                    "person=%s "
+                                    "failure=%s/%s",
+                                    track.track_id,
+                                    track.person_name,
+                                    track.recognition_failures,
+                                    MAX_RECOGNITION_FAILURES,
+                                )
+
+                            # ------------------------------------------------
+                            # Never recognized:
+                            # remain Unknown.
+                            # ------------------------------------------------
+
+                            else:
+
+                                track.person_name = (
+                                    "Unknown"
+                                )
+
+                                track.confidence = 0.0
+
+                                track.embedding = (
+                                    embedding
+                                )
+
+            # =================================================
+            # Unknown face registration
             # =================================================
 
             if (
-                not last_tiled_detections
-                or frame_no % TILED_DETECTION_INTERVAL == 1
+                track.person_id is None
+                and
+                track.person_name == "Unknown"
+                and
+                track.embedding is not None
             ):
-                last_tiled_detections = detect_faces_tiled(
-                    frame,
-                    tile_grid=TILE_GRID,
-                    overlap_ratio=TILE_OVERLAP,
-                    upscale_factor=TILE_UPSCALE,
-                    nms_iou_threshold=NMS_IOU_THRESHOLD,
-                )
 
-            tiled_detections = last_tiled_detections
+                track.unknown_confirmations += 1
 
-            # =================================================
-            # BGR → RGB for landmark enrichment
-            # =================================================
-
-            rgb = cv2.cvtColor(
-                frame,
-                cv2.COLOR_BGR2RGB,
-            )
-
-            # Monotonically increasing timestamp for the landmarker's video-mode API
-            timestamp_ms = int(timestamp * 1000)
-
-            detections = []
-            landmark_call_offset = 0
-            for x, y, box_width, box_height, _confidence in tiled_detections:
-                bbox = (
-                    int(x),
-                    int(y),
-                    int(x + box_width),
-                    int(y + box_height),
-                )
-                x0, y0, x1, y1 = bbox
-                face_width = x1 - x0
-                face_height = y1 - y0
-                if face_width < MIN_FACE_SIZE or face_height < MIN_FACE_SIZE:
-                    continue
-
-                landmarks = None
-                lip_open = None
                 if (
-                    face_width >= LANDMARK_MIN_FACE_SIZE
-                    and face_height >= LANDMARK_MIN_FACE_SIZE
+                    track.unknown_confirmations
+                    >= UNKNOWN_CONFIRMATIONS
+                    and
+                    not track.registered_unknown
                 ):
-                    crop_rgb = rgb[y0:y1, x0:x1]
-                    if crop_rgb.size:
-                        landmark_call_offset += 1
-                        crop_result = face_landmarker.detect_for_video(
-                            crop_rgb,
-                            timestamp_ms + landmark_call_offset,
-                        )
-                        if crop_result.face_landmarks:
-                            landmarks = crop_result.face_landmarks[0]
-                            lip_open = lip_open_ratio(landmarks)
 
-                detections.append(
+                    quality = face_quality(
+                        crop
+                    )
+
+                    if (
+                        quality
+                        >= UNKNOWN_MIN_QUALITY
+                    ):
+
+                        UNKNOWN_FACES_DIR.mkdir(
+                            parents=True,
+                            exist_ok=True,
+                        )
+
+                        unknown_label = (
+                            f"track_{track.track_id}"
+                        )
+
+                        image_path = (
+                            UNKNOWN_FACES_DIR
+                            / f"{unknown_label}.jpg"
+                        )
+
+                        embedding_path = (
+                            UNKNOWN_FACES_DIR
+                            / f"{unknown_label}.npy"
+                        )
+
+                        success = cv2.imwrite(
+                            str(image_path),
+                            crop,
+                        )
+
+                        if success:
+
+                            np.save(
+                                embedding_path,
+                                track.embedding,
+                            )
+
+                            try:
+
+                                register_unknown(
+                                    label=unknown_label,
+                                    embedding=track.embedding,
+                                    image_path=image_path,
+                                )
+
+                                track.registered_unknown = (
+                                    True
+                                )
+
+                            except Exception:
+
+                                logging.exception(
+                                    "Failed to register "
+                                    "unknown face"
+                                )
+
+                        else:
+
+                            logging.warning(
+                                "Could not save unknown "
+                                "face image: %s",
+                                image_path,
+                            )
+
+            # =================================================
+            # Recognition log
+            # =================================================
+
+            if (
+                track.person_id
+                is not None
+            ):
+
+                recognition_logs.append(
                     {
-                        "bbox": bbox,
-                        "landmarks": landmarks,
-                        "lip_open": lip_open,
+                        "timestamp_sec": round(
+                            timestamp,
+                            2,
+                        ),
+                        "person_name": (
+                            track.person_name
+                        ),
+                        "confidence": round(
+                            track.confidence,
+                            4,
+                        ),
                     }
                 )
 
             # =================================================
-            # Tracking
+            # Lip movement
             # =================================================
 
-            assignments = tracker.update(
-                detections,
-                frame_no,
+            track.lip_open = (
+                detection["lip_open"]
             )
 
             # =================================================
-            # Audio speech state
+            # Active speaker candidates
             # =================================================
-
-            audio_is_speech = any(
-                start <= timestamp <= end
-                for start, end in speech_segments
-            )
-
-            speaking_candidates = []
-
-            # =================================================
-            # Process tracked faces
-            # =================================================
-
-            for detection, track in assignments:
-
-                # ------------------------------------------------
-                # Initialize recognition state
-                # ------------------------------------------------
-
-                if not hasattr(
-                    track,
-                    "recognition_failures",
-                ):
-                    track.recognition_failures = 0
-
-                if not hasattr(
-                    track,
-                    "last_good_embedding",
-                ):
-                    track.last_good_embedding = None
-
-                if not hasattr(
-                    track,
-                    "last_good_similarity",
-                ):
-                    track.last_good_similarity = 0.0
-
-                if not hasattr(
-                    track,
-                    "unknown_confirmations",
-                ):
-                    track.unknown_confirmations = 0
-
-                if not hasattr(
-                    track,
-                    "registered_unknown",
-                ):
-                    track.registered_unknown = False
-
-                # ------------------------------------------------
-                # Bounding box
-                # ------------------------------------------------
-
-                x0, y0, x1, y1 = (
-                    detection["bbox"]
-                )
-
-                face_width = x1 - x0
-                face_height = y1 - y0
-
-                crop = frame[
-                    y0:y1,
-                    x0:x1,
-                ]
-
-                if crop.size == 0:
-                    continue
-
-                # =================================================
-                # Face recognition
-                # =================================================
-
-                can_recognize = (
-                    face_width
-                    >= MIN_RECOGNITION_FACE_SIZE
-                    and
-                    face_height
-                    >= MIN_RECOGNITION_FACE_SIZE
-                )
-
-                should_recognize = (
-                    track.embedding is None
-                    or
-                    frame_no
-                    % RECOGNITION_INTERVAL
-                    == 0
-                )
-
-                if (
-                    can_recognize
-                    and should_recognize
-                ):
-
-                    recognition_crop = (
-                        prepare_recognition_crop(
-                            crop
-                        )
-                    )
-
-                    if recognition_crop is not None:
-
-                        embedding = (
-                            extract_embedding(
-                                recognition_crop
-                            )
-                        )
-
-                        if embedding is not None:
-
-                            match = (
-                                index.search(
-                                    embedding
-                                )
-                            )
-
-                            similarity = (
-                                match.get(
-                                    "similarity",
-                                    0.0,
-                                )
-                                if match
-                                else 0.0
-                            )
-
-                            # =================================================
-                            # Valid recognition
-                            # =================================================
-
-                            if (
-                                match
-                                and
-                                similarity
-                                >= RECOGNITION_THRESHOLD
-                            ):
-
-                                from database import (
-                                    get_conn,
-                                )
-
-                                with get_conn() as conn:
-
-                                    row = conn.execute(
-                                        """
-                                        SELECT
-                                            p.person_id,
-                                            p.name
-                                        FROM face_embeddings fe
-                                        JOIN persons p
-                                            ON p.person_id =
-                                               fe.person_id
-                                        WHERE fe.embedding_id = ?
-                                        """,
-                                        (
-                                            match[
-                                                "embedding_id"
-                                            ],
-                                        ),
-                                    ).fetchone()
-
-                                if row:
-
-                                    track.person_id = (
-                                        int(row[0])
-                                    )
-
-                                    track.person_name = (
-                                        row[1]
-                                    )
-
-                                    track.confidence = (
-                                        float(
-                                            similarity
-                                        )
-                                    )
-
-                                    track.embedding = (
-                                        embedding
-                                    )
-
-                                    track.last_good_embedding = (
-                                        embedding
-                                    )
-
-                                    track.last_good_similarity = (
-                                        float(
-                                            similarity
-                                        )
-                                    )
-
-                                    track.recognition_failures = 0
-
-                                    track.unknown_confirmations = 0
-
-                            # =================================================
-                            # Recognition failed
-                            # =================================================
-
-                            else:
-
-                                track.recognition_failures += 1
-
-                                # ------------------------------------------------
-                                # Already recognized:
-                                # temporarily keep identity.
-                                # ------------------------------------------------
-
-                                if (
-                                    track.person_id
-                                    is not None
-                                ):
-
-                                    if (
-                                        track.recognition_failures
-                                        <= MAX_RECOGNITION_FAILURES
-                                    ):
-
-                                        if (
-                                            track.last_good_embedding
-                                            is not None
-                                        ):
-
-                                            track.embedding = (
-                                                track.last_good_embedding
-                                            )
-
-                                    logging.debug(
-                                        "Temporary recognition "
-                                        "failure: track=%s "
-                                        "person=%s "
-                                        "failure=%s/%s",
-                                        track.track_id,
-                                        track.person_name,
-                                        track.recognition_failures,
-                                        MAX_RECOGNITION_FAILURES,
-                                    )
-
-                                # ------------------------------------------------
-                                # Never recognized:
-                                # remain Unknown.
-                                # ------------------------------------------------
-
-                                else:
-
-                                    track.person_name = (
-                                        "Unknown"
-                                    )
-
-                                    track.confidence = 0.0
-
-                                    track.embedding = (
-                                        embedding
-                                    )
-
-                # =================================================
-                # Unknown face registration
-                # =================================================
-
-                if (
-                    track.person_id is None
-                    and
-                    track.person_name == "Unknown"
-                    and
-                    track.embedding is not None
-                ):
-
-                    track.unknown_confirmations += 1
-
-                    if (
-                        track.unknown_confirmations
-                        >= UNKNOWN_CONFIRMATIONS
-                        and
-                        not track.registered_unknown
-                    ):
-
-                        quality = face_quality(
-                            crop
-                        )
-
-                        if (
-                            quality
-                            >= UNKNOWN_MIN_QUALITY
-                        ):
-
-                            UNKNOWN_FACES_DIR.mkdir(
-                                parents=True,
-                                exist_ok=True,
-                            )
-
-                            unknown_label = (
-                                f"track_{track.track_id}"
-                            )
-
-                            image_path = (
-                                UNKNOWN_FACES_DIR
-                                / f"{unknown_label}.jpg"
-                            )
-
-                            embedding_path = (
-                                UNKNOWN_FACES_DIR
-                                / f"{unknown_label}.npy"
-                            )
-
-                            success = cv2.imwrite(
-                                str(image_path),
-                                crop,
-                            )
-
-                            if success:
-
-                                np.save(
-                                    embedding_path,
-                                    track.embedding,
-                                )
-
-                                try:
-
-                                    register_unknown(
-                                        label=unknown_label,
-                                        embedding=track.embedding,
-                                        image_path=image_path,
-                                    )
-
-                                    track.registered_unknown = (
-                                        True
-                                    )
-
-                                except Exception:
-
-                                    logging.exception(
-                                        "Failed to register "
-                                        "unknown face"
-                                    )
-
-                            else:
-
-                                logging.warning(
-                                    "Could not save unknown "
-                                    "face image: %s",
-                                    image_path,
-                                )
-
-                # =================================================
-                # Recognition log
-                # =================================================
-
-                if (
-                    track.person_id
-                    is not None
-                ):
-
-                    recognition_logs.append(
-                        {
-                            "timestamp_sec": round(
-                                timestamp,
-                                2,
-                            ),
-                            "person_name": (
-                                track.person_name
-                            ),
-                            "confidence": round(
-                                track.confidence,
-                                4,
-                            ),
-                        }
-                    )
-
-                # =================================================
-                # Lip movement
-                # =================================================
-
-                track.lip_open = (
-                    detection["lip_open"]
-                )
-
-                # =================================================
-                # Active speaker candidates
-                # =================================================
-
-                if (
-                    audio_is_speech
-                    and
-                    track.lip_open is not None
-                    and
-                    track.lip_open
-                    >= LIP_OPEN_THRESHOLD
-                ):
-
-                    speaking_candidates.append(
-                        track
-                    )
-
-                # =================================================
-                # Draw bounding box
-                # =================================================
-
-                unknown = (
-                    track.person_name
-                    == "Unknown"
-                )
-
-                color = (
-                    (0, 0, 255)
-                    if unknown
-                    else (0, 255, 0)
-                )
-
-                label = (
-                    track.person_name
-                    or "Recognition Pending"
-                )
-
-                # ------------------------------------------------
-                # Indicate when face is too small for recognition.
-                # ------------------------------------------------
-
-                if not can_recognize:
-
-                    if (
-                        track.person_id
-                        is None
-                    ):
-
-                        label = (
-                            "Recognition Pending"
-                        )
-
-                if (
-                    track
-                    in speaking_candidates
-                ):
-
-                    label += " [Speaking]"
-
-                cv2.rectangle(
-                    frame,
-                    (x0, y0),
-                    (x1, y1),
-                    color,
-                    2,
-                )
-
-                cv2.putText(
-                    frame,
-                    label,
-                    (
-                        x0,
-                        max(
-                            20,
-                            y0 - 10,
-                        ),
-                    ),
-                    cv2.FONT_HERSHEY_SIMPLEX,
-                    0.6,
-                    color,
-                    2,
-                )
-
-            # =====================================================
-            # Select ONE active speaker
-            # =====================================================
 
             if (
                 audio_is_speech
                 and
-                speaking_candidates
+                track.lip_open is not None
+                and
+                track.lip_open
+                >= LIP_OPEN_THRESHOLD
             ):
 
-                speaker = max(
-                    speaking_candidates,
-                    key=lambda t:
-                        t.lip_open,
+                speaking_candidates.append(
+                    track
                 )
 
-                speaker.speech_frames += 1
-                speaker.silent_frames = 0
+            # =================================================
+            # Draw bounding box
+            # =================================================
+
+            unknown = (
+                track.person_name
+                == "Unknown"
+            )
+
+            color = (
+                (0, 0, 255)
+                if unknown
+                else (0, 255, 0)
+            )
+
+            label = (
+                track.person_name
+                or "Recognition Pending"
+            )
+
+            # ------------------------------------------------
+            # Indicate when face is too small for recognition.
+            # ------------------------------------------------
+
+            if not can_recognize:
 
                 if (
-                    speaker.speech_frames
-                    >= 2
+                    track.person_id
+                    is None
                 ):
 
-                    start = max(
-                        0.0,
-                        timestamp - 0.1,
+                    label = (
+                        "Recognition Pending"
                     )
 
-                    end = timestamp
-
-                    if (
-                        speaker.person_id
-                        is not None
-                    ):
-
-                        log_audio(
-                            start,
-                            end,
-                            speaker.person_id,
-                            speaker.person_name,
-                            speaker.confidence,
-                            "video",
-                        )
-
-                        active_speech_logs.append(
-                            {
-                                "start_time": round(
-                                    start,
-                                    2,
-                                ),
-                                "end_time": round(
-                                    end,
-                                    2,
-                                ),
-                                "person_name": (
-                                    speaker.person_name
-                                ),
-                                "confidence": round(
-                                    speaker.confidence,
-                                    4,
-                                ),
-                                "source": "video",
-                            }
-                        )
-
-            else:
-
-                for track in (
-                    tracker.tracks.values()
-                ):
-
-                    track.silent_frames += 1
-
-                    if (
-                        track.silent_frames
-                        >= 4
-                    ):
-
-                        track.speech_frames = 0
-
-            # =================================================
-            # Write frame
-            # =================================================
-
-            writer.write(frame)
-
-            # =================================================
-            # Progress
-            # =================================================
-
             if (
-                progress_callback
-                and total_frames
+                track
+                in speaking_candidates
             ):
 
-                progress_callback(
-                    frame_no
-                    / total_frames
+                label += " [Speaking]"
+
+            cv2.rectangle(
+                frame,
+                (x0, y0),
+                (x1, y1),
+                color,
+                2,
+            )
+
+            cv2.putText(
+                frame,
+                label,
+                (
+                    x0,
+                    max(
+                        20,
+                        y0 - 10,
+                    ),
+                ),
+                cv2.FONT_HERSHEY_SIMPLEX,
+                0.6,
+                color,
+                2,
+            )
+
+        # =====================================================
+        # Select ONE active speaker
+        # =====================================================
+
+        if (
+            audio_is_speech
+            and
+            speaking_candidates
+        ):
+
+            speaker = max(
+                speaking_candidates,
+                key=lambda t:
+                    t.lip_open,
+            )
+
+            speaker.speech_frames += 1
+            speaker.silent_frames = 0
+
+            if (
+                speaker.speech_frames
+                >= 2
+            ):
+
+                start = max(
+                    0.0,
+                    timestamp - 0.1,
                 )
 
+                end = timestamp
+
+                if (
+                    speaker.person_id
+                    is not None
+                ):
+
+                    log_audio(
+                        start,
+                        end,
+                        speaker.person_id,
+                        speaker.person_name,
+                        speaker.confidence,
+                        "video",
+                    )
+
+                    active_speech_logs.append(
+                        {
+                            "start_time": round(
+                                start,
+                                2,
+                            ),
+                            "end_time": round(
+                                end,
+                                2,
+                            ),
+                            "person_name": (
+                                speaker.person_name
+                            ),
+                            "confidence": round(
+                                speaker.confidence,
+                                4,
+                            ),
+                            "source": "video",
+                        }
+                    )
+
+        else:
+
+            for track in (
+                tracker.tracks.values()
+            ):
+
+                track.silent_frames += 1
+
+                if (
+                    track.silent_frames
+                    >= 4
+                ):
+
+                    track.speech_frames = 0
+
+        return frame
+
+    def _write_frame(frame):
+        writer.write(frame)
+
+        if progress_callback and total_frames:
+            progress_callback(frame_no / total_frames)
+
+    try:
+        run_threaded_pipeline(
+            _read_frame,
+            _process,
+            _write_frame,
+            queue_maxsize=8,
+            drop_oldest=False,
+        )
     finally:
-
         cap.release()
-
         writer.release()
-
         face_landmarker.close()
 
     # ==========================================================
