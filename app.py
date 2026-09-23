@@ -62,6 +62,20 @@ def fmt_time(seconds):
     return f"{minutes:02d}:{secs:02d}"
 
 
+def get_runtime_mode():
+    try:
+        from face_backend import get_cuda_providers
+
+        provider = get_cuda_providers()[0]
+        if provider == "CUDAExecutionProvider":
+            return "GPU (CUDA)"
+        if provider == "CPUExecutionProvider":
+            return "CPU"
+        return provider
+    except Exception:
+        return "Unknown"
+
+
 def render_realtime():
     st.header("📹 Realtime Face Recognition")
 
@@ -845,6 +859,14 @@ def render_transcripts():
 
 def main():
     st.title("🎥 AI Face + Active Speaker Recognition")
+
+    runtime_mode = get_runtime_mode()
+    if runtime_mode == "GPU (CUDA)":
+        st.success(f"Runtime mode: {runtime_mode}")
+    elif runtime_mode == "CPU":
+        st.warning(f"Runtime mode: {runtime_mode}")
+    else:
+        st.info(f"Runtime mode: {runtime_mode}")
 
     st.caption(
         "Shared ArcFace embeddings + SQLite database + NumPy similarity index. "

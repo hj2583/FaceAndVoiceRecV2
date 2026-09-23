@@ -34,9 +34,16 @@ def _cuda_providers():
     _configure_cuda_dlls()
     import onnxruntime as ort
 
-    if "CUDAExecutionProvider" not in ort.get_available_providers():
-        raise RuntimeError("CUDAExecutionProvider is unavailable")
-    return ["CUDAExecutionProvider"]
+    providers = ort.get_available_providers()
+    if "CUDAExecutionProvider" in providers:
+        return ["CUDAExecutionProvider"]
+    if "CPUExecutionProvider" in providers:
+        logger.warning(
+            "CUDAExecutionProvider is unavailable; using CPUExecutionProvider instead. "
+            "This project will run in CPU mode."
+        )
+        return ["CPUExecutionProvider"]
+    raise RuntimeError("No supported ONNX Runtime execution providers are available")
 
 
 def get_cuda_providers():
@@ -44,12 +51,24 @@ def get_cuda_providers():
 
 
 def _require_cuda_session(session, component):
-    active_provider = session.get_providers()[0]
-    if active_provider != "CUDAExecutionProvider":
-        raise RuntimeError(
-            f"{component} is running on {active_provider}; "
-            "CUDAExecutionProvider is required"
+    providers = session.get_providers()
+    if not providers:
+        raise RuntimeError(f"{component} did not report any execution providers")
+
+    active_provider = providers[0]
+    if active_provider == "CUDAExecutionProvider":
+        return
+    if active_provider == "CPUExecutionProvider":
+        logger.warning(
+            "%s is running on CPUExecutionProvider; CPU mode is active.",
+            component,
         )
+        return
+
+    raise RuntimeError(
+        f"{component} is running on {active_provider}; "
+        "CUDAExecutionProvider or CPUExecutionProvider is required"
+    )
 
 
 def _normalize(vector):

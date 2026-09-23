@@ -1,3 +1,4 @@
+import sys
 from unittest.mock import Mock
 
 import numpy as np
@@ -86,3 +87,11 @@ def test_get_face_backend_returns_singleton(monkeypatch):
 
     assert first is second
     assert len(created) == 1
+
+
+def test_get_cuda_providers_falls_back_to_cpu_when_cuda_is_unavailable(monkeypatch):
+    fake_ort = Mock()
+    fake_ort.get_available_providers.return_value = ["CPUExecutionProvider"]
+    monkeypatch.setitem(sys.modules, "onnxruntime", fake_ort)
+
+    assert face_backend.get_cuda_providers() == ["CPUExecutionProvider"]
