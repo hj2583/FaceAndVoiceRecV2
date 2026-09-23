@@ -4,7 +4,13 @@ import time
 
 import pytest
 
-from frame_pipeline import _dequeue, _enqueue, run_threaded_pipeline
+from frame_pipeline import PipelineStop, _dequeue, _enqueue, run_threaded_pipeline
+
+
+def _assert_no_pipeline_threads_running():
+    time.sleep(0.1)
+    active_names = {t.name for t in threading.enumerate()}
+    assert not any(name.startswith("frame-pipeline-") for name in active_names)
 
 
 def test_preserves_order_and_count_with_blocking_queues():
@@ -40,9 +46,7 @@ def test_propagates_exception_from_process_stage_and_stops_all_threads():
         run_threaded_pipeline(read_frame, process_frame, written.append, queue_maxsize=2)
 
     # No thread should be left running.
-    time.sleep(0.1)
-    active_names = {t.name for t in threading.enumerate()}
-    assert not any(name.startswith("frame-pipeline-") for name in active_names)
+    _assert_no_pipeline_threads_running()
 
 
 def test_drop_oldest_keeps_latest_item_when_consumer_is_slow():
@@ -124,3 +128,96 @@ def test_enqueue_blocks_instead_of_dropping_before_first_item_is_consumed():
     thread.join(timeout=2.0)
     assert not thread.is_alive()
     assert second_put_done.is_set()
+
+
+def test_base_exception_from_process_stage_propagates_and_stops_all_threads():
+    """A BaseException (not just Exception) from a stage must not hang the
+    pipeline: stop_event must still be set and the exception re-raised."""
+
+    class _FakeBaseException(BaseException):
+        pass
+
+    def read_frame(_it=iter(range(5))):
+        return next(_it, None)
+
+    def process_frame(item):
+        if item == 2:
+            raise _FakeBaseException("stage failure")
+        return item
+
+    written = []
+
+    with pytest.raises(_FakeBaseException, match="stage failure"):
+        run_threaded_pipeline(read_frame, process_frame, written.append, queue_maxsize=2)
+
+    _assert_no_pipeline_threads_running()
+
+
+def test_write_frame_writer_stage_runs_on_callers_thread():
+    """The writer stage must run inline on the caller's thread, not a third
+    worker thread, so write_frame's side effects see the caller's context."""
+
+    caller_thread = threading.current_thread()
+    write_frame_threads = []
+
+    def read_frame(_it=iter(range(3))):
+        return next(_it, None)
+
+    def process_frame(item):
+        return item
+
+    def write_frame(item):
+        write_frame_threads.append(threading.current_thread())
+
+    run_threaded_pipeline(read_frame, process_frame, write_frame, queue_maxsize=2)
+
+    assert write_frame_threads
+    assert all(t is caller_thread for t in write_frame_threads)
+    active_names = {t.name for t in threading.enumerate()}
+    assert not any(name == "frame-pipeline-writer" for name in active_names)
+
+
+def test_keyboard_interrupt_in_write_frame_propagates_and_stops_all_threads():
+    """An interruption of the caller (e.g. Ctrl+C) arriving while write_frame
+    runs must set stop_event, join the worker threads, and re-raise."""
+
+    def read_frame(_it=iter(range(20))):
+        return next(_it, None)
+
+    def process_frame(item):
+        return item
+
+    written = []
+
+    def write_frame(item):
+        written.append(item)
+        if len(written) == 2:
+            raise KeyboardInterrupt()
+
+    with pytest.raises(KeyboardInterrupt):
+        run_threaded_pipeline(read_frame, process_frame, write_frame, queue_maxsize=2)
+
+    _assert_no_pipeline_threads_running()
+
+
+def test_pipeline_stop_from_write_frame_returns_normally():
+    """A stage (here the inline writer) raising PipelineStop must cause a
+    clean, silent shutdown: no exception, no leftover threads."""
+
+    def read_frame(_it=iter(range(20))):
+        return next(_it, None)
+
+    def process_frame(item):
+        return item
+
+    written = []
+
+    def write_frame(item):
+        written.append(item)
+        if item == 2:
+            raise PipelineStop()
+
+    run_threaded_pipeline(read_frame, process_frame, write_frame, queue_maxsize=2)
+
+    assert written == [0, 1, 2]
+    _assert_no_pipeline_threads_running()

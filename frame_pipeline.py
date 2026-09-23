@@ -1,3 +1,10 @@
+"""Threaded reader/compute pipeline with an inline writer stage.
+
+run_threaded_pipeline runs a reader and a compute stage on two background
+threads, connected by bounded queues; the writer stage runs inline on the
+caller's own thread so its side effects keep the caller's thread context.
+"""
+
 import logging
 import queue
 import threading
@@ -5,6 +12,19 @@ import threading
 logger = logging.getLogger(__name__)
 
 _SENTINEL = object()
+
+# Short timeout used when joining worker threads from the caller so that the
+# caller's own wait loop stays interruptible (see run_threaded_pipeline).
+_JOIN_POLL_INTERVAL = 0.1
+
+
+class PipelineStop(Exception):
+    """Raised by any stage to request a clean, silent pipeline shutdown.
+
+    Unlike other exceptions, a PipelineStop is not logged as an error and is
+    not re-raised by run_threaded_pipeline: it simply stops all stages and
+    causes run_threaded_pipeline to return normally.
+    """
 
 
 class PipelineErrorBox:
@@ -27,7 +47,9 @@ class PipelineErrorBox:
 def _run_stage(name, stop_event, error_box, func):
     try:
         func()
-    except Exception as exc:  # noqa: BLE001 - recorded and re-raised by the caller
+    except PipelineStop:
+        stop_event.set()
+    except BaseException as exc:  # noqa: BLE001 - recorded and re-raised by the caller
         logger.exception("Pipeline stage '%s' failed", name)
         error_box.set(exc)
         stop_event.set()
@@ -99,11 +121,24 @@ def run_threaded_pipeline(
     drop_oldest=False,
     poll_interval=0.5,
 ):
-    """Run read_frame -> process_frame -> write_frame across three threads.
+    """Run read_frame -> process_frame -> write_frame across two worker threads
+    plus the caller's own thread.
 
     read_frame() returns the next item, or None to signal end-of-stream.
     process_frame(item) transforms one item at a time, in strict input order.
     write_frame(item) consumes one processed item at a time, in order.
+
+    The reader and compute stages each run on a dedicated background thread
+    (named "frame-pipeline-reader" / "frame-pipeline-compute"), giving real
+    CPU/GPU overlap: decoding frame N+1 can happen while frame N is being
+    processed. The writer stage runs INLINE on the thread that calls
+    run_threaded_pipeline (no third worker thread) so that write_frame's side
+    effects (Streamlit calls, GUI calls, VideoWriter.write, etc.) execute with
+    the caller's own thread context.
+
+    A stage (including the inline writer) may raise PipelineStop to request a
+    clean, silent shutdown: all stages stop, all worker threads are joined,
+    and run_threaded_pipeline returns normally (no exception, no error log).
 
     When drop_oldest is False (default), both internal queues are bounded and
     blocking with maxsize=queue_maxsize: no item is ever dropped, at the cost
@@ -117,8 +152,13 @@ def run_threaded_pipeline(
     outruns the consumer's startup; after that first item has been consumed,
     no stage ever blocks waiting for a slow downstream consumer again.
 
-    Raises the first exception encountered in any stage, after all three
-    threads have stopped and been joined.
+    If the calling thread is interrupted (e.g. KeyboardInterrupt) while
+    waiting for items to write, or write_frame itself raises, stop_event is
+    set and all worker threads are joined (with a short, interruptible poll)
+    before the exception is re-raised.
+
+    Raises the first exception encountered in any stage (including the
+    caller's own writer loop), after all worker threads have been joined.
     """
     maxsize = 1 if drop_oldest else queue_maxsize
     raw_q = queue.Queue(maxsize=maxsize)
@@ -154,15 +194,6 @@ def run_threaded_pipeline(
             ):
                 return
 
-    def _writer():
-        while True:
-            ok, frame = _dequeue(out_q, stop_event, poll_interval, out_first_consumed)
-            if not ok:
-                return
-            if frame is _SENTINEL:
-                return
-            write_frame(frame)
-
     threads = [
         threading.Thread(
             target=_run_stage,
@@ -173,15 +204,33 @@ def run_threaded_pipeline(
         for name, stage in (
             ("reader", _reader),
             ("compute", _compute),
-            ("writer", _writer),
         )
     ]
 
     for thread in threads:
         thread.start()
-    for thread in threads:
-        thread.join()
+
+    try:
+        while True:
+            ok, item = _dequeue(out_q, stop_event, poll_interval, out_first_consumed)
+            if not ok:
+                break
+            if item is _SENTINEL:
+                break
+            try:
+                write_frame(item)
+            except PipelineStop:
+                stop_event.set()
+                break
+    except BaseException as exc:  # noqa: BLE001 - recorded and re-raised below
+        stop_event.set()
+        error_box.set(exc)
+    finally:
+        for thread in threads:
+            while thread.is_alive():
+                thread.join(_JOIN_POLL_INTERVAL)
 
     exc = error_box.get()
     if exc is not None:
         raise exc
+
