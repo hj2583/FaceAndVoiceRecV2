@@ -1275,7 +1275,13 @@ def run(
             _read_frame,
             _process,
             _write_frame,
-            drop_oldest=True,
+            # Blocking (non-dropping) queues keep consecutively *processed*
+            # frames close together in time, matching the pre-refactor
+            # synchronous loop's tracking/recognition continuity. Dropping
+            # frames here let the tracker's fixed pixel-distance matching
+            # (TRACK_DISTANCE_PX) drift onto the wrong face between frames.
+            queue_maxsize=2,
+            drop_oldest=False,
             poll_interval=0.05,
         )
 
