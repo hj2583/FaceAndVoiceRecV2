@@ -52,7 +52,7 @@ from tracking import (
 
 from detection_core import ensure_opencv_face_detector_available
 from face_backend import get_face_backend
-from frame_pipeline import run_threaded_pipeline
+from frame_pipeline import PipelineStop, run_threaded_pipeline
 from realtime_runtime import DetectionScheduler, RollingFps
 
 
@@ -74,10 +74,6 @@ class SpeakingState:
 
     def set(self, value):
         self.value = value
-
-
-class _WindowClosed(Exception):
-    """Signals that the display window was closed by the user."""
 
 
 def start_realtime_vad(callback, vad_factory=RealtimeVAD):
@@ -332,6 +328,8 @@ def run(
             frame_no += 1
 
             timestamp = time.monotonic()
+            # Measures compute-stage throughput, not displayed-frame throughput
+            # (the writer stage runs separately on the caller's thread).
             display_fps = fps_counter.tick(timestamp)
 
             if (
@@ -1259,7 +1257,7 @@ def run(
                 key == ord("q")
                 or key == 27
             ):
-                raise _WindowClosed()
+                raise PipelineStop()
 
             try:
                 if (
@@ -1269,20 +1267,17 @@ def run(
                     )
                     < 1
                 ):
-                    raise _WindowClosed()
+                    raise PipelineStop()
             except cv2.error:
-                raise _WindowClosed()
+                raise PipelineStop()
 
-        try:
-            run_threaded_pipeline(
-                _read_frame,
-                _process,
-                _write_frame,
-                drop_oldest=True,
-                poll_interval=0.05,
-            )
-        except _WindowClosed:
-            pass
+        run_threaded_pipeline(
+            _read_frame,
+            _process,
+            _write_frame,
+            drop_oldest=True,
+            poll_interval=0.05,
+        )
 
     finally:
 

@@ -1114,13 +1114,14 @@ def process_video_pipeline(
 
                     track.speech_frames = 0
 
-        return frame
+        return frame_no, frame
 
-    def _write_frame(frame):
+    def _write_frame(item):
+        frame_no_written, frame = item
         writer.write(frame)
 
         if progress_callback and total_frames:
-            progress_callback(frame_no / total_frames)
+            progress_callback(frame_no_written / total_frames)
 
     try:
         run_threaded_pipeline(
