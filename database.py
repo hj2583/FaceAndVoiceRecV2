@@ -1,5 +1,6 @@
 import sqlite3
 import threading
+from pathlib import Path
 from contextlib import contextmanager
 from datetime import datetime, timezone
 from pathlib import Path
@@ -271,6 +272,78 @@ def resolve_unknown(unknown_id, person_id):
             "UPDATE unknown_tracks SET resolved_person_id=? WHERE unknown_id=?",
             (person_id, unknown_id),
         )
+
+
+def _unlink_unreferenced(paths, conn):
+    candidates = {str(Path(path)) for path in paths if path}
+    if not candidates:
+        return
+
+    referenced = set()
+    for table, columns in (
+        ("unknown_tracks", ("image_path", "embedding_path")),
+        ("unknown_samples", ("image_path", "embedding_path")),
+    ):
+        for column in columns:
+            rows = conn.execute(
+                f"SELECT {column} FROM {table} WHERE {column} IS NOT NULL"
+            ).fetchall()
+            referenced.update(str(Path(row[0])) for row in rows if row[0])
+
+    for path in candidates - referenced:
+        try:
+            Path(path).unlink(missing_ok=True)
+        except OSError:
+            pass
+
+
+def _delete_unknown_locked(conn, unknown_id):
+    parent = conn.execute(
+        "SELECT image_path, embedding_path, resolved_person_id "
+        "FROM unknown_tracks WHERE unknown_id=?",
+        (int(unknown_id),),
+    ).fetchone()
+    if parent is None or parent[2] is not None:
+        return False
+
+    sample_rows = conn.execute(
+        "SELECT image_path, embedding_path FROM unknown_samples WHERE unknown_id=?",
+        (int(unknown_id),),
+    ).fetchall()
+    paths = [parent[0], parent[1]]
+    paths.extend(path for row in sample_rows for path in row)
+
+    conn.execute("DELETE FROM unknown_samples WHERE unknown_id=?", (int(unknown_id),))
+    conn.execute("DELETE FROM unknown_tracks WHERE unknown_id=?", (int(unknown_id),))
+    _unlink_unreferenced(paths, conn)
+    return True
+
+
+def delete_unknown(unknown_id):
+    with get_conn() as conn:
+        return _delete_unknown_locked(conn, unknown_id)
+
+
+def delete_low_quality_unknowns(threshold=0.4):
+    with get_conn() as conn:
+        rows = conn.execute(
+            """
+            SELECT ut.unknown_id
+            FROM unknown_tracks ut
+            LEFT JOIN unknown_samples us ON us.unknown_id = ut.unknown_id
+            WHERE ut.resolved_person_id IS NULL
+            GROUP BY ut.unknown_id
+            HAVING COALESCE(MAX(us.quality), 0.0) < ?
+            ORDER BY ut.unknown_id
+            """,
+            (float(threshold),),
+        ).fetchall()
+        deleted = [
+            int(row[0])
+            for row in rows
+            if _delete_unknown_locked(conn, row[0])
+        ]
+        return deleted
 
 
 def list_persons():
