@@ -33,6 +33,8 @@ from database import (
     list_persons,
     list_unknowns,
     list_unknown_samples,
+    delete_low_quality_unknowns,
+    delete_unknown,
     resolve_unknown,
 )
 from face_core import FaceIndex
@@ -299,6 +301,19 @@ def render_database():
         "or create a new person from the captured face."
     )
 
+    if st.button(
+        "🗑️ Delete Unknown Faces Below 40% Quality",
+        key="delete_low_quality_unknowns",
+        help="Permanently removes unresolved unknown faces whose best sample quality is below 0.40.",
+    ):
+        deleted_ids = delete_low_quality_unknowns(0.40)
+        if deleted_ids:
+            st.success(f"Deleted {len(deleted_ids)} low-quality unknown face(s).")
+            get_face_index().rebuild()
+            st.rerun()
+        else:
+            st.info("No unresolved unknown faces below 40% quality were found.")
+
     people = list_persons()
     options = {p[1]: p[0] for p in people}
 
@@ -416,6 +431,17 @@ def render_database():
                 f"{'s' if sample_count != 1 else ''}"
                 f"  •  Created: {created}"
             )
+
+            if st.button(
+                "🗑️ Delete Unknown",
+                key=f"delete_unknown_{unknown_id}",
+                help="Permanently delete this unresolved unknown face and its saved samples.",
+            ):
+                if delete_unknown(unknown_id):
+                    get_face_index().rebuild()
+                    st.rerun()
+                else:
+                    st.warning("This unknown face is no longer unresolved.")
 
             # ----------------------------------------------------
             # BEST IMAGE
