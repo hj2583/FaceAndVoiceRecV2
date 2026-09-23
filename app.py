@@ -894,10 +894,10 @@ def main():
     else:
         st.info(f"Runtime mode: {runtime_mode}")
 
-    st.caption(
-        "Shared ArcFace embeddings + SQLite database + NumPy similarity index. "
-        "No FAISS."
-    )
+    # st.caption(
+    #     "Shared ArcFace embeddings + SQLite database + NumPy similarity index. "
+    #     "No FAISS."
+    # )
 
     tabs = st.tabs(
         [
