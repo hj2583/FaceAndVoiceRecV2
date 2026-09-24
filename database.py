@@ -309,16 +309,25 @@ def resolve_unknown(unknown_id, person_id):
         )
 
 
-def _unlink_unreferenced(paths, conn):
+_FACE_REFERENCE_SPECS = (
+    ("unknown_tracks", ("image_path", "embedding_path")),
+    ("unknown_samples", ("image_path", "embedding_path")),
+)
+
+_VOICE_REFERENCE_SPECS = (
+    ("voice_embeddings", ("embedding_path",)),
+    ("unknown_voices", ("embedding_path",)),
+    ("unknown_voice_samples", ("embedding_path",)),
+)
+
+
+def _unlink_unreferenced(paths, conn, reference_specs=_FACE_REFERENCE_SPECS):
     candidates = {str(Path(path)) for path in paths if path}
     if not candidates:
         return
 
     referenced = set()
-    for table, columns in (
-        ("unknown_tracks", ("image_path", "embedding_path")),
-        ("unknown_samples", ("image_path", "embedding_path")),
-    ):
+    for table, columns in reference_specs:
         for column in columns:
             rows = conn.execute(
                 f"SELECT {column} FROM {table} WHERE {column} IS NOT NULL"
@@ -497,12 +506,7 @@ def _delete_unknown_voice_locked(conn, unknown_voice_id):
         "DELETE FROM unknown_voices WHERE unknown_voice_id=?",
         (int(unknown_voice_id),),
     )
-    for path in paths:
-        if path:
-            try:
-                Path(path).unlink(missing_ok=True)
-            except OSError:
-                pass
+    _unlink_unreferenced(paths, conn, reference_specs=_VOICE_REFERENCE_SPECS)
     return True
 
 
