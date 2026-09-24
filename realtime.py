@@ -52,6 +52,7 @@ from tracking import (
 
 from detection_core import ensure_opencv_face_detector_available
 from face_backend import get_face_backend
+from frame_pipeline import PipelineStop, run_threaded_pipeline
 from realtime_runtime import DetectionScheduler, RollingFps
 
 
@@ -311,7 +312,7 @@ def run(
             REALTIME_FPS_WINDOW_SECONDS
         )
 
-        while True:
+        def _read_frame():
 
             # =================================================
             # Read camera frame
@@ -319,12 +320,16 @@ def run(
 
             ok, frame = cap.read()
 
-            if not ok:
-                break
+            return frame if ok else None
+
+        def _process(frame):
+            nonlocal frame_no, face_detections, last_landmark_timestamp_ms, last_speaker_id, last_speech_start, audio_available
 
             frame_no += 1
 
             timestamp = time.monotonic()
+            # Measures compute-stage throughput, not displayed-frame throughput
+            # (the writer stage runs separately on the caller's thread).
             display_fps = fps_counter.tick(timestamp)
 
             if (
@@ -1233,6 +1238,10 @@ def run(
                 2,
             )
 
+            return frame
+
+        def _write_frame(frame):
+
             # =================================================
             # Display
             # =================================================
@@ -1248,7 +1257,7 @@ def run(
                 key == ord("q")
                 or key == 27
             ):
-                break
+                raise PipelineStop()
 
             try:
                 if (
@@ -1258,9 +1267,23 @@ def run(
                     )
                     < 1
                 ):
-                    break
+                    raise PipelineStop()
             except cv2.error:
-                break
+                raise PipelineStop()
+
+        run_threaded_pipeline(
+            _read_frame,
+            _process,
+            _write_frame,
+            # Blocking (non-dropping) queues keep consecutively *processed*
+            # frames close together in time, matching the pre-refactor
+            # synchronous loop's tracking/recognition continuity. Dropping
+            # frames here let the tracker's fixed pixel-distance matching
+            # (TRACK_DISTANCE_PX) drift onto the wrong face between frames.
+            queue_maxsize=2,
+            drop_oldest=False,
+            poll_interval=0.05,
+        )
 
     finally:
 

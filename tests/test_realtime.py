@@ -1,3 +1,5 @@
+import threading
+import time
 from types import ModuleType, SimpleNamespace
 from unittest.mock import Mock
 
@@ -370,6 +372,8 @@ def test_speaking_banner_drawn_below_fps_line(monkeypatch):
 
 
 def test_run_detection_scheduler_calls_detector_twice_for_four_frames_interval_three(monkeypatch):
+    import time
+
     import realtime
 
     frame = np.zeros((120, 160, 3), dtype=np.uint8)
@@ -394,6 +398,11 @@ def test_run_detection_scheduler_calls_detector_twice_for_four_frames_interval_t
             return 0.0
 
         def read(self):
+            # Slow the reader down relative to the (near-instant, mocked)
+            # compute stage so the drop-oldest queue never actually drops a
+            # frame here, keeping the frame_no sequence this test depends on
+            # deterministic.
+            time.sleep(0.01)
             self.calls += 1
             if self.calls <= 4:
                 return True, frame.copy()
@@ -557,3 +566,174 @@ def test_run_uses_increasing_landmark_timestamps_for_multiple_faces(monkeypatch)
 
     assert len(mesh.timestamps) == 2
     assert mesh.timestamps[0] < mesh.timestamps[1]
+
+
+def test_run_processes_every_captured_frame_via_threaded_pipeline(monkeypatch):
+    import realtime
+
+    frame = np.zeros((120, 160, 3), dtype=np.uint8)
+
+    class _Cap:
+        def __init__(self):
+            self.calls = 0
+
+        def isOpened(self):
+            return True
+
+        def set(self, *_args, **_kwargs):
+            return True
+
+        def get(self, prop):
+            if prop == cv2.CAP_PROP_FPS:
+                return 30.0
+            if prop == cv2.CAP_PROP_FRAME_WIDTH:
+                return 160.0
+            if prop == cv2.CAP_PROP_FRAME_HEIGHT:
+                return 120.0
+            return 0.0
+
+        def read(self):
+            self.calls += 1
+            if self.calls <= 3:
+                return True, frame.copy()
+            return False, None
+
+        def release(self):
+            return None
+
+    class _Mesh:
+        def detect_for_video(self, *_args, **_kwargs):
+            return SimpleNamespace(face_landmarks=[])
+
+        def close(self):
+            return None
+
+    class _Tracker:
+        def __init__(self):
+            self.tracks = {}
+
+        def update(self, detections, frame_no):
+            return []
+
+    cap = _Cap()
+
+    monkeypatch.setattr(realtime.cv2, "VideoCapture", lambda *_args, **_kwargs: cap)
+    monkeypatch.setattr(realtime, "FaceIndex", lambda: object())
+    monkeypatch.setattr(realtime, "CentroidTracker", lambda: _Tracker())
+    monkeypatch.setattr(realtime, "start_realtime_vad", lambda callback: (None, False))
+    monkeypatch.setattr(realtime, "create_face_landmarker", lambda: _Mesh())
+    monkeypatch.setattr(realtime, "detect_faces_realtime", lambda *_args, **_kwargs: [])
+    monkeypatch.setattr(realtime, "log_recognition", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(realtime, "log_audio", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(realtime.cv2, "cvtColor", lambda image, _code: image)
+    monkeypatch.setattr(realtime.cv2, "imshow", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(realtime.cv2, "waitKey", lambda *_args, **_kwargs: 0)
+    monkeypatch.setattr(realtime.cv2, "getWindowProperty", lambda *_args, **_kwargs: 1)
+    monkeypatch.setattr(realtime.cv2, "rectangle", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(realtime.cv2, "putText", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(realtime.cv2, "destroyAllWindows", lambda: None)
+
+    import sys
+    fake_video_processor = ModuleType("video_processor")
+    fake_video_processor.lip_open_ratio = lambda _landmarks: 0.0
+    monkeypatch.setitem(sys.modules, "video_processor", fake_video_processor)
+    monkeypatch.setitem(
+        sys.modules,
+        "mediapipe",
+        SimpleNamespace(ImageFormat=SimpleNamespace(SRGB=1), Image=lambda image_format, data: data),
+    )
+
+    realtime.run(camera=0, width=160, height=120)
+
+    assert cap.calls == 4
+
+
+def test_run_quits_cleanly_on_q_keypress(monkeypatch):
+    """The q/Esc quit path must return normally (PipelineStop), release the
+    camera, and leave no frame-pipeline-* threads running afterward."""
+    import realtime
+
+    frame = np.zeros((120, 160, 3), dtype=np.uint8)
+
+    class _Cap:
+        def __init__(self):
+            self.calls = 0
+            self.released = 0
+
+        def isOpened(self):
+            return True
+
+        def set(self, *_args, **_kwargs):
+            return True
+
+        def get(self, prop):
+            if prop == cv2.CAP_PROP_FPS:
+                return 30.0
+            if prop == cv2.CAP_PROP_FRAME_WIDTH:
+                return 160.0
+            if prop == cv2.CAP_PROP_FRAME_HEIGHT:
+                return 120.0
+            return 0.0
+
+        def read(self):
+            self.calls += 1
+            return True, frame.copy()
+
+        def release(self):
+            self.released += 1
+
+    class _Mesh:
+        def detect_for_video(self, *_args, **_kwargs):
+            return SimpleNamespace(face_landmarks=[])
+
+        def close(self):
+            return None
+
+    class _Tracker:
+        def __init__(self):
+            self.tracks = {}
+
+        def update(self, detections, frame_no):
+            return []
+
+    cap = _Cap()
+    displayed = {"count": 0}
+
+    def _fake_wait_key(*_args, **_kwargs):
+        displayed["count"] += 1
+        return ord("q") if displayed["count"] >= 3 else 0
+
+    monkeypatch.setattr(realtime.cv2, "VideoCapture", lambda *_args, **_kwargs: cap)
+    monkeypatch.setattr(realtime, "FaceIndex", lambda: object())
+    monkeypatch.setattr(realtime, "CentroidTracker", lambda: _Tracker())
+    monkeypatch.setattr(realtime, "start_realtime_vad", lambda callback: (None, False))
+    monkeypatch.setattr(realtime, "create_face_landmarker", lambda: _Mesh())
+    monkeypatch.setattr(realtime, "detect_faces_realtime", lambda *_args, **_kwargs: [])
+    monkeypatch.setattr(realtime, "log_recognition", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(realtime, "log_audio", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(realtime.cv2, "cvtColor", lambda image, _code: image)
+    monkeypatch.setattr(realtime.cv2, "imshow", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(realtime.cv2, "waitKey", _fake_wait_key)
+    monkeypatch.setattr(realtime.cv2, "getWindowProperty", lambda *_args, **_kwargs: 1)
+    monkeypatch.setattr(realtime.cv2, "rectangle", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(realtime.cv2, "putText", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(realtime.cv2, "destroyAllWindows", lambda: None)
+
+    import sys
+    fake_video_processor = ModuleType("video_processor")
+    fake_video_processor.lip_open_ratio = lambda _landmarks: 0.0
+    monkeypatch.setitem(sys.modules, "video_processor", fake_video_processor)
+    monkeypatch.setitem(
+        sys.modules,
+        "mediapipe",
+        SimpleNamespace(ImageFormat=SimpleNamespace(SRGB=1), Image=lambda image_format, data: data),
+    )
+
+    realtime.run(camera=0, width=160, height=120)
+
+    assert displayed["count"] >= 3
+    assert cap.released >= 1
+
+    time.sleep(0.1)
+    active_names = {t.name for t in threading.enumerate()}
+    assert not any(name.startswith("frame-pipeline-") for name in active_names)
