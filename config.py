@@ -14,6 +14,7 @@ KNOWN_FACES_DIR = BASE_DIR / "known_faces"
 UNKNOWN_FACES_DIR = BASE_DIR / "unknown_faces"
 INITIAL_VIDEO_DIR = BASE_DIR / "initialVideo"
 TRACKED_VIDEO_DIR = BASE_DIR / "trackedVideo"
+LIVE_VIDEO_DIR = BASE_DIR / "live"
 LOG_DIR = BASE_DIR / "logs"
 
 
@@ -26,6 +27,7 @@ for directory in (
     UNKNOWN_FACES_DIR,
     INITIAL_VIDEO_DIR,
     TRACKED_VIDEO_DIR,
+    LIVE_VIDEO_DIR,
     LOG_DIR,
 ):
     directory.mkdir(

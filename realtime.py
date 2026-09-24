@@ -1,6 +1,7 @@
 import argparse
 import logging
 import time
+from datetime import datetime
 
 import cv2
 import numpy as np
@@ -29,6 +30,8 @@ from config import (
     UNKNOWN_MAX_SAMPLES,
     UNKNOWN_CAPTURE_INTERVAL,
     UNKNOWN_MIN_QUALITY,
+
+    LIVE_VIDEO_DIR,
 )
 
 from database import (
@@ -267,6 +270,29 @@ def run(
     audio_available = False
 
     window_name = "AI Face + Active Speaker Recognition"
+
+    # ========================================================
+    # Live recording (copy of the annotated session)
+    # ========================================================
+
+    live_video_path = LIVE_VIDEO_DIR / (
+        f"{datetime.now().strftime('%Y%m%d_%H%M%S')}.mp4"
+    )
+
+    live_writer = cv2.VideoWriter(
+        str(live_video_path),
+        cv2.VideoWriter_fourcc(*"mp4v"),
+        actual_fps,
+        (actual_width, actual_height),
+    )
+
+    if not live_writer.isOpened():
+        logging.warning(
+            "Could not open live video writer at %s; "
+            "session will not be recorded.",
+            live_video_path,
+        )
+        live_writer = None
 
     try:
 
@@ -1243,6 +1269,13 @@ def run(
         def _write_frame(frame):
 
             # =================================================
+            # Save a copy of the annotated frame
+            # =================================================
+
+            if live_writer is not None:
+                live_writer.write(frame)
+
+            # =================================================
             # Display
             # =================================================
 
@@ -1352,6 +1385,13 @@ def run(
             cap.release()
         except Exception:
             logging.exception("Failed to release realtime camera")
+
+        try:
+            if live_writer is not None:
+                live_writer.release()
+                logging.info("Saved live session recording to %s", live_video_path)
+        except Exception:
+            logging.exception("Failed to save live session recording")
 
         try:
             if mesh is not None:
