@@ -14,6 +14,7 @@ import subprocess
 from typing import Callable, Iterable, Optional
 
 import config
+from audio_core import detect_speech_segments
 
 
 logger = logging.getLogger(__name__)
@@ -85,16 +86,41 @@ def transcribe_with_diarization(
         raise RuntimeError("Install openai-whisper to transcribe audio") from error
 
     model = whisper.load_model(model_size or config.WHISPER_MODEL)
-    result = model.transcribe(str(audio_path), verbose=False)
+
+    speech_regions = detect_speech_segments(audio_path)
+    transcribe_kwargs = {
+        "condition_on_previous_text": False,
+        "word_timestamps": True,
+    }
+    if config.WHISPER_LANGUAGE:
+        transcribe_kwargs["language"] = config.WHISPER_LANGUAGE
+    if config.WHISPER_INITIAL_PROMPT:
+        transcribe_kwargs["initial_prompt"] = config.WHISPER_INITIAL_PROMPT
+
+    if not speech_regions:
+        return []
+
+    result = model.transcribe(str(audio_path), verbose=False, **transcribe_kwargs)
     diarization = list(diarize(str(audio_path))) if diarize else []
     segments = []
 
     for raw in result.get("segments", []):
         text = raw.get("text", "").strip()
-        start_ms = int(float(raw.get("start", 0.0)) * 1000)
-        end_ms = int(float(raw.get("end", 0.0)) * 1000)
-        if not text or end_ms <= start_ms:
+        start_seconds = float(raw.get("start", 0.0))
+        end_seconds = float(raw.get("end", 0.0))
+        if not text or end_seconds <= start_seconds:
             continue
+
+        # Whisper transcribes the whole file; drop segments that don't
+        # overlap any VAD-detected speech region (silence hallucinations).
+        if not any(
+            min(end_seconds, region_end) - max(start_seconds, region_start) > 0
+            for region_start, region_end in speech_regions
+        ):
+            continue
+
+        start_ms = int(start_seconds * 1000)
+        end_ms = int(end_seconds * 1000)
 
         label = "Unknown Speaker"
         if diarization:
@@ -102,7 +128,7 @@ def transcribe_with_diarization(
             for speaker, speaker_start, speaker_end in diarization:
                 overlap = max(
                     0.0,
-                    min(raw["end"], speaker_end) - max(raw["start"], speaker_start),
+                    min(end_seconds, speaker_end) - max(start_seconds, speaker_start),
                 )
                 if overlap > best_overlap:
                     best_overlap = overlap

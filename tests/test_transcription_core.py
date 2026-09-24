@@ -19,6 +19,38 @@ def test_cleanup_none_preserves_text():
     assert apply_text_cleanup("  hello  ", "none") == "  hello  "
 
 
+def test_transcribe_with_diarization_only_transcribes_vad_speech_regions(tmp_path, monkeypatch):
+    wav_path = tmp_path / "audio.wav"
+    wav_path.write_bytes(b"fake wav")
+
+    monkeypatch.setattr(
+        "transcription_core.detect_speech_segments",
+        lambda *_a, **_k: [(0.0, 2.0), (5.0, 7.0)],
+    )
+
+    calls = []
+
+    class FakeModel:
+        def transcribe(self, path, verbose=False, **kwargs):
+            calls.append(kwargs)
+            return {
+                "segments": [
+                    {"start": 0.1, "end": 1.0, "text": "hello", "avg_logprob": -0.1},
+                ]
+            }
+
+    fake_whisper = type("FakeWhisperModule", (), {"load_model": staticmethod(lambda *_a, **_k: FakeModel())})
+    monkeypatch.setitem(__import__("sys").modules, "whisper", fake_whisper)
+
+    from transcription_core import transcribe_with_diarization
+
+    segments = transcribe_with_diarization(wav_path)
+
+    assert segments[0].text == "hello"
+    assert calls[0]["condition_on_previous_text"] is False
+    assert calls[0]["word_timestamps"] is True
+
+
 def test_save_transcripts_groups_by_speaker(tmp_path: Path):
     segments = [
         TranscriptionSegment("Speaker A", 65_000, 70_000, "later"),
