@@ -126,6 +126,41 @@ def init_db():
             ON transcription_segments(meeting_id)
         """)
 
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS voice_embeddings (
+                embedding_id INTEGER PRIMARY KEY AUTOINCREMENT,
+                person_id INTEGER NOT NULL,
+                embedding_path TEXT NOT NULL,
+                quality REAL DEFAULT 0,
+                created_at TEXT NOT NULL,
+                FOREIGN KEY(person_id) REFERENCES persons(person_id)
+            )
+        """)
+
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS unknown_voices (
+                unknown_voice_id INTEGER PRIMARY KEY AUTOINCREMENT,
+                label TEXT NOT NULL,
+                embedding_path TEXT,
+                created_at TEXT NOT NULL,
+                resolved_person_id INTEGER,
+                FOREIGN KEY(resolved_person_id) REFERENCES persons(person_id)
+            )
+        """)
+
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS unknown_voice_samples (
+                sample_id INTEGER PRIMARY KEY AUTOINCREMENT,
+                unknown_voice_id INTEGER NOT NULL,
+                embedding_path TEXT NOT NULL,
+                quality REAL DEFAULT 0,
+                created_at TEXT NOT NULL,
+                FOREIGN KEY(unknown_voice_id)
+                    REFERENCES unknown_voices(unknown_voice_id)
+                    ON DELETE CASCADE
+            )
+        """)
+
         conn.commit()
 
 
@@ -344,6 +379,136 @@ def delete_low_quality_unknowns(threshold=0.4):
             if _delete_unknown_locked(conn, row[0])
         ]
         return deleted
+
+
+def add_voice_embedding(person_id, embedding_path, quality=0.0):
+    with get_conn() as conn:
+        cur = conn.execute(
+            """
+            INSERT INTO voice_embeddings(person_id, embedding_path, quality, created_at)
+            VALUES (?, ?, ?, ?)
+            """,
+            (int(person_id), str(embedding_path), float(quality), utc_now()),
+        )
+        return int(cur.lastrowid)
+
+
+def list_voice_embeddings():
+    with get_conn() as conn:
+        return conn.execute(
+            """
+            SELECT ve.embedding_id, ve.person_id, p.name, ve.embedding_path, ve.quality
+            FROM voice_embeddings ve
+            JOIN persons p ON p.person_id = ve.person_id
+            ORDER BY ve.embedding_id
+            """
+        ).fetchall()
+
+
+def create_unknown_voice(label, embedding_path):
+    with get_conn() as conn:
+        cur = conn.execute(
+            """
+            INSERT INTO unknown_voices(label, embedding_path, created_at)
+            VALUES (?, ?, ?)
+            """,
+            (label, str(embedding_path), utc_now()),
+        )
+        return int(cur.lastrowid)
+
+
+def add_unknown_voice_sample(unknown_voice_id, embedding_path, quality=0.0):
+    with get_conn() as conn:
+        cur = conn.execute(
+            """
+            INSERT INTO unknown_voice_samples(unknown_voice_id, embedding_path, quality, created_at)
+            VALUES (?, ?, ?, ?)
+            """,
+            (int(unknown_voice_id), str(embedding_path), float(quality), utc_now()),
+        )
+        return int(cur.lastrowid)
+
+
+def list_unknown_voice_samples(unknown_voice_id):
+    with get_conn() as conn:
+        return conn.execute(
+            """
+            SELECT sample_id, embedding_path, quality, created_at
+            FROM unknown_voice_samples
+            WHERE unknown_voice_id=?
+            ORDER BY quality DESC
+            """,
+            (int(unknown_voice_id),),
+        ).fetchall()
+
+
+def list_unknown_voice_samples_with_embeddings():
+    with get_conn() as conn:
+        return conn.execute(
+            """
+            SELECT uvs.sample_id, uvs.unknown_voice_id, uvs.embedding_path, uvs.quality
+            FROM unknown_voice_samples uvs
+            JOIN unknown_voices uv ON uv.unknown_voice_id = uvs.unknown_voice_id
+            WHERE uv.resolved_person_id IS NULL
+            ORDER BY uvs.quality DESC
+            """
+        ).fetchall()
+
+
+def list_unknown_voices(include_resolved=False):
+    query = """
+        SELECT unknown_voice_id, label, embedding_path, created_at, resolved_person_id
+        FROM unknown_voices
+    """
+    if not include_resolved:
+        query += " WHERE resolved_person_id IS NULL"
+    query += " ORDER BY unknown_voice_id DESC"
+    with get_conn() as conn:
+        return conn.execute(query).fetchall()
+
+
+def resolve_unknown_voice(unknown_voice_id, person_id):
+    with get_conn() as conn:
+        conn.execute(
+            "UPDATE unknown_voices SET resolved_person_id=? WHERE unknown_voice_id=?",
+            (person_id, unknown_voice_id),
+        )
+
+
+def _delete_unknown_voice_locked(conn, unknown_voice_id):
+    parent = conn.execute(
+        "SELECT embedding_path, resolved_person_id FROM unknown_voices WHERE unknown_voice_id=?",
+        (int(unknown_voice_id),),
+    ).fetchone()
+    if parent is None or parent[1] is not None:
+        return False
+
+    sample_rows = conn.execute(
+        "SELECT embedding_path FROM unknown_voice_samples WHERE unknown_voice_id=?",
+        (int(unknown_voice_id),),
+    ).fetchall()
+    paths = [parent[0]] + [row[0] for row in sample_rows]
+
+    conn.execute(
+        "DELETE FROM unknown_voice_samples WHERE unknown_voice_id=?",
+        (int(unknown_voice_id),),
+    )
+    conn.execute(
+        "DELETE FROM unknown_voices WHERE unknown_voice_id=?",
+        (int(unknown_voice_id),),
+    )
+    for path in paths:
+        if path:
+            try:
+                Path(path).unlink(missing_ok=True)
+            except OSError:
+                pass
+    return True
+
+
+def delete_unknown_voice(unknown_voice_id):
+    with get_conn() as conn:
+        return _delete_unknown_voice_locked(conn, unknown_voice_id)
 
 
 def list_persons():
