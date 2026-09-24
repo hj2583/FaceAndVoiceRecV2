@@ -12,6 +12,7 @@ INDEX_PATH = BASE_DIR / "face_index.npz"
 
 KNOWN_FACES_DIR = BASE_DIR / "known_faces"
 UNKNOWN_FACES_DIR = BASE_DIR / "unknown_faces"
+UNKNOWN_VOICES_DIR = BASE_DIR / "unknown_voices"
 INITIAL_VIDEO_DIR = BASE_DIR / "initialVideo"
 TRACKED_VIDEO_DIR = BASE_DIR / "trackedVideo"
 LIVE_VIDEO_DIR = BASE_DIR / "live"
@@ -25,6 +26,7 @@ LOG_DIR = BASE_DIR / "logs"
 for directory in (
     KNOWN_FACES_DIR,
     UNKNOWN_FACES_DIR,
+    UNKNOWN_VOICES_DIR,
     INITIAL_VIDEO_DIR,
     TRACKED_VIDEO_DIR,
     LIVE_VIDEO_DIR,
@@ -187,6 +189,36 @@ LIP_OPEN_THRESHOLD = 0.035
 
 SPEECH_CONFIRM_FRAMES = 2
 SPEECH_RELEASE_FRAMES = 4
+
+
+# ============================================================
+# Voice embeddings / diarization
+# ============================================================
+
+# SpeechBrain speaker-embedding model (public, no HF auth required).
+VOICE_EMBEDDING_MODEL = "speechbrain/spkrec-ecapa-voxceleb"
+
+# ECAPA-TDNN embedding size for the model above.
+VOICE_EMBEDDING_DIM = 192
+
+# Minimum cosine similarity required to accept a voice match
+# against an enrolled voiceprint.
+VOICE_MATCH_THRESHOLD = 0.72
+
+# If the best and second-best voice matches are too close,
+# the match is considered ambiguous and rejected.
+VOICE_AMBIGUITY_MARGIN = 0.05
+
+# Cosine-distance threshold used by agglomerative clustering
+# when grouping a meeting's speech segments into speakers.
+# Lower = more/smaller clusters (more distinct speakers found).
+VOICE_CLUSTER_DISTANCE_THRESHOLD = 0.35
+
+# Whisper decoding language ("en", "ms", ...); None = auto-detect.
+WHISPER_LANGUAGE = None
+
+# Optional Whisper decoding hint (domain vocabulary, names, etc).
+WHISPER_INITIAL_PROMPT = None
 
 
 # ============================================================
