@@ -87,7 +87,14 @@ def transcribe_with_diarization(
 
     model = whisper.load_model(model_size or config.WHISPER_MODEL)
 
-    speech_regions = detect_speech_segments(audio_path)
+    try:
+        speech_regions = detect_speech_segments(audio_path)
+    except Exception:
+        # VAD unavailable/broken: degrade gracefully by skipping VAD
+        # filtering entirely rather than failing the whole transcription.
+        logger.exception("VAD speech detection failed; transcribing unfiltered")
+        speech_regions = None
+
     transcribe_kwargs = {
         "condition_on_previous_text": False,
         "word_timestamps": True,
@@ -97,7 +104,7 @@ def transcribe_with_diarization(
     if config.WHISPER_INITIAL_PROMPT:
         transcribe_kwargs["initial_prompt"] = config.WHISPER_INITIAL_PROMPT
 
-    if not speech_regions:
+    if speech_regions is not None and not speech_regions:
         return []
 
     result = model.transcribe(str(audio_path), verbose=False, **transcribe_kwargs)
@@ -113,7 +120,9 @@ def transcribe_with_diarization(
 
         # Whisper transcribes the whole file; drop segments that don't
         # overlap any VAD-detected speech region (silence hallucinations).
-        if not any(
+        # speech_regions is None when VAD was unavailable/failed, meaning
+        # filtering is skipped and all Whisper segments pass through.
+        if speech_regions is not None and not any(
             min(end_seconds, region_end) - max(start_seconds, region_start) > 0
             for region_start, region_end in speech_regions
         ):
