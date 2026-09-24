@@ -138,11 +138,15 @@ from database import (
 )
 
 
-def _read_region_pcm(wav_path, start_seconds, end_seconds):
-    pcm = read_wav_pcm(wav_path)
+def _slice_pcm(pcm, start_seconds, end_seconds):
     start_byte = int(start_seconds * SAMPLE_RATE) * SAMPLE_WIDTH
     end_byte = int(end_seconds * SAMPLE_RATE) * SAMPLE_WIDTH
     return pcm[start_byte:end_byte]
+
+
+def _read_region_pcm(wav_path, start_seconds, end_seconds):
+    pcm = read_wav_pcm(wav_path)
+    return _slice_pcm(pcm, start_seconds, end_seconds)
 
 
 def find_matching_unknown_voice(query_embedding, threshold=None):
@@ -201,9 +205,10 @@ def diarize_meeting_audio(wav_path, speech_regions):
     """
     embeddings = []
     valid_regions = []
+    pcm = read_wav_pcm(wav_path)
     for start, end in speech_regions:
-        pcm = _read_region_pcm(wav_path, start, end)
-        embedding = extract_voice_embedding(pcm)
+        region_pcm = _slice_pcm(pcm, start, end)
+        embedding = extract_voice_embedding(region_pcm)
         if embedding is None:
             continue
         embeddings.append(embedding)

@@ -88,7 +88,7 @@ def test_diarize_meeting_audio_clusters_segments_by_similarity(tmp_path, monkeyp
 
     calls = iter(embeddings_by_region.values())
     monkeypatch.setattr(voice_core, "extract_voice_embedding", lambda *_a, **_k: next(calls))
-    monkeypatch.setattr(voice_core, "_read_region_pcm", lambda *_a, **_k: b"\x00\x00" * 8000)
+    monkeypatch.setattr(voice_core, "read_wav_pcm", lambda *_a, **_k: b"\x00\x00" * 8000)
     monkeypatch.setattr(voice_core, "match_voice_embedding", lambda *_a, **_k: None)
 
     result = voice_core.diarize_meeting_audio(
@@ -102,12 +102,38 @@ def test_diarize_meeting_audio_clusters_segments_by_similarity(tmp_path, monkeyp
     assert all(label.startswith("Unknown Speaker") for label in labels)
 
 
+def test_diarize_meeting_audio_reads_wav_file_only_once(tmp_path, monkeypatch):
+    speaker_a = np.zeros(voice_core.EMBEDDING_DIM, dtype=np.float32)
+    speaker_a[0] = 1.0
+    speaker_b = np.zeros(voice_core.EMBEDDING_DIM, dtype=np.float32)
+    speaker_b[1] = 1.0
+
+    regions = [(0.0, 1.0), (1.0, 2.0), (2.0, 3.0), (3.0, 4.0)]
+    calls = iter([speaker_a, speaker_b, speaker_a, speaker_b])
+
+    read_wav_pcm_call_count = 0
+
+    def fake_read_wav_pcm(_wav_path):
+        nonlocal read_wav_pcm_call_count
+        read_wav_pcm_call_count += 1
+        return b"\x00\x00" * (4 * 16000)
+
+    monkeypatch.setattr(voice_core, "extract_voice_embedding", lambda *_a, **_k: next(calls))
+    monkeypatch.setattr(voice_core, "read_wav_pcm", fake_read_wav_pcm)
+    monkeypatch.setattr(voice_core, "match_voice_embedding", lambda *_a, **_k: None)
+
+    result = voice_core.diarize_meeting_audio(tmp_path / "audio.wav", regions)
+
+    assert len(result) == len(regions)
+    assert read_wav_pcm_call_count == 1
+
+
 def test_diarize_meeting_audio_uses_enrolled_person_name(tmp_path, monkeypatch):
     embedding = np.zeros(voice_core.EMBEDDING_DIM, dtype=np.float32)
     embedding[0] = 1.0
 
     monkeypatch.setattr(voice_core, "extract_voice_embedding", lambda *_a, **_k: embedding)
-    monkeypatch.setattr(voice_core, "_read_region_pcm", lambda *_a, **_k: b"\x00\x00" * 8000)
+    monkeypatch.setattr(voice_core, "read_wav_pcm", lambda *_a, **_k: b"\x00\x00" * 8000)
     monkeypatch.setattr(
         voice_core,
         "match_voice_embedding",
