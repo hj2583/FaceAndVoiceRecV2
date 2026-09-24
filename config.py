@@ -58,7 +58,7 @@ EMBEDDING_DIM = 512
 #   Higher risk of wrong identity
 #
 # Start at 0.70 and calibrate using your own camera.
-RECOGNITION_THRESHOLD = 0.78
+RECOGNITION_THRESHOLD = 0.70
 
 
 # If the best and second-best matches are too close,
