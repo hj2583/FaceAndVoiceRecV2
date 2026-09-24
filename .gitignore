@@ -8,11 +8,13 @@ known_faces/*
 unknown_faces/*
 initialVideo/*
 trackedVideo/*
+live/*
 logs/*
 !known_faces/.gitkeep
 !unknown_faces/.gitkeep
 !initialVideo/.gitkeep
 !trackedVideo/.gitkeep
+!live/.gitkeep
 !logs/.gitkeep
 .venv/
 3.12venv/
