@@ -125,3 +125,123 @@ def match_voice_embedding(query_embedding, threshold=None, ambiguity_margin=None
         "person_name": best_person_name,
         "similarity": best_similarity,
     }
+
+
+from scipy.cluster.hierarchy import fcluster, linkage
+from scipy.spatial.distance import pdist
+
+from audio_core import read_wav_pcm, SAMPLE_RATE, SAMPLE_WIDTH
+from database import (
+    add_unknown_voice_sample,
+    create_unknown_voice,
+    list_unknown_voice_samples_with_embeddings,
+)
+
+
+def _read_region_pcm(wav_path, start_seconds, end_seconds):
+    pcm = read_wav_pcm(wav_path)
+    start_byte = int(start_seconds * SAMPLE_RATE) * SAMPLE_WIDTH
+    end_byte = int(end_seconds * SAMPLE_RATE) * SAMPLE_WIDTH
+    return pcm[start_byte:end_byte]
+
+
+def find_matching_unknown_voice(query_embedding, threshold=None):
+    threshold = config.VOICE_MATCH_THRESHOLD if threshold is None else threshold
+    query = _normalize(query_embedding)
+    if query is None:
+        return None
+
+    rows = list_unknown_voice_samples_with_embeddings()
+    if not rows:
+        return None
+
+    scores = []
+    for sample_id, unknown_voice_id, embedding_path, _quality in rows:
+        path = Path(embedding_path)
+        if not path.exists():
+            continue
+        try:
+            stored = _normalize(np.load(path))
+            if stored is None:
+                continue
+            scores.append((float(np.dot(query, stored)), unknown_voice_id, sample_id))
+        except Exception:
+            logger.exception("Failed loading unknown voice embedding: %s", path)
+
+    if not scores:
+        return None
+
+    scores.sort(key=lambda item: item[0], reverse=True)
+    best_similarity, best_unknown_voice_id, best_sample_id = scores[0]
+    if best_similarity < threshold:
+        return None
+
+    return {
+        "unknown_voice_id": best_unknown_voice_id,
+        "similarity": best_similarity,
+        "sample_id": best_sample_id,
+    }
+
+
+def register_unknown_voice(label, embedding):
+    config.UNKNOWN_VOICES_DIR.mkdir(parents=True, exist_ok=True)
+    safe_label = label.replace("/", "_").replace("\\", "_")
+    embedding_path = config.UNKNOWN_VOICES_DIR / f"{safe_label}.npy"
+    np.save(embedding_path, _normalize(embedding))
+    unknown_voice_id = create_unknown_voice(label, embedding_path)
+    add_unknown_voice_sample(unknown_voice_id, embedding_path, quality=1.0)
+    return unknown_voice_id
+
+
+def diarize_meeting_audio(wav_path, speech_regions):
+    """Cluster VAD speech regions into speakers and label each region.
+
+    Returns [(speaker_label, start_seconds, end_seconds), ...] suitable for
+    transcription_core.transcribe_with_diarization's `diarize` parameter.
+    """
+    embeddings = []
+    valid_regions = []
+    for start, end in speech_regions:
+        pcm = _read_region_pcm(wav_path, start, end)
+        embedding = extract_voice_embedding(pcm)
+        if embedding is None:
+            continue
+        embeddings.append(embedding)
+        valid_regions.append((start, end))
+
+    if not embeddings:
+        return []
+
+    if len(embeddings) == 1:
+        cluster_ids = [1]
+    else:
+        distances = pdist(np.vstack(embeddings), metric="cosine")
+        linkage_matrix = linkage(distances, method="average")
+        cluster_ids = fcluster(
+            linkage_matrix,
+            t=config.VOICE_CLUSTER_DISTANCE_THRESHOLD,
+            criterion="distance",
+        )
+
+    cluster_centroids = {}
+    for cluster_id, embedding in zip(cluster_ids, embeddings):
+        cluster_centroids.setdefault(cluster_id, []).append(embedding)
+    cluster_centroids = {
+        cluster_id: _normalize(np.mean(vectors, axis=0))
+        for cluster_id, vectors in cluster_centroids.items()
+    }
+
+    cluster_labels = {}
+    unknown_counter = 0
+    for cluster_id, centroid in cluster_centroids.items():
+        match = match_voice_embedding(centroid) if centroid is not None else None
+        if match is not None:
+            cluster_labels[cluster_id] = match["person_name"]
+            continue
+        unknown_counter += 1
+        cluster_labels[cluster_id] = f"Unknown Speaker {unknown_counter}"
+
+    return [
+        (cluster_labels[cluster_id], start, end)
+        for cluster_id, (start, end) in zip(cluster_ids, valid_regions)
+    ]

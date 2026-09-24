@@ -1,5 +1,6 @@
 import numpy as np
 
+import config
 import database
 import voice_core
 
@@ -68,6 +69,70 @@ def test_match_voice_embedding_returns_none_below_threshold(tmp_path, monkeypatc
     query[-1] = 1.0  # orthogonal -> similarity 0.0
 
     assert voice_core.match_voice_embedding(query) is None
+
+
+def test_diarize_meeting_audio_clusters_segments_by_similarity(tmp_path, monkeypatch):
+    speaker_a = np.zeros(voice_core.EMBEDDING_DIM, dtype=np.float32)
+    speaker_a[0] = 1.0
+    speaker_b = np.zeros(voice_core.EMBEDDING_DIM, dtype=np.float32)
+    speaker_b[1] = 1.0
+
+    embeddings_by_region = {
+        (0.0, 1.0): speaker_a,
+        (1.0, 2.0): speaker_b,
+        (2.0, 3.0): speaker_a,
+    }
+
+    def fake_extract(_pcm, sample_rate=16000):
+        return None  # overridden per-call below
+
+    calls = iter(embeddings_by_region.values())
+    monkeypatch.setattr(voice_core, "extract_voice_embedding", lambda *_a, **_k: next(calls))
+    monkeypatch.setattr(voice_core, "_read_region_pcm", lambda *_a, **_k: b"\x00\x00" * 8000)
+    monkeypatch.setattr(voice_core, "match_voice_embedding", lambda *_a, **_k: None)
+
+    result = voice_core.diarize_meeting_audio(
+        tmp_path / "audio.wav",
+        list(embeddings_by_region.keys()),
+    )
+
+    labels = [label for label, _start, _end in result]
+    assert labels[0] == labels[2]
+    assert labels[0] != labels[1]
+    assert all(label.startswith("Unknown Speaker") for label in labels)
+
+
+def test_diarize_meeting_audio_uses_enrolled_person_name(tmp_path, monkeypatch):
+    embedding = np.zeros(voice_core.EMBEDDING_DIM, dtype=np.float32)
+    embedding[0] = 1.0
+
+    monkeypatch.setattr(voice_core, "extract_voice_embedding", lambda *_a, **_k: embedding)
+    monkeypatch.setattr(voice_core, "_read_region_pcm", lambda *_a, **_k: b"\x00\x00" * 8000)
+    monkeypatch.setattr(
+        voice_core,
+        "match_voice_embedding",
+        lambda *_a, **_k: {"person_id": 7, "person_name": "Frank", "similarity": 0.9},
+    )
+
+    result = voice_core.diarize_meeting_audio(tmp_path / "audio.wav", [(0.0, 1.0)])
+
+    assert result == [("Frank", 0.0, 1.0)]
+
+
+def test_find_matching_unknown_voice_and_register(tmp_path, monkeypatch):
+    monkeypatch.setattr(database, "DB_PATH", tmp_path / "faces.db")
+    monkeypatch.setattr(config, "UNKNOWN_VOICES_DIR", tmp_path)
+    database.init_db()
+
+    embedding = np.zeros(voice_core.EMBEDDING_DIM, dtype=np.float32)
+    embedding[0] = 1.0
+
+    unknown_voice_id = voice_core.register_unknown_voice("Speaker 1", embedding)
+
+    match = voice_core.find_matching_unknown_voice(embedding)
+    assert match is not None
+    assert match["unknown_voice_id"] == unknown_voice_id
+    assert match["similarity"] > 0.99
 
 
 def test_match_voice_embedding_returns_none_when_no_voiceprints(tmp_path, monkeypatch):
