@@ -14,6 +14,7 @@ import subprocess
 from typing import Callable, Iterable, Optional
 
 import config
+import voice_core
 from audio_core import detect_speech_segments
 
 
@@ -68,13 +69,15 @@ def _segment_confidence(segment: dict) -> Optional[float]:
 def transcribe_with_diarization(
     audio_path: str | Path,
     model_size: Optional[str] = None,
-    diarize: Optional[Callable[[str], Iterable[tuple[str, float, float]]]] = None,
+    diarize: Optional[Callable[[Path, list[tuple[float, float]]], Iterable[tuple[str, float, float]]]] = None,
 ) -> list[TranscriptionSegment]:
     """Transcribe audio and assign speakers from an optional diarizer.
 
-    ``diarize`` must yield ``(speaker_label, start_seconds, end_seconds)``.
-    Plain Whisper has no speaker separation; when no diarizer is supplied the
-    returned label is ``Unknown Speaker`` rather than a misleading speaker ID.
+    ``diarize`` receives ``(audio_path, speech_regions)`` and must yield
+    ``(speaker_label, start_seconds, end_seconds)``. When no diarizer is
+    supplied, ``voice_core.diarize_meeting_audio`` is used by default; if
+    diarization is unavailable or fails, the returned label is
+    ``Unknown Speaker`` rather than a misleading speaker ID.
     """
     audio_path = Path(audio_path)
     if not audio_path.exists():
@@ -108,7 +111,12 @@ def transcribe_with_diarization(
         return []
 
     result = model.transcribe(str(audio_path), verbose=False, **transcribe_kwargs)
-    diarization = list(diarize(str(audio_path))) if diarize else []
+    active_diarize = diarize if diarize is not None else voice_core.diarize_meeting_audio
+    try:
+        diarization = list(active_diarize(audio_path, speech_regions))
+    except Exception:
+        logger.exception("Diarization failed; falling back to Unknown Speaker labels")
+        diarization = []
     segments = []
 
     for raw in result.get("segments", []):
@@ -225,7 +233,7 @@ def save_transcripts(
 
 def process_meeting_transcription(
     video_path: str | Path,
-    diarize: Optional[Callable[[str], Iterable[tuple[str, float, float]]]] = None,
+    diarize: Optional[Callable[[Path, list[tuple[float, float]]], Iterable[tuple[str, float, float]]]] = None,
 ) -> int:
     """Run the offline transcription pipeline for one meeting video."""
     if not config.ENABLE_TRANSCRIPTION:

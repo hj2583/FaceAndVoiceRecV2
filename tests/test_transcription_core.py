@@ -140,3 +140,47 @@ def test_process_meeting_transcription_persists_completed_segments(
     assert status == "completed"
     assert segments == [("Speaker A", "hello")]
     assert (config.TRANSCRIPTS_DIR / str(meeting_id) / "speaker_a.txt").exists()
+
+
+def test_process_meeting_transcription_uses_voice_core_diarizer_by_default(tmp_path, monkeypatch):
+    db_path = tmp_path / "meeting.db"
+    monkeypatch.setattr(config, "DB_PATH", db_path)
+    monkeypatch.setattr(database, "DB_PATH", db_path)
+    monkeypatch.setattr(config, "TRANSCRIPTS_DIR", tmp_path / "transcripts")
+    database.init_db()
+
+    video_path = tmp_path / "meeting.mp4"
+    video_path.write_bytes(b"video")
+
+    def fake_extract(_video_path, output_path):
+        output_path.parent.mkdir(parents=True, exist_ok=True)
+        output_path.write_bytes(b"audio")
+        return output_path
+
+    monkeypatch.setattr("transcription_core.extract_audio_from_video", fake_extract)
+    monkeypatch.setattr("transcription_core.detect_speech_segments", lambda *_a, **_k: [(0.0, 1.5)])
+
+    diarize_calls = []
+
+    def fake_diarize(wav_path, speech_regions):
+        diarize_calls.append((wav_path, speech_regions))
+        return [("Gina", 0.0, 1.5)]
+
+    monkeypatch.setattr("voice_core.diarize_meeting_audio", fake_diarize)
+
+    class FakeModel:
+        def transcribe(self, path, verbose=False, **kwargs):
+            return {"segments": [{"start": 0.1, "end": 1.0, "text": "hi", "avg_logprob": -0.1}]}
+
+    fake_whisper = type("FakeWhisperModule", (), {"load_model": staticmethod(lambda *_a, **_k: FakeModel())})
+    monkeypatch.setitem(__import__("sys").modules, "whisper", fake_whisper)
+
+    meeting_id = process_meeting_transcription(video_path)
+
+    assert diarize_calls  # the default diarizer was invoked
+    with database.get_conn() as connection:
+        row = connection.execute(
+            "SELECT speaker_label FROM transcription_segments WHERE meeting_id=?",
+            (meeting_id,),
+        ).fetchone()
+    assert row[0] == "Gina"
