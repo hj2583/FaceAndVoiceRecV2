@@ -184,3 +184,36 @@ def test_process_meeting_transcription_uses_voice_core_diarizer_by_default(tmp_p
             (meeting_id,),
         ).fetchone()
     assert row[0] == "Gina"
+
+
+def test_process_meeting_transcription_populates_person_id_for_known_speaker(tmp_path, monkeypatch):
+    db_path = tmp_path / "meeting.db"
+    monkeypatch.setattr(config, "DB_PATH", db_path)
+    monkeypatch.setattr(database, "DB_PATH", db_path)
+    monkeypatch.setattr(config, "TRANSCRIPTS_DIR", tmp_path / "transcripts")
+    database.init_db()
+    person_id = database.create_person("Henry")
+
+    video_path = tmp_path / "meeting.mp4"
+    video_path.write_bytes(b"video")
+
+    def fake_extract(_video_path, output_path):
+        output_path.parent.mkdir(parents=True, exist_ok=True)
+        output_path.write_bytes(b"audio")
+        return output_path
+
+    monkeypatch.setattr("transcription_core.extract_audio_from_video", fake_extract)
+    monkeypatch.setattr(
+        "transcription_core.transcribe_with_diarization",
+        lambda *_a, **_k: [TranscriptionSegment("Henry", 0, 1000, "hello", 0.9)],
+    )
+
+    meeting_id = process_meeting_transcription(video_path)
+
+    with database.get_conn() as connection:
+        row = connection.execute(
+            "SELECT speaker_label, person_id FROM transcription_segments WHERE meeting_id=?",
+            (meeting_id,),
+        ).fetchone()
+
+    assert row == ("Henry", person_id)

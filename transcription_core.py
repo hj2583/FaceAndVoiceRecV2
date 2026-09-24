@@ -159,6 +159,16 @@ def transcribe_with_diarization(
     return segments
 
 
+def resolve_speaker_name(label):
+    """Look up person_id for a speaker label that matches an enrolled person's name."""
+    with sqlite3.connect(config.DB_PATH) as connection:
+        row = connection.execute(
+            "SELECT person_id FROM persons WHERE name=?",
+            (label,),
+        ).fetchone()
+    return (int(row[0]) if row else None), label
+
+
 def apply_text_cleanup(text: str, level: Optional[str] = None) -> str:
     """Apply dependency-free cleanup suitable for raw Whisper text."""
     if level or config.TRANSCRIPTION_CLEANUP_LEVEL == "none":
@@ -211,14 +221,15 @@ def save_transcripts(
             connection.executemany(
                 """
                 INSERT INTO transcription_segments(
-                    meeting_id, speaker_label, start_ms, end_ms,
+                    meeting_id, speaker_label, person_id, start_ms, end_ms,
                     text, confidence, created_at
-                ) VALUES (?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
                 """,
                 [
                     (
                         meeting_id,
                         segment.speaker_label,
+                        resolve_speaker_name(segment.speaker_label)[0],
                         segment.start_ms,
                         segment.end_ms,
                         apply_text_cleanup(segment.text),
