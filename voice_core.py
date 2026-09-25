@@ -6,6 +6,7 @@ embedding, then match it against enrolled voiceprints by cosine similarity.
 
 import logging
 import threading
+import uuid
 from pathlib import Path
 
 import numpy as np
@@ -72,6 +73,11 @@ def extract_voice_embedding(pcm_int16_bytes, sample_rate=16000):
         return None
 
 
+def has_enrolled_voiceprints():
+    """Cheap check used to skip voice embedding work when nothing can match."""
+    return bool(list_voice_embeddings())
+
+
 def match_voice_embedding(query_embedding, threshold=None, ambiguity_margin=None):
     """Compare a query embedding against every enrolled voiceprint.
 
@@ -134,8 +140,12 @@ from audio_core import read_wav_pcm, SAMPLE_RATE, SAMPLE_WIDTH
 from database import (
     add_unknown_voice_sample,
     create_unknown_voice,
+    delete_unknown_voice,
     list_unknown_voice_samples_with_embeddings,
+    update_unknown_voice,
 )
+
+_PENDING_UNKNOWN_VOICE_LABEL = "Unknown Speaker (pending)"
 
 
 def _slice_pcm(pcm, start_seconds, end_seconds):
@@ -187,32 +197,110 @@ def find_matching_unknown_voice(query_embedding, threshold=None):
     }
 
 
-def register_unknown_voice(label, embedding):
+def _save_unknown_voice_embedding(unknown_voice_id, embedding):
     config.UNKNOWN_VOICES_DIR.mkdir(parents=True, exist_ok=True)
-    safe_label = label.replace("/", "_").replace("\\", "_")
-    embedding_path = config.UNKNOWN_VOICES_DIR / f"{safe_label}.npy"
+    embedding_path = (
+        config.UNKNOWN_VOICES_DIR
+        / f"unknown_voice_{int(unknown_voice_id)}_{uuid.uuid4().hex}.npy"
+    )
     np.save(embedding_path, _normalize(embedding))
-    unknown_voice_id = create_unknown_voice(label, embedding_path)
-    add_unknown_voice_sample(unknown_voice_id, embedding_path, quality=1.0)
-    return unknown_voice_id
+    return embedding_path
+
+
+def _register_unknown_voice(embedding, label=None):
+    # The row is created first so its auto-increment id can name the label/file.
+    unknown_voice_id = create_unknown_voice(label or _PENDING_UNKNOWN_VOICE_LABEL, None)
+    label = label or f"Unknown Speaker {unknown_voice_id}"
+    try:
+        embedding_path = _save_unknown_voice_embedding(unknown_voice_id, embedding)
+        update_unknown_voice(unknown_voice_id, label, embedding_path)
+        add_unknown_voice_sample(unknown_voice_id, embedding_path, quality=1.0)
+    except Exception:
+        delete_unknown_voice(unknown_voice_id)
+        raise
+    return unknown_voice_id, label
+
+
+def register_unknown_voice(label, embedding):
+    return _register_unknown_voice(embedding, label)[0]
+
+
+def register_new_unknown_voice(embedding):
+    """Register an unknown voice labeled "Unknown Speaker {unknown_voice_id}".
+
+    The id-based label is unique across the whole database, so resolving it
+    by label can never relabel another meeting's speaker.
+    Returns (unknown_voice_id, label).
+    """
+    return _register_unknown_voice(embedding)
+
+
+def add_unknown_voice_embedding_sample(unknown_voice_id, embedding, quality=1.0):
+    embedding_path = _save_unknown_voice_embedding(unknown_voice_id, embedding)
+    return add_unknown_voice_sample(unknown_voice_id, embedding_path, quality=quality)
+
+
+def _unknown_voice_label(unknown_voice_id):
+    with get_conn() as conn:
+        row = conn.execute(
+            "SELECT label FROM unknown_voices WHERE unknown_voice_id=?",
+            (int(unknown_voice_id),),
+        ).fetchone()
+    return row[0] if row else None
+
+
+def _label_unmatched_cluster(centroid):
+    """Reuse a still-unresolved unknown voice's label, or register a new one."""
+    existing = find_matching_unknown_voice(centroid)
+    if existing is not None:
+        label = _unknown_voice_label(existing["unknown_voice_id"])
+        if label is not None:
+            add_unknown_voice_embedding_sample(
+                existing["unknown_voice_id"],
+                centroid,
+                quality=existing["similarity"],
+            )
+            return label
+    _unknown_voice_id, label = register_new_unknown_voice(centroid)
+    return label
+
+
+def _sliding_windows(start, end, window_seconds, step_seconds):
+    """Split [start, end) into overlapping windows; short regions stay whole."""
+    if end - start <= window_seconds:
+        return [(start, end)]
+    windows = []
+    window_start = start
+    while window_start + window_seconds < end:
+        windows.append((window_start, window_start + window_seconds))
+        window_start += step_seconds
+    # Final window aligned to the region end so the tail is always covered.
+    windows.append((end - window_seconds, end))
+    return windows
 
 
 def diarize_meeting_audio(wav_path, speech_regions):
-    """Cluster VAD speech regions into speakers and label each region.
+    """Cluster sliding windows of VAD speech regions into speakers.
 
-    Returns [(speaker_label, start_seconds, end_seconds), ...] suitable for
-    transcription_core.transcribe_with_diarization's `diarize` parameter.
+    Returns [(speaker_label, start_seconds, end_seconds), ...] (one entry per
+    window) suitable for transcription_core.transcribe_with_diarization's
+    `diarize` parameter. Unmatched clusters are persisted as unknown voices.
     """
     embeddings = []
-    valid_regions = []
+    valid_windows = []
     pcm = read_wav_pcm(wav_path)
-    for start, end in speech_regions:
-        region_pcm = _slice_pcm(pcm, start, end)
-        embedding = extract_voice_embedding(region_pcm)
-        if embedding is None:
-            continue
-        embeddings.append(embedding)
-        valid_regions.append((start, end))
+    for region_start, region_end in speech_regions:
+        for start, end in _sliding_windows(
+            region_start,
+            region_end,
+            config.VOICE_DIARIZATION_WINDOW_SECONDS,
+            config.VOICE_DIARIZATION_STEP_SECONDS,
+        ):
+            embedding = extract_voice_embedding(_slice_pcm(pcm, start, end))
+            if embedding is None:
+                continue
+            embeddings.append(embedding)
+            valid_windows.append((start, end))
 
     if not embeddings:
         return []
@@ -237,16 +325,17 @@ def diarize_meeting_audio(wav_path, speech_regions):
     }
 
     cluster_labels = {}
-    unknown_counter = 0
     for cluster_id, centroid in cluster_centroids.items():
-        match = match_voice_embedding(centroid) if centroid is not None else None
+        if centroid is None:
+            cluster_labels[cluster_id] = "Unknown Speaker"
+            continue
+        match = match_voice_embedding(centroid)
         if match is not None:
             cluster_labels[cluster_id] = match["person_name"]
             continue
-        unknown_counter += 1
-        cluster_labels[cluster_id] = f"Unknown Speaker {unknown_counter}"
+        cluster_labels[cluster_id] = _label_unmatched_cluster(centroid)
 
     return [
         (cluster_labels[cluster_id], start, end)
-        for cluster_id, (start, end) in zip(cluster_ids, valid_regions)
+        for cluster_id, (start, end) in zip(cluster_ids, valid_windows)
     ]

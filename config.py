@@ -202,8 +202,10 @@ VOICE_EMBEDDING_MODEL = "speechbrain/spkrec-ecapa-voxceleb"
 VOICE_EMBEDDING_DIM = 192
 
 # Minimum cosine similarity required to accept a voice match
-# against an enrolled voiceprint.
-VOICE_MATCH_THRESHOLD = 0.72
+# against an enrolled voiceprint (also used for unknown-voice matching).
+# Same-speaker ECAPA cosine similarity is commonly ~0.4-0.7 (lower for
+# short clips). Starting point only: validate against real recordings.
+VOICE_MATCH_THRESHOLD = 0.5
 
 # If the best and second-best voice matches are too close,
 # the match is considered ambiguous and rejected.
@@ -212,7 +214,17 @@ VOICE_AMBIGUITY_MARGIN = 0.05
 # Cosine-distance threshold used by agglomerative clustering
 # when grouping a meeting's speech segments into speakers.
 # Lower = more/smaller clusters (more distinct speakers found).
-VOICE_CLUSTER_DISTANCE_THRESHOLD = 0.35
+# Distance = 1 - similarity, so 0.55 merges windows with similarity >= ~0.45.
+# Starting point only: validate against real recordings.
+VOICE_CLUSTER_DISTANCE_THRESHOLD = 0.55
+
+# Sliding-window size/step used to sub-segment each VAD speech region
+# before embedding, so speaker changes without a pause can be split.
+VOICE_DIARIZATION_WINDOW_SECONDS = 1.5
+VOICE_DIARIZATION_STEP_SECONDS = 0.75
+
+# Realtime voice fallback runs at most once per this many frames per track.
+VOICE_FALLBACK_INTERVAL_FRAMES = 30
 
 # Whisper decoding language ("en", "ms", ...); None = auto-detect.
 WHISPER_LANGUAGE = None
