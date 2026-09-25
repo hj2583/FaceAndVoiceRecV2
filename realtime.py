@@ -7,6 +7,7 @@ import cv2
 import numpy as np
 
 from audio_core import RealtimeVAD
+import voice_core
 
 from config import (
     LIP_OPEN_THRESHOLD,
@@ -1115,6 +1116,55 @@ def run(
                     key=lambda t:
                         t.lip_open,
                 )
+
+                # ---------------------------------------------------
+                # Voice fallback (only when face identity is missing
+                # or below the recognition confidence threshold; a
+                # confident face match is never overridden).
+                # ---------------------------------------------------
+
+                if (
+                    speaker.person_id is None
+                    or
+                    speaker.confidence
+                    < RECOGNITION_THRESHOLD
+                ):
+
+                    recent_pcm = (
+                        vad.get_recent_pcm(
+                            seconds=1.5
+                        )
+                        if vad is not None
+                        else b""
+                    )
+
+                    voice_embedding = (
+                        voice_core.extract_voice_embedding(
+                            recent_pcm
+                        )
+                    )
+
+                    voice_match = (
+                        voice_core.match_voice_embedding(
+                            voice_embedding
+                        )
+                        if voice_embedding is not None
+                        else None
+                    )
+
+                    if voice_match is not None:
+
+                        speaker.person_id = (
+                            voice_match["person_id"]
+                        )
+
+                        speaker.person_name = (
+                            voice_match["person_name"]
+                        )
+
+                        speaker.confidence = (
+                            voice_match["similarity"]
+                        )
 
                 if (
                     speaker.person_id
