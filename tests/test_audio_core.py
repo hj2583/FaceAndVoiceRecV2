@@ -125,3 +125,15 @@ def test_realtime_vad_stop_keeps_thread_when_join_times_out():
     thread.join.assert_called_once_with(timeout=2)
     assert vad.thread is thread
     warning.assert_called_once()
+
+
+def test_realtime_vad_get_recent_pcm_returns_trailing_buffer():
+    from audio_core import RealtimeVAD, FRAME_BYTES
+
+    vad = RealtimeVAD()
+    vad._pcm_buffer = bytearray(FRAME_BYTES * 100)
+    vad._append_pcm(b"\x01\x02" * (FRAME_BYTES // 2))
+
+    recent = vad.get_recent_pcm(seconds=0.032)
+
+    assert recent == b"\x01\x02" * (FRAME_BYTES // 2)

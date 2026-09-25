@@ -149,6 +149,11 @@ class RealtimeVAD:
         self.available = False
         self.startup_error = None
 
+        self._pcm_buffer = bytearray()
+        self._pcm_buffer_lock = threading.Lock()
+        # Cap the buffer so memory use stays bounded regardless of session length.
+        self._pcm_buffer_max_bytes = SAMPLE_RATE * SAMPLE_WIDTH * 5
+
     def start(self, startup_timeout=2.0):
         check_audio_dependencies()
 
@@ -198,6 +203,18 @@ class RealtimeVAD:
                 )
             else:
                 self.thread = None
+
+    def _append_pcm(self, frame_bytes):
+        with self._pcm_buffer_lock:
+            self._pcm_buffer.extend(frame_bytes)
+            overflow = len(self._pcm_buffer) - self._pcm_buffer_max_bytes
+            if overflow > 0:
+                del self._pcm_buffer[:overflow]
+
+    def get_recent_pcm(self, seconds=1.5):
+        with self._pcm_buffer_lock:
+            wanted_bytes = int(seconds * SAMPLE_RATE) * SAMPLE_WIDTH
+            return bytes(self._pcm_buffer[-wanted_bytes:])
 
     def _emit(self, state):
         """
@@ -277,6 +294,8 @@ class RealtimeVAD:
                 data, _overflowed = stream.read(
                     FRAME_SAMPLES,
                 )
+
+                self._append_pcm(bytes(data))
 
                 raw_speech = _speech_probability(
                     model,
