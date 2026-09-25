@@ -1,3 +1,4 @@
+import logging
 import sqlite3
 import threading
 from pathlib import Path
@@ -5,8 +6,11 @@ from contextlib import contextmanager
 from datetime import datetime, timezone
 from pathlib import Path
 
+import config
 from config import DB_PATH
 
+
+logger = logging.getLogger(__name__)
 
 _DB_LOCK = threading.RLock()
 
@@ -203,6 +207,13 @@ def rename_person(person_id, name):
             "UPDATE persons SET name=?, updated_at=? WHERE person_id=?",
             (name, utc_now(), person_id),
         )
+        meeting_ids = [
+            row[0]
+            for row in conn.execute(
+                "SELECT DISTINCT meeting_id FROM transcription_segments WHERE person_id=?",
+                (person_id,),
+            ).fetchall()
+        ]
         conn.execute(
             "UPDATE transcription_segments SET speaker_label=? WHERE person_id=?",
             (name, person_id),
@@ -211,6 +222,37 @@ def rename_person(person_id, name):
             "UPDATE audio_logs SET person_name=? WHERE person_id=?",
             (name, person_id),
         )
+    _regenerate_meeting_transcripts(meeting_ids)
+
+
+def _regenerate_meeting_transcripts(meeting_ids):
+    """Rewrite each meeting's on-disk .txt transcripts from its stored segments."""
+    if not meeting_ids:
+        return
+    # Lazy import: transcription_core -> voice_core -> database.
+    import transcription_core
+
+    for meeting_id in meeting_ids:
+        try:
+            with get_conn() as conn:
+                rows = conn.execute(
+                    """
+                    SELECT speaker_label, start_ms, end_ms, text, confidence
+                    FROM transcription_segments
+                    WHERE meeting_id=?
+                    ORDER BY start_ms
+                    """,
+                    (meeting_id,),
+                ).fetchall()
+            meeting_dir = Path(config.TRANSCRIPTS_DIR) / str(meeting_id)
+            # Old labels' files would otherwise linger next to the regenerated ones.
+            for stale_path in meeting_dir.glob("*.txt"):
+                stale_path.unlink(missing_ok=True)
+            segments = [transcription_core.TranscriptionSegment(*row) for row in rows]
+            # DB rows are already up to date, so only the files are rewritten.
+            transcription_core.save_transcripts(segments, meeting_dir)
+        except Exception:
+            logger.exception("Failed regenerating transcripts for meeting %s", meeting_id)
 
 
 def add_embedding(person_id, embedding_path, image_path=None, quality=0.0):
@@ -429,9 +471,17 @@ def create_unknown_voice(label, embedding_path):
             INSERT INTO unknown_voices(label, embedding_path, created_at)
             VALUES (?, ?, ?)
             """,
-            (label, str(embedding_path), utc_now()),
+            (label, str(embedding_path) if embedding_path else None, utc_now()),
         )
         return int(cur.lastrowid)
+
+
+def update_unknown_voice(unknown_voice_id, label, embedding_path):
+    with get_conn() as conn:
+        conn.execute(
+            "UPDATE unknown_voices SET label=?, embedding_path=? WHERE unknown_voice_id=?",
+            (label, str(embedding_path), int(unknown_voice_id)),
+        )
 
 
 def add_unknown_voice_sample(unknown_voice_id, embedding_path, quality=0.0):
@@ -485,6 +535,7 @@ def list_unknown_voices(include_resolved=False):
 
 
 def resolve_unknown_voice(unknown_voice_id, person_id):
+    meeting_ids = []
     with get_conn() as conn:
         label_row = conn.execute(
             "SELECT label FROM unknown_voices WHERE unknown_voice_id=?",
@@ -501,6 +552,13 @@ def resolve_unknown_voice(unknown_voice_id, person_id):
             "SELECT name FROM persons WHERE person_id=?",
             (person_id,),
         ).fetchone()[0]
+        meeting_ids = [
+            row[0]
+            for row in conn.execute(
+                "SELECT DISTINCT meeting_id FROM transcription_segments WHERE speaker_label=?",
+                (label,),
+            ).fetchall()
+        ]
         conn.execute(
             "UPDATE transcription_segments SET speaker_label=?, person_id=? WHERE speaker_label=?",
             (person_name, person_id, label),
@@ -509,6 +567,7 @@ def resolve_unknown_voice(unknown_voice_id, person_id):
             "UPDATE audio_logs SET person_name=?, person_id=? WHERE person_name=?",
             (person_name, person_id, label),
         )
+    _regenerate_meeting_transcripts(meeting_ids)
 
 
 def _delete_unknown_voice_locked(conn, unknown_voice_id):

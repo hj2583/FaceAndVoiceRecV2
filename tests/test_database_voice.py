@@ -1,5 +1,6 @@
 from pathlib import Path
 
+import config
 import database
 
 
@@ -143,3 +144,34 @@ def test_rename_person_relabels_existing_transcript_segments(tmp_path, monkeypat
         ).fetchone()
 
     assert row[0] == "New Name"
+
+
+def test_rename_person_regenerates_meeting_transcript_files(tmp_path, monkeypatch):
+    _setup_database(tmp_path, monkeypatch)
+    person_id = database.create_person("Old Name")
+
+    with database.get_conn() as conn:
+        conn.execute(
+            "INSERT INTO meetings(video_path, created_at, transcription_status) VALUES (?, ?, 'completed')",
+            ("video.mp4", database.utc_now()),
+        )
+        meeting_id = conn.execute("SELECT meeting_id FROM meetings").fetchone()[0]
+        conn.execute(
+            """
+            INSERT INTO transcription_segments(
+                meeting_id, speaker_label, person_id, start_ms, end_ms, text, created_at
+            ) VALUES (?, 'Old Name', ?, 61000, 62000, 'hi there', ?)
+            """,
+            (meeting_id, person_id, database.utc_now()),
+        )
+
+    meeting_dir = config.TRANSCRIPTS_DIR / str(meeting_id)
+    meeting_dir.mkdir(parents=True)
+    (meeting_dir / "old_name.txt").write_text("[01:01] hi there\n", encoding="utf-8")
+    (meeting_dir / "audio.wav").write_bytes(b"audio")
+
+    database.rename_person(person_id, "New Name")
+
+    assert sorted(path.name for path in meeting_dir.glob("*.txt")) == ["new_name.txt"]
+    assert (meeting_dir / "new_name.txt").read_text(encoding="utf-8") == "[01:01] hi there\n"
+    assert (meeting_dir / "audio.wav").exists()
