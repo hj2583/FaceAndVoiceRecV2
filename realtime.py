@@ -32,6 +32,8 @@ from config import (
     UNKNOWN_CAPTURE_INTERVAL,
     UNKNOWN_MIN_QUALITY,
 
+    VOICE_FALLBACK_INTERVAL_FRAMES,
+
     LIVE_VIDEO_DIR,
 )
 
@@ -88,6 +90,31 @@ def start_realtime_vad(callback, vad_factory=RealtimeVAD):
     except Exception:
         logging.exception("Realtime microphone is unavailable")
         return None, False
+
+
+def voice_fallback_match(track, frame_no, vad):
+    """Return the track's voice match, re-running inference at most once per interval.
+
+    The result is cached on track.voice_match only; the track's face-recognition
+    person_id/person_name/confidence are never modified.
+    """
+    if (
+        track.last_voice_check_frame is not None
+        and frame_no - track.last_voice_check_frame < VOICE_FALLBACK_INTERVAL_FRAMES
+    ):
+        return track.voice_match
+
+    track.last_voice_check_frame = frame_no
+    track.voice_match = None
+    if vad is None or not voice_core.has_enrolled_voiceprints():
+        return None
+
+    voice_embedding = voice_core.extract_voice_embedding(
+        vad.get_recent_pcm(seconds=1.5)
+    )
+    if voice_embedding is not None:
+        track.voice_match = voice_core.match_voice_embedding(voice_embedding)
+    return track.voice_match
 
 
 # ============================================================
@@ -265,6 +292,8 @@ def run(
     vad = None
     mesh = None
     last_speaker_id = None
+    last_speaker_name = "Unknown"
+    last_speaker_confidence = 0.0
     last_speech_start = None
 
     audio_state = SpeakingState()
@@ -350,7 +379,7 @@ def run(
             return frame if ok else None
 
         def _process(frame):
-            nonlocal frame_no, face_detections, last_landmark_timestamp_ms, last_speaker_id, last_speech_start, audio_available
+            nonlocal frame_no, face_detections, last_landmark_timestamp_ms, last_speaker_id, last_speaker_name, last_speaker_confidence, last_speech_start, audio_available
 
             frame_no += 1
 
@@ -1120,8 +1149,14 @@ def run(
                 # ---------------------------------------------------
                 # Voice fallback (only when face identity is missing
                 # or below the recognition confidence threshold; a
-                # confident face match is never overridden).
+                # confident face match is never overridden). The voice
+                # identity is used for this frame's display/logging
+                # only and is never written onto the track.
                 # ---------------------------------------------------
+
+                speaker_id = speaker.person_id
+                speaker_name = speaker.person_name
+                speaker_confidence = speaker.confidence
 
                 if (
                     speaker.person_id is None
@@ -1130,65 +1165,44 @@ def run(
                     < RECOGNITION_THRESHOLD
                 ):
 
-                    recent_pcm = (
-                        vad.get_recent_pcm(
-                            seconds=1.5
-                        )
-                        if vad is not None
-                        else b""
-                    )
-
-                    voice_embedding = (
-                        voice_core.extract_voice_embedding(
-                            recent_pcm
-                        )
-                    )
-
-                    voice_match = (
-                        voice_core.match_voice_embedding(
-                            voice_embedding
-                        )
-                        if voice_embedding is not None
-                        else None
+                    voice_match = voice_fallback_match(
+                        speaker,
+                        frame_no,
+                        vad,
                     )
 
                     if voice_match is not None:
 
-                        speaker.person_id = (
-                            voice_match["person_id"]
-                        )
-
-                        speaker.person_name = (
-                            voice_match["person_name"]
-                        )
-
-                        speaker.confidence = (
-                            voice_match["similarity"]
-                        )
+                        speaker_id = voice_match["person_id"]
+                        speaker_name = voice_match["person_name"]
+                        speaker_confidence = voice_match["similarity"]
 
                 if (
-                    speaker.person_id
+                    speaker_id
                     is not None
                 ):
 
                     if (
                         last_speaker_id
-                        != speaker.person_id
+                        != speaker_id
                     ):
 
                         last_speaker_id = (
-                            speaker.person_id
+                            speaker_id
                         )
 
                         last_speech_start = (
                             time.time()
                         )
 
+                    last_speaker_name = speaker_name
+                    last_speaker_confidence = speaker_confidence
+
                     cv2.putText(
                         frame,
                         (
                             f"SPEAKING: "
-                            f"{speaker.person_name}"
+                            f"{speaker_name}"
                         ),
                         (20, 60),
                         cv2.FONT_HERSHEY_SIMPLEX,
@@ -1234,38 +1248,12 @@ def run(
                     and tracker is not None
                 ):
 
-                    speaker_name = next(
-                        (
-                            t.person_name
-                            for t
-                            in tracker.tracks.values()
-                            if (
-                                t.person_id
-                                == last_speaker_id
-                            )
-                        ),
-                        "Unknown",
-                    )
-
-                    speaker_confidence = next(
-                        (
-                            t.confidence
-                            for t
-                            in tracker.tracks.values()
-                            if (
-                                t.person_id
-                                == last_speaker_id
-                            )
-                        ),
-                        0.0,
-                    )
-
                     log_audio(
                         last_speech_start,
                         time.time(),
                         last_speaker_id,
-                        speaker_name,
-                        speaker_confidence,
+                        last_speaker_name,
+                        last_speaker_confidence,
                         "realtime",
                     )
 
@@ -1384,38 +1372,12 @@ def run(
                 and tracker is not None
             ):
 
-                speaker_name = next(
-                    (
-                        t.person_name
-                        for t
-                        in tracker.tracks.values()
-                        if (
-                            t.person_id
-                            == last_speaker_id
-                        )
-                    ),
-                    "Unknown",
-                )
-
-                speaker_confidence = next(
-                    (
-                        t.confidence
-                        for t
-                        in tracker.tracks.values()
-                        if (
-                            t.person_id
-                            == last_speaker_id
-                        )
-                    ),
-                    0.0,
-                )
-
                 log_audio(
                     last_speech_start,
                     time.time(),
                     last_speaker_id,
-                    speaker_name,
-                    speaker_confidence,
+                    last_speaker_name,
+                    last_speaker_confidence,
                     "realtime",
                 )
         except Exception:

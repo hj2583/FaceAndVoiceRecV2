@@ -35,6 +35,10 @@ class Track:
     speech_frames: int = 0
     silent_frames: int = 0
 
+    # Voice fallback (kept separate from the face-recognition fields above)
+    last_voice_check_frame: Optional[int] = None
+    voice_match: Optional[dict] = None
+
 
 class CentroidTracker:
     def __init__(self):
