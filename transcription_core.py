@@ -88,7 +88,9 @@ def transcribe_with_diarization(
     except ImportError as error:
         raise RuntimeError("Install openai-whisper to transcribe audio") from error
 
-    model = whisper.load_model(model_size or config.WHISPER_MODEL)
+    from audio_core import TORCH_DEVICE
+
+    model = whisper.load_model(model_size or config.WHISPER_MODEL, device=TORCH_DEVICE)
 
     try:
         speech_regions = detect_speech_segments(audio_path)

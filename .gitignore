@@ -26,3 +26,4 @@ directmlvenv/
 *.db-shm
 *.db-wal
 *.log
+known_voices/

@@ -41,8 +41,13 @@ def _load_model():
         if _MODEL is None:
             from speechbrain.inference.speaker import EncoderClassifier
 
-            logger.info("Loading SpeechBrain speaker embedding model...")
-            _MODEL = EncoderClassifier.from_hparams(source=config.VOICE_EMBEDDING_MODEL)
+            from audio_core import TORCH_DEVICE
+
+            logger.info("Loading SpeechBrain speaker embedding model on %s...", TORCH_DEVICE)
+            _MODEL = EncoderClassifier.from_hparams(
+                source=config.VOICE_EMBEDDING_MODEL,
+                run_opts={"device": TORCH_DEVICE},
+            )
             logger.info("SpeechBrain speaker embedding model loaded.")
         return _MODEL
 
@@ -59,9 +64,11 @@ def extract_voice_embedding(pcm_int16_bytes, sample_rate=16000):
     try:
         import torch
 
+        from audio_core import TORCH_DEVICE
+
         model = _load_model()
         with torch.no_grad():
-            tensor = torch.from_numpy(audio).unsqueeze(0)
+            tensor = torch.from_numpy(audio).unsqueeze(0).to(TORCH_DEVICE)
             embedding = model.encode_batch(tensor)
         embedding = embedding.squeeze().cpu().numpy()
         embedding = _normalize(embedding)

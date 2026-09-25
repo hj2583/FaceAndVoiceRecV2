@@ -16,6 +16,11 @@ except Exception:
     load_silero_vad = None
 
 
+# Prefer CUDA for all torch-based models (Silero VAD, Whisper, SpeechBrain);
+# fall back to CPU automatically when no GPU is available.
+TORCH_DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
+
+
 # ============================================================
 # Audio configuration
 # ============================================================
@@ -108,7 +113,7 @@ def _speech_probability(model, frame_bytes, sample_rate=SAMPLE_RATE):
         audio = np.pad(audio, (0, FRAME_SAMPLES - audio.size))
 
     with torch.no_grad():
-        result = model(torch.from_numpy(audio), sample_rate)
+        result = model(torch.from_numpy(audio).to(TORCH_DEVICE), sample_rate)
 
     return float(result.item()) if hasattr(result, "item") else float(result)
 
@@ -275,6 +280,7 @@ class RealtimeVAD:
         try:
 
             model = load_silero_vad()
+            model = model.to(TORCH_DEVICE) if hasattr(model, "to") else model
 
             stream = sd.RawInputStream(
                 samplerate=SAMPLE_RATE,
@@ -389,6 +395,7 @@ def detect_speech_segments(
     )
 
     model = load_silero_vad()
+    model = model.to(TORCH_DEVICE) if hasattr(model, "to") else model
 
     bytes_per_frame = FRAME_BYTES
 

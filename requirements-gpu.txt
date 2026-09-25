@@ -1,3 +1,4 @@
+--extra-index-url https://download.pytorch.org/whl/cu128
 streamlit>=1.40
 opencv-contrib-python>=4.10,<4.12
 numpy>=1.26.4
@@ -10,7 +11,8 @@ nvidia-cudnn-cu13>=9.26.0.51
 onnxruntime-gpu>=1.19.0
 sounddevice>=0.5.0
 silero-vad>=6.2.2
-torch>=2.2
+torch>=2.2+cu128
 Pillow>=10.0
 openai-whisper>=20231117
+speechbrain>=1.0
 pytest>=8.0

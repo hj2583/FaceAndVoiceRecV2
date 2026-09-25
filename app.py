@@ -1,6 +1,7 @@
 import json
 import os
 import sqlite3
+import tempfile
 import uuid
 import wave
 from pathlib import Path
@@ -49,7 +50,7 @@ from database import (
 from face_core import FaceIndex
 from realtime_launcher import launch_realtime
 from video_processor import process_video_pipeline
-from transcription_core import process_meeting_transcription
+from transcription_core import extract_audio_from_video, process_meeting_transcription
 import voice_core
 
 
@@ -76,6 +77,14 @@ def fmt_time(seconds):
 
 def get_runtime_mode():
     try:
+        import torch
+
+        if torch.cuda.is_available():
+            return "GPU (CUDA)"
+    except Exception:
+        pass
+
+    try:
         from face_backend import get_cuda_providers
 
         provider = get_cuda_providers()[0]
@@ -85,7 +94,7 @@ def get_runtime_mode():
             return "CPU"
         return provider
     except Exception:
-        return "Unknown"
+        return "CPU"
 
 
 def render_realtime():
@@ -904,17 +913,29 @@ def render_voice_enrollment():
         ["-- Select --"] + list(persons.keys()),
         key="voice_enroll_person",
     )
-    uploaded = st.file_uploader("Upload a short WAV sample (16kHz mono PCM16)", type=["wav"])
+    uploaded = st.file_uploader(
+        "Upload a short voice sample (WAV or MP3)",
+        type=["wav", "mp3"],
+    )
     if st.button("➕ Add Voice Sample", key="add_voice_sample"):
         if selected_name == "-- Select --":
             st.warning("Please select a person first.")
         elif uploaded is None:
-            st.warning("Please upload a WAV file first.")
+            st.warning("Please upload a voice sample first.")
         else:
             try:
-                pcm = read_wav_pcm(uploaded)
+                if uploaded.name.lower().endswith(".mp3"):
+                    with tempfile.TemporaryDirectory() as tmp_dir:
+                        mp3_path = Path(tmp_dir) / "upload.mp3"
+                        mp3_path.write_bytes(uploaded.getvalue())
+                        wav_path = extract_audio_from_video(mp3_path, Path(tmp_dir) / "upload.wav")
+                        pcm = read_wav_pcm(wav_path)
+                else:
+                    pcm = read_wav_pcm(uploaded)
             except (ValueError, wave.Error, EOFError) as error:
-                st.error(f"Invalid WAV file (expected 16kHz mono 16-bit PCM): {error}")
+                st.error(f"Invalid audio file (expected 16kHz mono 16-bit PCM): {error}")
+            except RuntimeError as error:
+                st.error(f"Could not convert the uploaded MP3: {error}")
             else:
                 embedding = voice_core.extract_voice_embedding(pcm)
                 if embedding is None:
