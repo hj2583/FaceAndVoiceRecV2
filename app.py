@@ -1,6 +1,7 @@
 import json
 import os
 import sqlite3
+import wave
 from pathlib import Path
 
 from PIL import Image
@@ -22,25 +23,32 @@ import streamlit as st
 from config import (
     DB_PATH,
     INITIAL_VIDEO_DIR,
+    KNOWN_FACES_DIR,
     LOG_DIR,
     TRACKED_VIDEO_DIR,
     UNKNOWN_FACES_DIR,
 )
 from database import (
+    add_voice_embedding,
     create_person,
+    delete_unknown_voice,
     fetch_audio_logs,
     init_db,
     list_persons,
     list_unknowns,
     list_unknown_samples,
+    list_unknown_voice_samples,
+    list_unknown_voices,
     delete_low_quality_unknowns,
     delete_unknown,
     resolve_unknown,
+    resolve_unknown_voice,
 )
 from face_core import FaceIndex
 from realtime_launcher import launch_realtime
 from video_processor import process_video_pipeline
 from transcription_core import process_meeting_transcription
+import voice_core
 
 
 st.set_page_config(
@@ -883,6 +891,77 @@ def render_transcripts():
     )
 
 
+def render_voice_enrollment():
+    st.header("🎙️ Voice Enrollment")
+
+    persons = {name: person_id for person_id, name, _created, _updated in list_persons()}
+
+    st.subheader("Enroll a clean voice sample")
+    selected_name = st.selectbox(
+        "Person",
+        ["-- Select --"] + list(persons.keys()),
+        key="voice_enroll_person",
+    )
+    uploaded = st.file_uploader("Upload a short WAV sample (16kHz mono PCM16)", type=["wav"])
+    if st.button("➕ Add Voice Sample", key="add_voice_sample"):
+        if selected_name == "-- Select --":
+            st.warning("Please select a person first.")
+        elif uploaded is None:
+            st.warning("Please upload a WAV file first.")
+        else:
+            with wave.open(uploaded, "rb") as wf:
+                pcm = wf.readframes(wf.getnframes())
+            embedding = voice_core.extract_voice_embedding(pcm)
+            if embedding is None:
+                st.error("Could not extract a voice embedding from this sample.")
+            else:
+                person_id = persons[selected_name]
+                embedding_dir = KNOWN_FACES_DIR.parent / "known_voices" / str(person_id)
+                embedding_dir.mkdir(parents=True, exist_ok=True)
+                embedding_path = embedding_dir / f"{selected_name}_{len(list(embedding_dir.glob('*.npy')))}.npy"
+                np.save(embedding_path, embedding)
+                add_voice_embedding(person_id, embedding_path, quality=1.0)
+                st.success(f"Voice sample added for {selected_name}.")
+                st.rerun()
+
+    st.subheader("Unresolved unknown voices")
+    unknown_voices = list_unknown_voices()
+    if not unknown_voices:
+        st.info("No unresolved unknown voices.")
+        return
+
+    for unknown_voice_id, label, embedding_path, created_at, _resolved in unknown_voices:
+        with st.container(border=True):
+            st.markdown(f"### ❓ {label} (#{unknown_voice_id})")
+            sample_count = len(list_unknown_voice_samples(unknown_voice_id))
+            st.caption(
+                f"Samples: {sample_count}  •  Created: {created_at}"
+            )
+
+            if st.button("🗑️ Delete", key=f"delete_unknown_voice_{unknown_voice_id}"):
+                if delete_unknown_voice(unknown_voice_id):
+                    st.rerun()
+                else:
+                    st.warning("This unknown voice is no longer unresolved.")
+
+            assign_name = st.selectbox(
+                "Assign to person",
+                ["-- Select --"] + list(persons.keys()),
+                key=f"assign_voice_{unknown_voice_id}",
+            )
+            if st.button("✅ Assign", key=f"assign_voice_btn_{unknown_voice_id}"):
+                if assign_name == "-- Select --":
+                    st.warning("Please select a person first.")
+                elif not os.path.exists(embedding_path):
+                    st.error("The stored embedding for this unknown voice is missing.")
+                else:
+                    person_id = persons[assign_name]
+                    add_voice_embedding(person_id, embedding_path, quality=0.7)
+                    resolve_unknown_voice(unknown_voice_id, person_id)
+                    st.success(f"{label} assigned to {assign_name}.")
+                    st.rerun()
+
+
 def main():
     st.title("🎥 AI Face + Active Speaker Recognition")
 
@@ -906,6 +985,7 @@ def main():
             "👤 Face Database",
             "🔊 Audio Logs",
             "📝 Transcripts",
+            "🎙️ Voice Enrollment",
         ]
     )
 
@@ -923,6 +1003,9 @@ def main():
 
     with tabs[4]:
         render_transcripts()
+
+    with tabs[5]:
+        render_voice_enrollment()
 
 
 if __name__ == "__main__":
