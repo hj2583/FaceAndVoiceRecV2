@@ -80,3 +80,66 @@ def test_delete_unknown_voice_refuses_resolved_records(tmp_path, monkeypatch):
 
     assert database.delete_unknown_voice(unknown_voice_id) is False
     assert embedding_path.exists()
+
+
+def test_resolve_unknown_voice_relabels_existing_transcript_segments(tmp_path, monkeypatch):
+    _setup_database(tmp_path, monkeypatch)
+    person_id = database.create_person("Ivy")
+    embedding_path = tmp_path / "cluster.npy"
+    embedding_path.write_bytes(b"embedding")
+    unknown_voice_id = database.create_unknown_voice("Unknown Speaker 1", embedding_path)
+
+    with database.get_conn() as conn:
+        conn.execute(
+            "INSERT INTO meetings(video_path, created_at, transcription_status) VALUES (?, ?, 'completed')",
+            ("video.mp4", database.utc_now()),
+        )
+        meeting_id = conn.execute("SELECT meeting_id FROM meetings").fetchone()[0]
+        conn.execute(
+            """
+            INSERT INTO transcription_segments(
+                meeting_id, speaker_label, start_ms, end_ms, text, created_at
+            ) VALUES (?, 'Unknown Speaker 1', 0, 1000, 'hi', ?)
+            """,
+            (meeting_id, database.utc_now()),
+        )
+
+    database.resolve_unknown_voice(unknown_voice_id, person_id)
+
+    with database.get_conn() as conn:
+        row = conn.execute(
+            "SELECT speaker_label, person_id FROM transcription_segments WHERE meeting_id=?",
+            (meeting_id,),
+        ).fetchone()
+
+    assert row == ("Ivy", person_id)
+
+
+def test_rename_person_relabels_existing_transcript_segments(tmp_path, monkeypatch):
+    _setup_database(tmp_path, monkeypatch)
+    person_id = database.create_person("Old Name")
+
+    with database.get_conn() as conn:
+        conn.execute(
+            "INSERT INTO meetings(video_path, created_at, transcription_status) VALUES (?, ?, 'completed')",
+            ("video.mp4", database.utc_now()),
+        )
+        meeting_id = conn.execute("SELECT meeting_id FROM meetings").fetchone()[0]
+        conn.execute(
+            """
+            INSERT INTO transcription_segments(
+                meeting_id, speaker_label, person_id, start_ms, end_ms, text, created_at
+            ) VALUES (?, 'Old Name', ?, 0, 1000, 'hi', ?)
+            """,
+            (meeting_id, person_id, database.utc_now()),
+        )
+
+    database.rename_person(person_id, "New Name")
+
+    with database.get_conn() as conn:
+        row = conn.execute(
+            "SELECT speaker_label FROM transcription_segments WHERE meeting_id=?",
+            (meeting_id,),
+        ).fetchone()
+
+    assert row[0] == "New Name"

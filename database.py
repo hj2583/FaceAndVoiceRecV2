@@ -203,6 +203,14 @@ def rename_person(person_id, name):
             "UPDATE persons SET name=?, updated_at=? WHERE person_id=?",
             (name, utc_now(), person_id),
         )
+        conn.execute(
+            "UPDATE transcription_segments SET speaker_label=? WHERE person_id=?",
+            (name, person_id),
+        )
+        conn.execute(
+            "UPDATE audio_logs SET person_name=? WHERE person_id=?",
+            (name, person_id),
+        )
 
 
 def add_embedding(person_id, embedding_path, image_path=None, quality=0.0):
@@ -478,9 +486,28 @@ def list_unknown_voices(include_resolved=False):
 
 def resolve_unknown_voice(unknown_voice_id, person_id):
     with get_conn() as conn:
+        label_row = conn.execute(
+            "SELECT label FROM unknown_voices WHERE unknown_voice_id=?",
+            (int(unknown_voice_id),),
+        ).fetchone()
         conn.execute(
             "UPDATE unknown_voices SET resolved_person_id=? WHERE unknown_voice_id=?",
             (person_id, unknown_voice_id),
+        )
+        if label_row is None:
+            return
+        label = label_row[0]
+        person_name = conn.execute(
+            "SELECT name FROM persons WHERE person_id=?",
+            (person_id,),
+        ).fetchone()[0]
+        conn.execute(
+            "UPDATE transcription_segments SET speaker_label=?, person_id=? WHERE speaker_label=?",
+            (person_name, person_id, label),
+        )
+        conn.execute(
+            "UPDATE audio_logs SET person_name=?, person_id=? WHERE person_name=?",
+            (person_name, person_id, label),
         )
 
 
