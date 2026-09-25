@@ -33,7 +33,7 @@ flowchart TD
         A[Video] --> B[Extract audio]
         B --> C[Silero VAD speech segments]
         C --> D[Whisper transcription\nover speech spans only]
-        C --> E[ECAPA-TDNN embedding per VAD segment]
+        C --> E[ECAPA-TDNN embedding per\nsliding window of each VAD segment]
         E --> F[Agglomerative clustering\ninto per-meeting speakers]
         F --> G[Match cluster centroid vs\nenrolled voice_embeddings]
         G --> H["Unknown Speaker N"\nif no confident match]
@@ -42,7 +42,7 @@ flowchart TD
         G --> I
         I --> J[(transcription_segments:\nperson_id + speaker_label)]
     end
-    subgraph Realtime session
+    subgraph RT ["Realtime session (live camera/mic, realtime.py only;\nvideo_processor.py uses the offline pipeline)"]
         K[Mic audio + VAD] --> L[ECAPA-TDNN embedding\nof speech chunk]
         L --> M[Match vs voice_embeddings]
         N[Face+lip active speaker] --> O{Face confident?}
@@ -93,7 +93,9 @@ Enrollment flow (both paths supported):
 
 ## Realtime fusion
 
-In the active-speaker selection logic (`video_processor.py` around the existing `speaking_candidates` block, and the equivalent path in `realtime.py`): when the selected speaker's face-based `person_id` is `None` or `confidence` is below `RECOGNITION_THRESHOLD`, embed the concurrent mic audio chunk and match it against `voice_embeddings` as a fallback identity source before logging `"Unknown"`. A confident face match is never overridden by a voice match.
+**Scope:** the voice fallback applies only to the live camera/microphone session (`realtime.py`), which keeps a rolling mic PCM buffer (`RealtimeVAD.get_recent_pcm`). The offline video pipeline (`video_processor.py`) does **not** get a live-audio voice fallback; offline speaker identity comes from the separate offline diarization pipeline above (VAD -> windowed ECAPA embeddings -> clustering -> voiceprint/unknown-voice matching in `transcription_core`/`voice_core`).
+
+In `realtime.py`'s active-speaker selection path: when the selected speaker's face-based `person_id` is `None` or `confidence` is below `RECOGNITION_THRESHOLD`, embed the recent mic audio and match it against `voice_embeddings` as a fallback identity source before logging `"Unknown"`. A confident face match is never overridden by a voice match. The voice-derived identity is used only for that frame's overlay/audio log and is never written onto the track's face-recognition fields. The fallback is skipped entirely when no voiceprints are enrolled, and runs at most once per `VOICE_FALLBACK_INTERVAL_FRAMES` per track (result cached on the track between checks).
 
 ## Data model changes
 
@@ -137,7 +139,7 @@ CREATE TABLE unknown_voice_samples (
 - `database.py`: new tables + CRUD (`create_voice_embedding`, `match_voice_embeddings`, `create_unknown_voice`, `list_unknown_voice_samples`, `resolve_unknown_voice`, `delete_unknown_voice`), plus label-derivation helper for sync.
 - `config.py`: `WHISPER_LANGUAGE`, `WHISPER_INITIAL_PROMPT`, voice-embedding model name, `VOICE_MATCH_THRESHOLD`, clustering distance threshold.
 - `app.py`: enrollment UI (explicit sample upload) and unknown-voice review/assignment section alongside the existing unknown-face review page.
-- `video_processor.py` / `realtime.py`: fallback voice-match call in the active-speaker selection path.
+- `realtime.py`: fallback voice-match call in the active-speaker selection path (live session only; `video_processor.py` relies on offline diarization instead).
 - `requirements.txt`: add `speechbrain`, `scikit-learn` (for agglomerative clustering, unless implemented directly with `scipy`, which is already a dependency — prefer `scipy.cluster.hierarchy` to avoid a new dependency).
 
 ## Testing
