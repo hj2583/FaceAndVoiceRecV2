@@ -218,6 +218,16 @@ def save_transcripts(
                 "DELETE FROM transcription_segments WHERE meeting_id=?",
                 (meeting_id,),
             )
+            distinct_labels = {segment.speaker_label for segment in segments}
+            # Resolve all distinct labels in one query instead of one connection per segment.
+            person_ids_by_label: dict[str, int] = {}
+            if distinct_labels:
+                placeholders = ",".join("?" * len(distinct_labels))
+                rows = connection.execute(
+                    f"SELECT name, person_id FROM persons WHERE name IN ({placeholders})",
+                    tuple(distinct_labels),
+                ).fetchall()
+                person_ids_by_label = {name: int(person_id) for name, person_id in rows}
             connection.executemany(
                 """
                 INSERT INTO transcription_segments(
@@ -229,7 +239,7 @@ def save_transcripts(
                     (
                         meeting_id,
                         segment.speaker_label,
-                        resolve_speaker_name(segment.speaker_label)[0],
+                        person_ids_by_label.get(segment.speaker_label),
                         segment.start_ms,
                         segment.end_ms,
                         apply_text_cleanup(segment.text),
