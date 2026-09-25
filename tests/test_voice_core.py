@@ -236,6 +236,32 @@ def test_diarize_meeting_audio_splits_speaker_change_inside_one_region(tmp_path,
     assert labels[0] != labels[2]
 
 
+def test_diarize_meeting_audio_keeps_distinct_unknowns_apart_within_one_call(tmp_path, monkeypatch):
+    _setup_database(tmp_path, monkeypatch)
+    # e = sqrt(.4)*common + sqrt(.2)*speaker + sqrt(.4)*noise_i: intra-cluster
+    # similarity 0.6, cross-cluster 0.4 (clustered apart), but the normalized
+    # centroids of 4 windows each have similarity 0.4/0.7 ~= 0.57 >= match threshold.
+    def window(speaker_dim, noise_dim):
+        return (
+            np.sqrt(0.4) * _unit(0) + np.sqrt(0.2) * _unit(speaker_dim) + np.sqrt(0.4) * _unit(noise_dim)
+        ).astype(np.float32)
+
+    embeddings = [window(1, 3 + i) for i in range(4)] + [window(2, 7 + i) for i in range(4)]
+    calls = iter(embeddings)
+    monkeypatch.setattr(voice_core, "extract_voice_embedding", lambda *_a, **_k: next(calls))
+    monkeypatch.setattr(voice_core, "read_wav_pcm", lambda *_a, **_k: b"\x00\x00" * (16000 * 8))
+
+    result = voice_core.diarize_meeting_audio(
+        tmp_path / "audio.wav", [(float(i), float(i + 1)) for i in range(8)]
+    )
+
+    labels = [label for label, _start, _end in result]
+    assert len(set(labels[:4])) == 1
+    assert len(set(labels[4:])) == 1
+    assert labels[0] != labels[4]
+    assert len(database.list_unknown_voices()) == 2
+
+
 def _insert_meeting(video_path):
     with database.get_conn() as conn:
         conn.execute(

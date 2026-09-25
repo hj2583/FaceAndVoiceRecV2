@@ -142,6 +142,7 @@ from database import (
     create_unknown_voice,
     delete_unknown_voice,
     list_unknown_voice_samples_with_embeddings,
+    list_unknown_voices,
     update_unknown_voice,
 )
 
@@ -159,13 +160,16 @@ def _read_region_pcm(wav_path, start_seconds, end_seconds):
     return _slice_pcm(pcm, start_seconds, end_seconds)
 
 
-def find_matching_unknown_voice(query_embedding, threshold=None):
+def find_matching_unknown_voice(query_embedding, threshold=None, candidate_ids=None):
+    """candidate_ids, if given, restricts matching to those unknown_voice_ids."""
     threshold = config.VOICE_MATCH_THRESHOLD if threshold is None else threshold
     query = _normalize(query_embedding)
     if query is None:
         return None
 
     rows = list_unknown_voice_samples_with_embeddings()
+    if candidate_ids is not None:
+        rows = [row for row in rows if row[1] in candidate_ids]
     if not rows:
         return None
 
@@ -249,9 +253,9 @@ def _unknown_voice_label(unknown_voice_id):
     return row[0] if row else None
 
 
-def _label_unmatched_cluster(centroid):
+def _label_unmatched_cluster(centroid, candidate_ids):
     """Reuse a still-unresolved unknown voice's label, or register a new one."""
-    existing = find_matching_unknown_voice(centroid)
+    existing = find_matching_unknown_voice(centroid, candidate_ids=candidate_ids)
     if existing is not None:
         label = _unknown_voice_label(existing["unknown_voice_id"])
         if label is not None:
@@ -324,6 +328,9 @@ def diarize_meeting_audio(wav_path, speech_regions):
         for cluster_id, vectors in cluster_centroids.items()
     }
 
+    # Centroid similarity runs higher than the pairwise similarity clustering used,
+    # so voices registered in this call must not absorb this call's other clusters.
+    preexisting_unknown_ids = None
     cluster_labels = {}
     for cluster_id, centroid in cluster_centroids.items():
         if centroid is None:
@@ -333,7 +340,9 @@ def diarize_meeting_audio(wav_path, speech_regions):
         if match is not None:
             cluster_labels[cluster_id] = match["person_name"]
             continue
-        cluster_labels[cluster_id] = _label_unmatched_cluster(centroid)
+        if preexisting_unknown_ids is None:
+            preexisting_unknown_ids = {row[0] for row in list_unknown_voices()}
+        cluster_labels[cluster_id] = _label_unmatched_cluster(centroid, preexisting_unknown_ids)
 
     return [
         (cluster_labels[cluster_id], start, end)
