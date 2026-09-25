@@ -1,10 +1,37 @@
+import io
 import threading
+import wave
 from types import SimpleNamespace
 from unittest.mock import Mock, patch
 
 import pytest
 
-from audio_core import FRAME_SAMPLES, RealtimeVAD
+from audio_core import FRAME_SAMPLES, RealtimeVAD, read_wav_pcm
+
+
+def _wav_bytes(rate=16000, channels=1, width=2, frames=b"\x01\x00" * 100):
+    buffer = io.BytesIO()
+    with wave.open(buffer, "wb") as wf:
+        wf.setnchannels(channels)
+        wf.setsampwidth(width)
+        wf.setframerate(rate)
+        wf.writeframes(frames)
+    buffer.seek(0)
+    return buffer
+
+
+def test_read_wav_pcm_accepts_file_like_object():
+    assert read_wav_pcm(_wav_bytes()) == b"\x01\x00" * 100
+
+
+def test_read_wav_pcm_rejects_wrong_format_file_like_object():
+    with pytest.raises(ValueError):
+        read_wav_pcm(_wav_bytes(rate=8000))
+
+
+def test_read_wav_pcm_rejects_non_wav_file_like_object():
+    with pytest.raises((wave.Error, EOFError)):
+        read_wav_pcm(io.BytesIO(b"not a wav file at all"))
 
 
 def _silence_frame():

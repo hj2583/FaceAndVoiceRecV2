@@ -1,6 +1,7 @@
 import json
 import os
 import sqlite3
+import uuid
 import wave
 from pathlib import Path
 
@@ -20,6 +21,7 @@ if not hasattr(np, "complex"):
 import pandas as pd
 import streamlit as st
 
+from audio_core import read_wav_pcm
 from config import (
     DB_PATH,
     INITIAL_VIDEO_DIR,
@@ -909,20 +911,23 @@ def render_voice_enrollment():
         elif uploaded is None:
             st.warning("Please upload a WAV file first.")
         else:
-            with wave.open(uploaded, "rb") as wf:
-                pcm = wf.readframes(wf.getnframes())
-            embedding = voice_core.extract_voice_embedding(pcm)
-            if embedding is None:
-                st.error("Could not extract a voice embedding from this sample.")
+            try:
+                pcm = read_wav_pcm(uploaded)
+            except (ValueError, wave.Error, EOFError) as error:
+                st.error(f"Invalid WAV file (expected 16kHz mono 16-bit PCM): {error}")
             else:
-                person_id = persons[selected_name]
-                embedding_dir = KNOWN_FACES_DIR.parent / "known_voices" / str(person_id)
-                embedding_dir.mkdir(parents=True, exist_ok=True)
-                embedding_path = embedding_dir / f"{selected_name}_{len(list(embedding_dir.glob('*.npy')))}.npy"
-                np.save(embedding_path, embedding)
-                add_voice_embedding(person_id, embedding_path, quality=1.0)
-                st.success(f"Voice sample added for {selected_name}.")
-                st.rerun()
+                embedding = voice_core.extract_voice_embedding(pcm)
+                if embedding is None:
+                    st.error("Could not extract a voice embedding from this sample.")
+                else:
+                    person_id = persons[selected_name]
+                    embedding_dir = KNOWN_FACES_DIR.parent / "known_voices" / str(person_id)
+                    embedding_dir.mkdir(parents=True, exist_ok=True)
+                    embedding_path = embedding_dir / f"{person_id}_{uuid.uuid4().hex}.npy"
+                    np.save(embedding_path, embedding)
+                    add_voice_embedding(person_id, embedding_path, quality=1.0)
+                    st.success(f"Voice sample added for {selected_name}.")
+                    st.rerun()
 
     st.subheader("Unresolved unknown voices")
     unknown_voices = list_unknown_voices()

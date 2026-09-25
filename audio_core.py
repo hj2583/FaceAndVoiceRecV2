@@ -335,7 +335,9 @@ class RealtimeVAD:
                     )
 
 def read_wav_pcm(wav_path):
-    with wave.open(str(wav_path), "rb") as wf:
+    """Read 16kHz mono PCM16 frames from a WAV path or binary file-like object."""
+    source = wav_path if hasattr(wav_path, "read") else str(wav_path)
+    with wave.open(source, "rb") as wf:
         rate = wf.getframerate()
         channels = wf.getnchannels()
         width = wf.getsampwidth()
