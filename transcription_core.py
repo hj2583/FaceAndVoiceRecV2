@@ -141,15 +141,17 @@ def transcribe_with_diarization(
 
         label = "Unknown Speaker"
         if diarization:
-            best_overlap = 0.0
+            # Summed per speaker: diarization windows overlap, so a single
+            # interval's overlap would tie-break toward whichever came first.
+            overlap_by_speaker: dict[str, float] = {}
             for speaker, speaker_start, speaker_end in diarization:
-                overlap = max(
-                    0.0,
-                    min(end_seconds, speaker_end) - max(start_seconds, speaker_start),
-                )
-                if overlap > best_overlap:
-                    best_overlap = overlap
-                    label = str(speaker)
+                overlap = min(end_seconds, speaker_end) - max(start_seconds, speaker_start)
+                if overlap > 0:
+                    overlap_by_speaker[str(speaker)] = (
+                        overlap_by_speaker.get(str(speaker), 0.0) + overlap
+                    )
+            if overlap_by_speaker:
+                label = max(overlap_by_speaker, key=overlap_by_speaker.get)
 
         segments.append(
             TranscriptionSegment(
