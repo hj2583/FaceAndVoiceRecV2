@@ -147,7 +147,7 @@ def render_realtime():
                 "Transcript": transcript or "",
             })
 
-        st.dataframe(pd.DataFrame(data), use_container_width=True)
+        st.dataframe(pd.DataFrame(data), width="stretch")
     else:
         st.info("No realtime speaking logs yet.")
 
@@ -240,7 +240,7 @@ def render_video():
         if speech:
             st.dataframe(
                 pd.DataFrame(speech),
-                use_container_width=True,
+                width="stretch",
             )
         else:
             st.info("No active speaker segments detected.")
@@ -279,7 +279,7 @@ def render_database():
                     for p in persons
                 ]
             ),
-            use_container_width=True,
+            width="stretch",
         )
 
     # ============================================================
@@ -843,7 +843,7 @@ def render_audio_logs():
 
     st.dataframe(
         pd.DataFrame(data),
-        use_container_width=True,
+        width="stretch",
     )
 
 
@@ -898,7 +898,7 @@ def render_transcripts():
                 for speaker, start_ms, end_ms, text, confidence in rows
             ]
         ),
-        use_container_width=True,
+        width="stretch",
     )
 
 
