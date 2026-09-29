@@ -12,6 +12,7 @@ import shutil
 import sqlite3
 import subprocess
 from typing import Callable, Iterable, Optional
+import re
 
 import config
 import voice_core
@@ -66,10 +67,137 @@ def _segment_confidence(segment: dict) -> Optional[float]:
     return max(0.0, min(1.0, 1.0 + float(value) / 2.0))
 
 
+def _detect_meeting_language(model, audio_path, speech_regions):
+    """Aggregate Whisper language probabilities over speech, not just the opening."""
+    try:
+        import numpy as np
+        import whisper
+
+        audio = whisper.load_audio(str(audio_path))
+        samples_per_window = int(config.WHISPER_LANGUAGE_SAMPLE_SECONDS * whisper.audio.SAMPLE_RATE)
+        chunks = []
+        regions = list(speech_regions or [])
+        if len(regions) > config.WHISPER_LANGUAGE_MAX_SAMPLES:
+            sample_indexes = np.linspace(
+                0,
+                len(regions) - 1,
+                config.WHISPER_LANGUAGE_MAX_SAMPLES,
+                dtype=int,
+            )
+            regions = [regions[index] for index in sample_indexes]
+
+        for start, end in regions:
+            start_sample = max(0, int(start * whisper.audio.SAMPLE_RATE))
+            end_sample = min(len(audio), int(end * whisper.audio.SAMPLE_RATE))
+            if end_sample <= start_sample:
+                continue
+            region = audio[start_sample:end_sample]
+            if len(region) >= samples_per_window:
+                chunks.append(region[:samples_per_window])
+            elif len(region) >= whisper.audio.SAMPLE_RATE:
+                chunks.append(region)
+        if not chunks:
+            return None
+
+        probabilities = []
+        for chunk in chunks:
+            mel = whisper.log_mel_spectrogram(
+                whisper.pad_or_trim(chunk),
+                n_mels=model.dims.n_mels,
+            ).to(model.device)
+            _languages, language_probs = model.detect_language(mel)
+            probabilities.append(language_probs)
+
+        languages = sorted({language for probs in probabilities for language in probs})
+        aggregate = {
+            language: float(np.mean([
+                probs.get(language, 0.0) for probs in probabilities
+            ]))
+            for language in languages
+        }
+        language, confidence = max(aggregate.items(), key=lambda item: item[1])
+        logger.info(
+            "Aggregated Whisper language detection: %s (confidence %.3f from %d samples)",
+            language,
+            confidence,
+            len(probabilities),
+        )
+        if confidence < config.WHISPER_LANGUAGE_CONFIDENCE_THRESHOLD:
+            return None
+        return language
+    except Exception:
+        logger.exception("Whisper language detection failed; leaving language unconstrained")
+        return None
+
+
+def _speaker_for_interval(
+    start_seconds: float,
+    end_seconds: float,
+    diarization: list[tuple[str, float, float]],
+) -> str:
+    overlap_by_speaker: dict[str, float] = {}
+    for speaker, speaker_start, speaker_end in diarization:
+        overlap = min(end_seconds, speaker_end) - max(start_seconds, speaker_start)
+        if overlap > 0:
+            overlap_by_speaker[str(speaker)] = (
+                overlap_by_speaker.get(str(speaker), 0.0) + overlap
+            )
+    return max(overlap_by_speaker, key=overlap_by_speaker.get) if overlap_by_speaker else "Unknown Speaker"
+
+
+def _split_segment_by_words(raw_segment, diarization):
+    """Split a Whisper segment when timed words cross speaker intervals."""
+    raw_text = str(raw_segment.get("text", "")).strip()
+    words = raw_segment.get("words") or []
+    timed_words = [
+        word for word in words
+        if word.get("word")
+        and word.get("start") is not None
+        and word.get("end") is not None
+        and float(word["end"]) > float(word["start"])
+    ]
+    if not timed_words:
+        return None
+
+    # Some Whisper backends return partial or unreliable word timing data.
+    # Never replace a complete ASR segment with a truncated word subset.
+    raw_token_count = len(re.findall(r"\S+", raw_text))
+    timed_token_count = len(re.findall(r"\S+", " ".join(
+        str(word["word"]) for word in timed_words
+    )))
+    if raw_token_count and timed_token_count < max(1, int(raw_token_count * 0.8)):
+        logger.warning(
+            "Ignoring incomplete Whisper word timings: %s/%s tokens",
+            timed_token_count,
+            raw_token_count,
+        )
+        return None
+
+    pieces = []
+    current_speaker = None
+    current_words = []
+    for word in timed_words:
+        word_start = float(word["start"])
+        word_end = float(word["end"])
+        speaker = _speaker_for_interval(word_start, word_end, diarization)
+        if current_words and speaker != current_speaker:
+            pieces.append((current_speaker, current_words[0][0], current_words[-1][1], "".join(current_words[i][2] for i in range(len(current_words)))))
+            current_words = []
+        current_speaker = speaker
+        current_words.append((word_start, word_end, str(word["word"])))
+
+    if current_words:
+        pieces.append((current_speaker, current_words[0][0], current_words[-1][1], "".join(item[2] for item in current_words)))
+    if len(pieces) < 2:
+        return None
+    return pieces
+
+
 def transcribe_with_diarization(
     audio_path: str | Path,
     model_size: Optional[str] = None,
     diarize: Optional[Callable[[Path, list[tuple[float, float]]], Iterable[tuple[str, float, float]]]] = None,
+    task: Optional[str] = None,
 ) -> list[TranscriptionSegment]:
     """Transcribe audio and assign speakers from an optional diarizer.
 
@@ -100,12 +228,22 @@ def transcribe_with_diarization(
         logger.exception("VAD speech detection failed; transcribing unfiltered")
         speech_regions = None
 
+    active_task = task or config.WHISPER_TASK
     transcribe_kwargs = {
         "condition_on_previous_text": False,
         "word_timestamps": True,
+        "task": active_task,
     }
-    if config.WHISPER_LANGUAGE:
+    if config.WHISPER_LANGUAGE_MODE == "fixed" and config.WHISPER_LANGUAGE:
         transcribe_kwargs["language"] = config.WHISPER_LANGUAGE
+    elif config.WHISPER_LANGUAGE_MODE == "auto":
+        detected_language = _detect_meeting_language(
+            model,
+            audio_path,
+            speech_regions,
+        )
+        if detected_language:
+            transcribe_kwargs["language"] = detected_language
     if config.WHISPER_INITIAL_PROMPT:
         transcribe_kwargs["initial_prompt"] = config.WHISPER_INITIAL_PROMPT
 
@@ -141,25 +279,24 @@ def transcribe_with_diarization(
         start_ms = int(start_seconds * 1000)
         end_ms = int(end_seconds * 1000)
 
-        label = "Unknown Speaker"
-        if diarization:
-            # Summed per speaker: diarization windows overlap, so a single
-            # interval's overlap would tie-break toward whichever came first.
-            overlap_by_speaker: dict[str, float] = {}
-            for speaker, speaker_start, speaker_end in diarization:
-                overlap = min(end_seconds, speaker_end) - max(start_seconds, speaker_start)
-                if overlap > 0:
-                    overlap_by_speaker[str(speaker)] = (
-                        overlap_by_speaker.get(str(speaker), 0.0) + overlap
-                    )
-            if overlap_by_speaker:
-                label = max(overlap_by_speaker, key=overlap_by_speaker.get)
-
-        segments.append(
-            TranscriptionSegment(
-                label, start_ms, end_ms, text, _segment_confidence(raw)
+        confidence = _segment_confidence(raw)
+        word_pieces = _split_segment_by_words(raw, diarization) if diarization else None
+        if word_pieces:
+            segments.extend(
+                TranscriptionSegment(
+                    label,
+                    int(piece_start * 1000),
+                    int(piece_end * 1000),
+                    piece_text.strip(),
+                    confidence,
+                )
+                for label, piece_start, piece_end, piece_text in word_pieces
+                if piece_text.strip()
             )
-        )
+            continue
+
+        label = _speaker_for_interval(start_seconds, end_seconds, diarization) if diarization else "Unknown Speaker"
+        segments.append(TranscriptionSegment(label, start_ms, end_ms, text, confidence))
     return segments
 
 
@@ -305,6 +442,23 @@ def process_meeting_transcription(
             for segment in segments
         ]
         save_transcripts(cleaned_segments, meeting_dir, meeting_id)
+
+        if config.WHISPER_TRANSLATION_ENABLED:
+            translated_segments = transcribe_with_diarization(
+                audio_path,
+                model_size=config.WHISPER_MODEL,
+                diarize=diarize,
+                task="translate",
+            )
+            save_transcripts(
+                translated_segments,
+                meeting_dir / "english_translation",
+            )
+            logger.info(
+                "Saved %d English translation segments for meeting %s",
+                len(translated_segments),
+                meeting_id,
+            )
 
         with sqlite3.connect(config.DB_PATH) as connection:
             connection.execute(

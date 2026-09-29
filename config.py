@@ -223,11 +223,48 @@ VOICE_CLUSTER_DISTANCE_THRESHOLD = 0.55
 VOICE_DIARIZATION_WINDOW_SECONDS = 1.5
 VOICE_DIARIZATION_STEP_SECONDS = 0.75
 
+# Reject speaker windows that contain too little usable signal. These are
+# quality gates, not identity thresholds, and should be tuned from diagnostics.
+VOICE_MIN_SPEECH_RATIO = 0.55
+VOICE_MIN_RMS = 0.008
+VOICE_MAX_CLIPPING_RATIO = 0.02
+
+# Use the strongest enrolled samples when building a person-level voice profile.
+VOICE_PROFILE_TOP_K = 5
+
+# A new cluster may reuse an identity already assigned earlier in the same
+# meeting only when its centroid is a strong, unambiguous match.
+VOICE_IN_MEETING_IDENTITY_THRESHOLD = 0.68
+VOICE_IN_MEETING_IDENTITY_MARGIN = 0.08
+
+# Diagnostic output is disabled by default and does not change recognition.
+VOICE_DIAGNOSTICS_ENABLED = False
+VOICE_DIAGNOSTICS_PATH = BASE_DIR / "logs" / "speaker_diagnostics.json"
+
 # Realtime voice fallback runs at most once per this many frames per track.
 VOICE_FALLBACK_INTERVAL_FRAMES = 30
 
-# Whisper decoding language ("en", "ms", ...); None = auto-detect.
-WHISPER_LANGUAGE = None
+# Whisper language policy. "auto" samples several speech regions; "fixed"
+# uses WHISPER_LANGUAGE for the complete meeting.
+# This meeting collection is English-dominant. Fixed language prevents a short
+# opening phrase from causing Whisper to transcribe the whole meeting as Malay.
+# Use mode="auto" again for genuinely multilingual meetings.
+WHISPER_LANGUAGE_MODE = "fixed"
+WHISPER_LANGUAGE = "en"
+
+# Minimum confidence required before auto-detection supplies a language to
+# Whisper. Otherwise Whisper is allowed to perform its own unconstrained
+# detection rather than receiving a weak forced guess.
+WHISPER_LANGUAGE_CONFIDENCE_THRESHOLD = 0.65
+WHISPER_LANGUAGE_SAMPLE_SECONDS = 8.0
+WHISPER_LANGUAGE_MAX_SAMPLES = 6
+
+# Keep the original spoken language by default.
+WHISPER_TASK = "transcribe"
+
+# Optional second pass. When enabled, the original transcript is preserved and
+# an English translation is written under each meeting's english_translation/.
+WHISPER_TRANSLATION_ENABLED = True
 
 # Optional Whisper decoding hint (domain vocabulary, names, etc).
 WHISPER_INITIAL_PROMPT = None

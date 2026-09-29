@@ -29,6 +29,7 @@ from config import (
     KNOWN_FACES_DIR,
     LOG_DIR,
     TRACKED_VIDEO_DIR,
+    TRANSCRIPTS_DIR,
     UNKNOWN_FACES_DIR,
 )
 from database import (
@@ -156,8 +157,8 @@ def render_video():
     st.header("🎬 Upload Video Recognition")
 
     uploaded = st.file_uploader(
-        "Upload a video",
-        type=["mp4", "avi", "mov", "mkv"],
+        "Upload a video or MP3 audio file",
+        type=["mp4", "avi", "mov", "mkv", "mp3"],
     )
 
     if uploaded:
@@ -167,21 +168,39 @@ def render_video():
 
         st.success(f"Saved: {input_path.name}")
 
-    videos = sorted(
+    media_files = sorted(
         [
             p.name
             for p in INITIAL_VIDEO_DIR.iterdir()
-            if p.suffix.lower() in {".mp4", ".avi", ".mov", ".mkv"}
+            if p.suffix.lower() in {".mp4", ".avi", ".mov", ".mkv", ".mp3"}
         ]
     )
 
-    if not videos:
-        st.info("No videos available.")
+    if not media_files:
+        st.info("No videos or MP3 audio files available.")
         return
 
-    selected = st.selectbox("Select video", videos)
+    selected = st.selectbox("Select media", media_files)
 
     input_path = INITIAL_VIDEO_DIR / selected
+    if input_path.suffix.lower() == ".mp3":
+        st.audio(input_path.read_bytes(), format="audio/mp3")
+        st.info(
+            "MP3 files use voice recognition and transcription only. "
+            "Face detection and tracked-video output require a video file."
+        )
+        if st.button("🎙️ Recognize Speakers & Transcribe Audio", type="primary"):
+            with st.spinner("Recognizing speakers and transcribing audio..."):
+                try:
+                    meeting_id = process_meeting_transcription(input_path)
+                    st.success(
+                        f"Audio recognition completed. Open meeting {meeting_id} "
+                        "in the Transcripts tab to review the results."
+                    )
+                except Exception as exc:
+                    st.error(f"Audio recognition failed: {exc}")
+        return
+
     output_path = TRACKED_VIDEO_DIR / f"tracked_{input_path.stem}.mp4"
     log_path = LOG_DIR / f"{input_path.stem}.json"
 
@@ -885,21 +904,90 @@ def render_transcripts():
         st.info("This meeting has no transcript segments.")
         return
 
-    st.dataframe(
-        pd.DataFrame(
-            [
-                {
-                    "Speaker": speaker,
-                    "Start": fmt_time(start_ms / 1000),
-                    "End": fmt_time(end_ms / 1000),
-                    "Text": text,
-                    "Confidence": confidence,
-                }
-                for speaker, start_ms, end_ms, text, confidence in rows
-            ]
-        ),
-        width="stretch",
+    original_data = pd.DataFrame(
+        [
+            {
+                "Speaker": speaker,
+                "Start": fmt_time(start_ms / 1000),
+                "End": fmt_time(end_ms / 1000),
+                "Text": text,
+                "Confidence": confidence,
+            }
+            for speaker, start_ms, end_ms, text, confidence in rows
+        ]
     )
+
+    original_tab, translation_tab = st.tabs(
+        ["Original transcript", "English translation"]
+    )
+
+    with original_tab:
+        st.dataframe(original_data, width="stretch")
+
+        original_lines = []
+        for speaker, start_ms, _end_ms, text, _confidence in rows:
+            original_lines.append(
+                f"[{fmt_time(start_ms / 1000)}] {speaker}: {text}"
+            )
+        st.download_button(
+            "Download original transcript",
+            "\n".join(original_lines),
+            file_name=f"meeting_{selected_id}_original.txt",
+            mime="text/plain",
+            key=f"download_original_{selected_id}",
+        )
+
+    with translation_tab:
+        translation_dir = TRANSCRIPTS_DIR / str(selected_id) / "english_translation"
+        translation_files = sorted(translation_dir.glob("*.txt")) if translation_dir.exists() else []
+
+        if not translation_files:
+            st.info(
+                "No English translation is available for this meeting. "
+                "Set WHISPER_TRANSLATION_ENABLED = True and transcribe the video again."
+            )
+        else:
+            speaker_by_file_stem = {}
+            for speaker, *_rest in rows:
+                stem = "_".join(
+                    part
+                    for part in "".join(
+                        character if character.isalnum() else " "
+                        for character in speaker.lower()
+                    ).split()
+                    if part
+                ) or "unknown_speaker"
+                speaker_by_file_stem[stem] = speaker
+
+            translation_rows = []
+            for translation_file in translation_files:
+                speaker = speaker_by_file_stem.get(
+                    translation_file.stem,
+                    translation_file.stem.replace("_", " ").title(),
+                )
+                for line in translation_file.read_text(encoding="utf-8").splitlines():
+                    if line.startswith("[") and "]" in line:
+                        timestamp, text = line.split("]", 1)
+                        translation_rows.append({
+                            "Speaker": speaker,
+                            "Time": timestamp.strip("[]"),
+                            "English translation": text.strip(),
+                        })
+
+            if translation_rows:
+                st.dataframe(pd.DataFrame(translation_rows), width="stretch")
+                st.download_button(
+                    "Download English translation",
+                    "\n".join(
+                        f"[{row['Time']}] {row['Speaker']}: {row['English translation']}"
+                        for row in translation_rows
+                    ),
+                    file_name=f"meeting_{selected_id}_english.txt",
+                    mime="text/plain",
+                    key=f"download_translation_{selected_id}",
+                )
+            else:
+                st.warning("The translation folder exists, but contains no readable transcript lines.")
 
 
 def render_voice_enrollment():
@@ -917,14 +1005,20 @@ def render_voice_enrollment():
         "Upload a short voice sample (WAV or MP3)",
         type=["wav", "mp3"],
     )
+    recorded = st.audio_input(
+        "Or record a voice sample",
+        key="voice_enrollment_recording",
+    )
     if st.button("➕ Add Voice Sample", key="add_voice_sample"):
         if selected_name == "-- Select --":
             st.warning("Please select a person first.")
-        elif uploaded is None:
-            st.warning("Please upload a voice sample first.")
+        elif uploaded is None and recorded is None:
+            st.warning("Please upload or record a voice sample first.")
         else:
             try:
-                if uploaded.name.lower().endswith(".mp3"):
+                if recorded is not None:
+                    pcm = read_wav_pcm(recorded)
+                elif uploaded.name.lower().endswith(".mp3"):
                     with tempfile.TemporaryDirectory() as tmp_dir:
                         mp3_path = Path(tmp_dir) / "upload.mp3"
                         mp3_path.write_bytes(uploaded.getvalue())

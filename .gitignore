@@ -10,7 +10,7 @@ unknown_faces/*
 unknown_voices/*
 initialVideo/*
 trackedVideo/*
-transcripts/
+transcripts/*
 live/*
 logs/*
 !known_faces/.gitkeep

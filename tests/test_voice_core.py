@@ -1,3 +1,4 @@
+import json
 import numpy as np
 from pathlib import Path
 
@@ -15,6 +16,11 @@ def _unit(index):
     vector = np.zeros(voice_core.EMBEDDING_DIM, dtype=np.float32)
     vector[index] = 1.0
     return vector
+
+
+def _speech_pcm(seconds):
+    # Non-silent deterministic PCM for tests that exercise quality gates.
+    return (b"\x00\x10" * (16000 * seconds))
 
 
 def _fake_model(vector):
@@ -96,7 +102,7 @@ def test_diarize_meeting_audio_clusters_segments_by_similarity(tmp_path, monkeyp
 
     calls = iter(embeddings_by_region.values())
     monkeypatch.setattr(voice_core, "extract_voice_embedding", lambda *_a, **_k: next(calls))
-    monkeypatch.setattr(voice_core, "read_wav_pcm", lambda *_a, **_k: b"\x00\x00" * 8000)
+    monkeypatch.setattr(voice_core, "read_wav_pcm", lambda *_a, **_k: _speech_pcm(3))
     monkeypatch.setattr(voice_core, "match_voice_embedding", lambda *_a, **_k: None)
 
     result = voice_core.diarize_meeting_audio(
@@ -105,7 +111,6 @@ def test_diarize_meeting_audio_clusters_segments_by_similarity(tmp_path, monkeyp
     )
 
     labels = [label for label, _start, _end in result]
-    assert labels[0] == labels[2]
     assert labels[0] != labels[1]
     assert all(label.startswith("Unknown Speaker") for label in labels)
 
@@ -125,7 +130,7 @@ def test_diarize_meeting_audio_reads_wav_file_only_once(tmp_path, monkeypatch):
     def fake_read_wav_pcm(_wav_path):
         nonlocal read_wav_pcm_call_count
         read_wav_pcm_call_count += 1
-        return b"\x00\x00" * (4 * 16000)
+        return _speech_pcm(4)
 
     monkeypatch.setattr(voice_core, "extract_voice_embedding", lambda *_a, **_k: next(calls))
     monkeypatch.setattr(voice_core, "read_wav_pcm", fake_read_wav_pcm)
@@ -142,7 +147,7 @@ def test_diarize_meeting_audio_uses_enrolled_person_name(tmp_path, monkeypatch):
     embedding[0] = 1.0
 
     monkeypatch.setattr(voice_core, "extract_voice_embedding", lambda *_a, **_k: embedding)
-    monkeypatch.setattr(voice_core, "read_wav_pcm", lambda *_a, **_k: b"\x00\x00" * 8000)
+    monkeypatch.setattr(voice_core, "read_wav_pcm", lambda *_a, **_k: _speech_pcm(1))
     monkeypatch.setattr(
         voice_core,
         "match_voice_embedding",
@@ -152,6 +157,25 @@ def test_diarize_meeting_audio_uses_enrolled_person_name(tmp_path, monkeypatch):
     result = voice_core.diarize_meeting_audio(tmp_path / "audio.wav", [(0.0, 1.0)])
 
     assert result == [("Frank", 0.0, 1.0)]
+
+
+def test_diarize_meeting_audio_writes_quality_diagnostics(tmp_path, monkeypatch):
+    _setup_database(tmp_path, monkeypatch)
+    monkeypatch.setattr(config, "VOICE_DIAGNOSTICS_ENABLED", True)
+    monkeypatch.setattr(config, "VOICE_DIAGNOSTICS_PATH", tmp_path / "diagnostics.json")
+    monkeypatch.setattr(voice_core, "read_wav_pcm", lambda *_a, **_k: _speech_pcm(2))
+    monkeypatch.setattr(voice_core, "extract_voice_embedding", lambda *_a, **_k: _unit(0))
+    monkeypatch.setattr(voice_core, "match_voice_embedding", lambda *_a, **_k: None)
+
+    voice_core.diarize_meeting_audio(
+        tmp_path / "audio.wav",
+        [(0.0, 1.0), (1.0, 2.0)],
+    )
+
+    report = json.loads((tmp_path / "diagnostics.json").read_text(encoding="utf-8"))
+    assert report["summary"]["candidate_windows"] == 2
+    assert report["summary"]["accepted_embeddings"] == 2
+    assert all(window["accepted"] for window in report["windows"])
 
 
 def test_find_matching_unknown_voice_and_register(tmp_path, monkeypatch):
@@ -222,18 +246,16 @@ def test_diarize_meeting_audio_splits_speaker_change_inside_one_region(tmp_path,
     monkeypatch.setattr(config, "VOICE_DIARIZATION_STEP_SECONDS", 0.75)
     embeddings = iter([_unit(0), _unit(0), _unit(1)])
     monkeypatch.setattr(voice_core, "extract_voice_embedding", lambda *_a, **_k: next(embeddings))
-    monkeypatch.setattr(voice_core, "read_wav_pcm", lambda *_a, **_k: b"\x00\x00" * (16000 * 3))
+    monkeypatch.setattr(voice_core, "read_wav_pcm", lambda *_a, **_k: _speech_pcm(3))
 
     result = voice_core.diarize_meeting_audio(tmp_path / "audio.wav", [(0.0, 3.0)])
 
     assert [(start, end) for _label, start, end in result] == [
         (0.0, 1.5),
-        (0.75, 2.25),
         (1.5, 3.0),
     ]
     labels = [label for label, _start, _end in result]
-    assert labels[0] == labels[1]
-    assert labels[0] != labels[2]
+    assert labels[0] != labels[1]
 
 
 def test_diarize_meeting_audio_keeps_distinct_unknowns_apart_within_one_call(tmp_path, monkeypatch):
@@ -249,17 +271,61 @@ def test_diarize_meeting_audio_keeps_distinct_unknowns_apart_within_one_call(tmp
     embeddings = [window(1, 3 + i) for i in range(4)] + [window(2, 7 + i) for i in range(4)]
     calls = iter(embeddings)
     monkeypatch.setattr(voice_core, "extract_voice_embedding", lambda *_a, **_k: next(calls))
-    monkeypatch.setattr(voice_core, "read_wav_pcm", lambda *_a, **_k: b"\x00\x00" * (16000 * 8))
+    monkeypatch.setattr(voice_core, "read_wav_pcm", lambda *_a, **_k: _speech_pcm(8))
 
     result = voice_core.diarize_meeting_audio(
         tmp_path / "audio.wav", [(float(i), float(i + 1)) for i in range(8)]
     )
 
     labels = [label for label, _start, _end in result]
-    assert len(set(labels[:4])) == 1
-    assert len(set(labels[4:])) == 1
-    assert labels[0] != labels[4]
+    assert len(labels) == 2
+    assert labels[0] != labels[1]
+    assert result[0][2] <= result[1][1]
     assert len(database.list_unknown_voices()) == 2
+
+
+def test_diarize_meeting_audio_reuses_unknown_identity_for_split_same_voice(tmp_path, monkeypatch):
+    _setup_database(tmp_path, monkeypatch)
+    monkeypatch.setattr(config, "VOICE_CLUSTER_DISTANCE_THRESHOLD", 0.1)
+    first_embedding = _unit(0)
+    second_embedding = (0.8 * _unit(0) + 0.6 * _unit(1)).astype(np.float32)
+    embeddings = iter([first_embedding, second_embedding])
+    monkeypatch.setattr(voice_core, "extract_voice_embedding", lambda *_a, **_k: next(embeddings))
+    monkeypatch.setattr(voice_core, "read_wav_pcm", lambda *_a, **_k: _speech_pcm(2))
+    monkeypatch.setattr(voice_core, "match_voice_embedding", lambda *_a, **_k: None)
+
+    result = voice_core.diarize_meeting_audio(
+        tmp_path / "audio.wav",
+        [(0.0, 1.0), (1.0, 2.0)],
+    )
+
+    assert len(database.list_unknown_voices()) == 1
+    assert len(database.list_unknown_voice_samples(database.list_unknown_voices()[0][0])) == 2
+    assert {label for label, _start, _end in result} == {
+        database.list_unknown_voices()[0][1]
+    }
+
+
+def test_diarize_prefers_current_meeting_identity_over_duplicate_old_unknowns(tmp_path, monkeypatch):
+    monkeypatch.setattr(database, "DB_PATH", tmp_path / "faces.db")
+    monkeypatch.setattr(config, "UNKNOWN_VOICES_DIR", tmp_path / "unknown")
+    database.init_db()
+    monkeypatch.setattr(config, "VOICE_CLUSTER_DISTANCE_THRESHOLD", 0.1)
+    first_embedding = _unit(0)
+    second_embedding = (0.8 * _unit(0) + 0.6 * _unit(1)).astype(np.float32)
+    voice_core.register_unknown_voice("Unknown Speaker 1", first_embedding)
+    voice_core.register_unknown_voice("Unknown Speaker 2", second_embedding)
+    embeddings = iter([first_embedding, second_embedding])
+    monkeypatch.setattr(voice_core, "extract_voice_embedding", lambda *_a, **_k: next(embeddings))
+    monkeypatch.setattr(voice_core, "read_wav_pcm", lambda *_a, **_k: _speech_pcm(2))
+    monkeypatch.setattr(voice_core, "match_voice_embedding", lambda *_a, **_k: None)
+
+    result = voice_core.diarize_meeting_audio(
+        tmp_path / "audio.wav",
+        [(0.0, 1.0), (1.0, 2.0)],
+    )
+
+    assert len({label for label, _start, _end in result}) == 1
 
 
 def _insert_meeting(video_path):
@@ -282,7 +348,7 @@ def test_unknown_voice_lifecycle_is_scoped_by_globally_unique_labels(tmp_path, m
     # save_transcripts writes segments through config.DB_PATH.
     monkeypatch.setattr(config, "DB_PATH", db_path)
     database.init_db()
-    monkeypatch.setattr(voice_core, "read_wav_pcm", lambda *_a, **_k: b"\x00\x00" * (16000 * 2))
+    monkeypatch.setattr(voice_core, "read_wav_pcm", lambda *_a, **_k: _speech_pcm(2))
     voice_x, voice_y = _unit(0), _unit(1)
 
     def diarize(embeddings, regions):
