@@ -31,3 +31,4 @@ directmlvenv/
 *.db-shm
 *.db-wal
 *.log
+transcripts
