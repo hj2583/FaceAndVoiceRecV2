@@ -49,3 +49,112 @@ def test_mouth_motion_score_rises_with_lip_ratio_variance():
     attributor._score_candidates(1.00, True, 0.0, [_observation(1, lip_open_ratio=0.0)])
     scored = attributor._score_candidates(1.10, True, 0.0, [_observation(1, lip_open_ratio=0.05)])
     assert scored[0]["motion_score"] > 0.0
+
+
+def test_no_speech_returns_none():
+    attributor = SpeakerAttributor()
+    attributor.update_audio(1.0, False)
+    result = attributor.update_faces(1.0, [_observation(1)])
+    assert result == {"timestamp": 1.0, "active_speaker": None}
+
+
+def test_speech_with_no_faces_returns_unknown():
+    attributor = SpeakerAttributor()
+    attributor.update_audio(1.0, True, 0.9)
+    result = attributor.update_faces(1.0, [])
+    assert result["active_speaker"] == "UNKNOWN"
+    assert result["track_id"] is None
+
+
+def test_first_assignment_is_immediate_no_incumbent_wait():
+    attributor = SpeakerAttributor()
+    attributor.update_audio(1.0, True, 1.0)
+    result = attributor.update_faces(1.0, [_observation(1, person_name="Alice", face_confidence=0.9)])
+    assert result["active_speaker"] == "Alice"
+    assert result["track_id"] == 1
+
+
+def test_low_confidence_candidate_is_unknown_not_a_guessed_name():
+    attributor = SpeakerAttributor()
+    attributor.update_audio(1.0, True, 0.0)
+    result = attributor.update_faces(1.0, [_observation(1, face_confidence=0.1)])
+    assert result["active_speaker"] == "UNKNOWN"
+
+
+def test_does_not_flip_on_single_frame_fluctuation():
+    attributor = SpeakerAttributor()
+    attributor.update_audio(1.0, True, 1.0)
+    attributor.update_faces(1.0, [_observation(1, person_name="Alice", face_confidence=0.9)])
+
+    attributor.update_audio(1.05, True, 1.0)
+    result = attributor.update_faces(
+        1.05,
+        [
+            _observation(1, person_name="Alice", face_confidence=0.9),
+            _observation(2, person_name="Bob", face_confidence=0.91),  # barely higher, one frame only
+        ],
+    )
+    assert result["active_speaker"] == "Alice"
+
+
+def _run_alice_then_bob(attributor):
+    """Alice speaks alone at t=1.0; from t=1.1 Bob appears with a moving
+    mouth while Alice's mouth is still. Returns the first time Bob wins."""
+    attributor.update_audio(1.0, True, 1.0)
+    attributor.update_faces(1.0, [_observation(1, person_name="Alice", face_confidence=0.9)])
+    switch_time = None
+    for i in range(1, 11):
+        t = round(1.0 + 0.1 * i, 2)
+        attributor.update_audio(t, True, 1.0)
+        result = attributor.update_faces(
+            t,
+            [
+                _observation(1, person_name="Alice", face_confidence=0.9, lip_open_ratio=0.05),
+                _observation(2, person_id=2, person_name="Bob", face_confidence=0.9,
+                             lip_open_ratio=0.0 if i % 2 else 0.06),
+            ],
+        )
+        if result["active_speaker"] == "Bob" and switch_time is None:
+            switch_time = t
+    return switch_time
+
+
+def test_switches_after_sustained_margin_not_immediately():
+    attributor = SpeakerAttributor()
+    switch_time = _run_alice_then_bob(attributor)
+    assert switch_time is not None
+    assert switch_time > 1.1
+
+
+def test_grace_period_keeps_speaker_through_brief_silence():
+    attributor = SpeakerAttributor()
+    attributor.update_audio(1.0, True, 1.0)
+    attributor.update_faces(1.0, [_observation(1, person_name="Alice", face_confidence=0.9)])
+
+    attributor.update_audio(1.1, False)
+    result = attributor.update_faces(1.1, [_observation(1, person_name="Alice", face_confidence=0.9)])
+    assert result["active_speaker"] == "Alice"
+
+
+def test_speaker_becomes_none_after_grace_period_expires():
+    attributor = SpeakerAttributor()
+    attributor.update_audio(1.0, True, 1.0)
+    attributor.update_faces(1.0, [_observation(1, person_name="Alice", face_confidence=0.9)])
+
+    grace_s = config.SPEAKER_GRACE_PERIOD_MS / 1000.0
+    # Grace is measured from the last voiced timestamp, so a single silent
+    # update past the grace window must already end the run.
+    attributor.update_audio(1.0 + grace_s + 0.1, False)
+    result = attributor.update_faces(1.0 + grace_s + 0.1, [_observation(1, person_name="Alice", face_confidence=0.9)])
+    assert result["active_speaker"] is None
+
+
+def test_unknown_face_can_be_the_active_speaker():
+    attributor = SpeakerAttributor()
+    attributor.update_audio(1.0, True, 1.0)
+    result = attributor.update_faces(
+        1.0,
+        [_observation(12, person_id=None, person_name="UNKNOWN", face_confidence=0.9)],
+    )
+    assert result["active_speaker"] == "UNKNOWN"
+    assert result["track_id"] == 12

@@ -130,3 +130,116 @@ class SpeakerAttributor:
         voice_active = bool(audio and audio.voice_active)
         voice_confidence = audio.voice_confidence if audio else 0.0
         return self._score_candidates(timestamp, voice_active, voice_confidence, face_observations)
+
+    # ------------------------------------------------------------------
+    # Decision / hysteresis
+    # ------------------------------------------------------------------
+
+    def update_faces(self, timestamp, face_observations):
+        audio = self._nearest_audio(timestamp)
+        voice_active = bool(audio and audio.voice_active)
+        voice_confidence = audio.voice_confidence if audio else 0.0
+
+        scored = self._score_candidates(timestamp, voice_active, voice_confidence, face_observations)
+
+        if self.debug:
+            self._log_debug(scored)
+
+        if not voice_active:
+            return self._handle_silence(timestamp)
+
+        self._last_voice_at = timestamp
+
+        if not scored:
+            if self._current_speaker is not None:
+                self._close_current_event(timestamp)
+            return self._result(timestamp, "UNKNOWN", None, 0.0, {})
+
+        return self._decide(timestamp, voice_confidence, scored)
+
+    def _handle_silence(self, timestamp):
+        if self._current_speaker is None:
+            return self._result(timestamp, None, None, 0.0, {})
+
+        if timestamp - self._last_voice_at >= self._grace_period_s:
+            # The run ended when voice stopped, not when the grace window expired.
+            self._close_current_event(self._last_voice_at)
+            return self._result(timestamp, None, None, 0.0, {})
+
+        return self._result(
+            timestamp, self._current_speaker, self._current_track_id,
+            self._current_confidence, {"grace_period": True},
+        )
+
+    def _decide(self, timestamp, voice_confidence, scored):
+        best = max(scored, key=lambda item: item["score"])
+        observation = best["observation"]
+        label = observation.person_name if observation.person_id is not None else "UNKNOWN"
+        smoothed = self._smoothed_score(observation.track_id, timestamp)
+
+        if self._current_track_id is None:
+            switch = best["score"] >= self._min_confidence
+        elif observation.track_id == self._current_track_id:
+            switch = True
+        else:
+            incumbent_smoothed = self._smoothed_score(self._current_track_id, timestamp)
+            switch = (
+                smoothed >= self._min_confidence
+                and smoothed - incumbent_smoothed >= self._switch_threshold
+            )
+
+        if not switch:
+            if self._current_speaker is not None:
+                return self._result(
+                    timestamp, self._current_speaker, self._current_track_id,
+                    self._current_confidence, {"held_incumbent": True},
+                )
+            label = "UNKNOWN"
+
+        if label != self._current_speaker or observation.track_id != self._current_track_id:
+            if self._current_speaker is not None:
+                self._close_current_event(timestamp)
+            self._current_speaker = label
+            self._current_track_id = observation.track_id
+            self._current_open_since = timestamp
+
+        self._current_confidence = best["score"]
+        reason = {
+            "voice_activity": voice_confidence,
+            "mouth_motion": best["motion_score"],
+            "face_confidence": observation.face_confidence,
+            "temporal_consistency": smoothed,
+        }
+        return self._result(timestamp, label, observation.track_id, best["score"], reason)
+
+    def _close_current_event(self, timestamp):
+        if self._current_speaker is not None and self._current_open_since is not None:
+            self._closed_events.append({
+                "speaker": self._current_speaker,
+                "track_id": self._current_track_id,
+                "start_time": self._current_open_since,
+                "end_time": timestamp,
+                "confidence": self._current_confidence,
+            })
+        self._current_speaker = None
+        self._current_track_id = None
+        self._current_open_since = None
+        self._current_confidence = 0.0
+
+    def _result(self, timestamp, speaker, track_id, confidence, reason):
+        result = {"timestamp": timestamp, "active_speaker": speaker}
+        if speaker is not None:
+            result["track_id"] = track_id
+            result["confidence"] = confidence
+            result["reason"] = reason
+        return result
+
+    def _log_debug(self, scored):
+        import logging
+        logger = logging.getLogger(__name__)
+        for item in sorted(scored, key=lambda entry: entry["score"], reverse=True):
+            observation = item["observation"]
+            logger.debug(
+                "Track %s -> %s -> speaker score %.2f",
+                observation.track_id, observation.person_name, item["score"],
+            )
