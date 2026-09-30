@@ -192,6 +192,42 @@ SPEECH_RELEASE_FRAMES = 4
 
 
 # ============================================================
+# Speaker attribution / fusion
+# ============================================================
+
+# Rolling window used both to smooth per-track scores (for switch decisions)
+# and to compute mouth_motion_score from recent lip_open_ratio history.
+SPEAKER_WINDOW_MS = 800
+
+# A challenger must beat the incumbent's smoothed score by this margin
+# before the active speaker changes. Does not apply to the very first
+# assignment (no incumbent yet) or to the incumbent retaining its own track.
+SPEAKER_SWITCH_THRESHOLD = 0.15
+
+# Below this smoothed score, the result is "UNKNOWN" rather than a
+# low-confidence guessed name.
+SPEAKER_MIN_CONFIDENCE = 0.35
+
+# How long to keep reporting the current speaker after voice activity
+# drops, before falling back to active_speaker=None.
+SPEAKER_GRACE_PERIOD_MS = 600
+
+# Maximum gap allowed when matching a face observation's timestamp to the
+# nearest audio sample. Beyond this, no audio data is treated as available.
+AUDIO_SYNC_TOLERANCE_MS = 250
+
+# Speaker-scoring weights; must sum to 1.0.
+VOICE_ACTIVITY_WEIGHT = 0.40
+LIP_MOTION_WEIGHT = 0.30
+FACE_CONFIDENCE_WEIGHT = 0.20
+TEMPORAL_WEIGHT = 0.10
+
+# Standard deviation of a track's recent lip_open_ratio history is divided
+# by this constant, then clamped to [0, 1], to produce mouth_motion_score.
+LIP_MOTION_NORM = 0.02
+
+
+# ============================================================
 # Voice embeddings / diarization
 # ============================================================
 
