@@ -260,3 +260,61 @@ def test_closed_event_confidence_is_mean_of_run_scores():
     )
     expected_mean = (score_1 + score_2) / 2
     assert abs(event["confidence"] - expected_mean) < 1e-6
+
+
+def test_pop_closed_events_returns_empty_list_initially():
+    attributor = SpeakerAttributor()
+    assert attributor.pop_closed_events() == []
+
+
+def test_switching_speaker_closes_previous_event():
+    attributor = SpeakerAttributor()
+    switch_time = _run_alice_then_bob(attributor)
+
+    events = attributor.pop_closed_events()
+    assert len(events) == 1
+    assert events[0]["speaker"] == "Alice"
+    assert events[0]["track_id"] == 1
+    assert events[0]["start_time"] == 1.0
+    assert events[0]["end_time"] == switch_time
+
+    # Draining again returns nothing new until another switch/close happens.
+    assert attributor.pop_closed_events() == []
+
+
+def test_event_closes_at_last_voiced_time_after_grace_period():
+    attributor = SpeakerAttributor()
+    attributor.update_audio(1.0, True, 1.0)
+    attributor.update_faces(1.0, [_observation(1, person_name="Alice", face_confidence=0.9)])
+    attributor.update_audio(1.1, True, 1.0)
+    attributor.update_faces(1.1, [_observation(1, person_name="Alice", face_confidence=0.9)])
+
+    grace_s = config.SPEAKER_GRACE_PERIOD_MS / 1000.0
+    silent_t = 1.1 + grace_s + 0.1
+    attributor.update_audio(silent_t, False)
+    attributor.update_faces(silent_t, [_observation(1, person_name="Alice", face_confidence=0.9)])
+
+    events = attributor.pop_closed_events()
+    assert len(events) == 1
+    assert (events[0]["speaker"], events[0]["track_id"], events[0]["start_time"], events[0]["end_time"]) == (
+        "Alice", 1, 1.0, 1.1,
+    )
+
+
+def test_finish_closes_open_run_at_last_voiced_time():
+    attributor = SpeakerAttributor()
+    attributor.update_audio(1.0, True, 1.0)
+    attributor.update_faces(1.0, [_observation(1, person_name="Alice", face_confidence=0.9)])
+    attributor.update_audio(1.2, True, 1.0)
+    attributor.update_faces(1.2, [_observation(1, person_name="Alice", face_confidence=0.9)])
+
+    attributor.finish()
+
+    events = attributor.pop_closed_events()
+    assert [(e["speaker"], e["start_time"], e["end_time"]) for e in events] == [("Alice", 1.0, 1.2)]
+
+
+def test_finish_without_open_run_produces_no_event():
+    attributor = SpeakerAttributor()
+    attributor.finish()
+    assert attributor.pop_closed_events() == []

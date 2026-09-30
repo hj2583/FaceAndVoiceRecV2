@@ -298,3 +298,16 @@ class SpeakerAttributor:
                 "Track %s -> %s -> speaker score %.2f",
                 observation.track_id, observation.person_name, item["score"],
             )
+
+    # ------------------------------------------------------------------
+    # Events
+    # ------------------------------------------------------------------
+
+    def pop_closed_events(self):
+        events, self._closed_events = self._closed_events, []
+        return events
+
+    def finish(self):
+        """Close any still-open speaker run; call once when a pipeline ends."""
+        if self._current_speaker is not None:
+            self._close_current_event(self._last_voice_at)
