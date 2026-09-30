@@ -226,6 +226,10 @@ TEMPORAL_WEIGHT = 0.10
 # by this constant, then clamped to [0, 1], to produce mouth_motion_score.
 LIP_MOTION_NORM = 0.02
 
+# Max samples kept per track (lip ratios, scores) and for audio; must cover
+# SPEAKER_WINDOW_MS at the highest expected frame rate.
+SPEAKER_HISTORY_MAXLEN = 64
+
 
 # ============================================================
 # Voice embeddings / diarization

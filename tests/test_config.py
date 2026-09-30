@@ -59,6 +59,7 @@ def test_speaker_attribution_weights_are_configurable_and_positive():
     assert config.SPEAKER_GRACE_PERIOD_MS > 0
     assert config.AUDIO_SYNC_TOLERANCE_MS > 0
     assert config.LIP_MOTION_NORM > 0
+    assert config.SPEAKER_HISTORY_MAXLEN > 0
     weights = (
         config.VOICE_ACTIVITY_WEIGHT,
         config.LIP_MOTION_WEIGHT,

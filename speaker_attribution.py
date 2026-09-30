@@ -30,8 +30,8 @@ class _AudioSample:
 
 @dataclass
 class _TrackHistory:
-    lip_ratios: deque = field(default_factory=lambda: deque(maxlen=64))
-    scores: deque = field(default_factory=lambda: deque(maxlen=64))
+    lip_ratios: deque = field(default_factory=lambda: deque(maxlen=config.SPEAKER_HISTORY_MAXLEN))
+    scores: deque = field(default_factory=lambda: deque(maxlen=config.SPEAKER_HISTORY_MAXLEN))
 
 
 class SpeakerAttributor:
@@ -52,7 +52,7 @@ class SpeakerAttributor:
         self._temporal_weight = config.TEMPORAL_WEIGHT
         self._lip_motion_norm = config.LIP_MOTION_NORM
 
-        self._audio_samples: deque = deque(maxlen=64)
+        self._audio_samples: deque = deque(maxlen=config.SPEAKER_HISTORY_MAXLEN)
         self._track_history: dict[int, _TrackHistory] = {}
 
         self._current_speaker: Optional[str] = None
