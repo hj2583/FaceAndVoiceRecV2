@@ -98,6 +98,12 @@ def init_db():
             )
         """)
 
+        audio_log_columns = {
+            row[1] for row in conn.execute("PRAGMA table_info(audio_logs)")
+        }
+        if "track_id" not in audio_log_columns:
+            conn.execute("ALTER TABLE audio_logs ADD COLUMN track_id INTEGER")
+
         conn.execute("""
             CREATE TABLE IF NOT EXISTS meetings (
                 meeting_id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -729,15 +735,15 @@ def log_recognition(timestamp_sec, person_id, person_name, confidence, source):
         )
 
 
-def log_audio(start_time, end_time, person_id, person_name, confidence, source, transcript=None):
+def log_audio(start_time, end_time, person_id, person_name, confidence, source, transcript=None, track_id=None):
     with get_conn() as conn:
         conn.execute(
             """
             INSERT INTO audio_logs(
                 start_time, end_time, person_id, person_name,
-                confidence, source, transcript
+                confidence, source, transcript, track_id
             )
-            VALUES (?, ?, ?, ?, ?, ?, ?)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 float(start_time),
@@ -747,6 +753,7 @@ def log_audio(start_time, end_time, person_id, person_name, confidence, source, 
                 float(confidence),
                 source,
                 transcript,
+                track_id,
             ),
         )
 
@@ -757,7 +764,7 @@ def fetch_audio_logs(source=None):
             return conn.execute(
                 """
                 SELECT log_id, start_time, end_time, person_name,
-                       confidence, source, transcript
+                       confidence, source, transcript, track_id
                 FROM audio_logs
                 WHERE source=?
                 ORDER BY start_time DESC
@@ -768,7 +775,7 @@ def fetch_audio_logs(source=None):
         return conn.execute(
             """
             SELECT log_id, start_time, end_time, person_name,
-                   confidence, source, transcript
+                   confidence, source, transcript, track_id
             FROM audio_logs
             ORDER BY start_time DESC
             """
