@@ -262,12 +262,17 @@ WHISPER_LANGUAGE_MAX_SAMPLES = 6
 # Keep the original spoken language by default.
 WHISPER_TASK = "transcribe"
 
-# Optional second pass. When enabled, the original transcript is preserved and
-# an English translation is written under each meeting's english_translation/.
-WHISPER_TRANSLATION_ENABLED = True
-
 # Optional Whisper decoding hint (domain vocabulary, names, etc).
 WHISPER_INITIAL_PROMPT = None
+
+# Consecutive same-speaker fragments closer than this are joined into one turn.
+TRANSCRIPT_MERGE_MAX_GAP_MS = 10000
+TRANSCRIPT_MERGE_MAX_CHARS = 600
+
+# Unknown-speaker fragments this short (plain "Unknown Speaker"), or unknown
+# clusters with this little total speech, take the surrounding speaker's label.
+TRANSCRIPT_SPEAKER_BLIP_MS = 3000
+TRANSCRIPT_MINOR_SPEAKER_TOTAL_MS = 8000
 
 
 # ============================================================

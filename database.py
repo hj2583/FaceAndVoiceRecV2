@@ -119,11 +119,18 @@ def init_db():
                 end_ms INTEGER NOT NULL,
                 text TEXT NOT NULL,
                 confidence REAL,
+                sentence_type TEXT,
                 created_at TEXT NOT NULL,
                 FOREIGN KEY(meeting_id) REFERENCES meetings(meeting_id),
                 FOREIGN KEY(person_id) REFERENCES persons(person_id)
             )
         """)
+
+        segment_columns = {
+            row[1] for row in conn.execute("PRAGMA table_info(transcription_segments)")
+        }
+        if "sentence_type" not in segment_columns:
+            conn.execute("ALTER TABLE transcription_segments ADD COLUMN sentence_type TEXT")
 
         conn.execute("""
             CREATE INDEX IF NOT EXISTS idx_transcription_meeting
@@ -225,6 +232,29 @@ def rename_person(person_id, name):
     _regenerate_meeting_transcripts(meeting_ids)
 
 
+def update_transcription_segments(meeting_id, updates):
+    """Apply manual corrections: dicts of segment_id, text, sentence_type, confidence."""
+    with get_conn() as conn:
+        conn.executemany(
+            """
+            UPDATE transcription_segments
+            SET text=?, sentence_type=?, confidence=?
+            WHERE segment_id=? AND meeting_id=?
+            """,
+            [
+                (
+                    update["text"],
+                    update["sentence_type"],
+                    update["confidence"],
+                    update["segment_id"],
+                    meeting_id,
+                )
+                for update in updates
+            ],
+        )
+    _regenerate_meeting_transcripts([meeting_id])
+
+
 def _regenerate_meeting_transcripts(meeting_ids):
     """Rewrite each meeting's on-disk .txt transcripts from its stored segments."""
     if not meeting_ids:
@@ -237,7 +267,7 @@ def _regenerate_meeting_transcripts(meeting_ids):
             with get_conn() as conn:
                 rows = conn.execute(
                     """
-                    SELECT speaker_label, start_ms, end_ms, text, confidence
+                    SELECT speaker_label, start_ms, end_ms, text, confidence, sentence_type
                     FROM transcription_segments
                     WHERE meeting_id=?
                     ORDER BY start_ms
@@ -247,7 +277,11 @@ def _regenerate_meeting_transcripts(meeting_ids):
             meeting_dir = Path(config.TRANSCRIPTS_DIR) / str(meeting_id)
             # Old labels' files would otherwise linger next to the regenerated ones.
             for stale_path in meeting_dir.glob("*.txt"):
-                stale_path.unlink(missing_ok=True)
+                try:
+                    stale_path.unlink(missing_ok=True)
+                except OSError:
+                    # Windows refuses to delete files another process has open.
+                    logger.warning("Could not remove stale transcript %s", stale_path)
             segments = [transcription_core.TranscriptionSegment(*row) for row in rows]
             # DB rows are already up to date, so only the files are rewritten.
             transcription_core.save_transcripts(segments, meeting_dir)

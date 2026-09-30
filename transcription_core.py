@@ -29,6 +29,205 @@ class TranscriptionSegment:
     end_ms: int
     text: str
     confidence: Optional[float] = None
+    sentence_type: Optional[str] = None
+
+
+SENTENCE_TYPES = ("Question", "Topic", "Comment", "Unknown")
+
+_SENTENCE_END = (".", "?", "!", "\u3002", "\uff1f", "\uff01")
+_UNKNOWN_SPEAKER_PREFIX = "Unknown Speaker"
+
+# Keyword rules cover English and Malay; phrases are matched on word boundaries.
+_QUESTION_STARTERS = (
+    "what", "why", "how", "when", "where", "who", "whom", "whose", "which",
+    "apa", "apakah", "siapa", "siapakah", "bila", "bilakah", "mengapa",
+    "kenapa", "bagaimana", "berapa", "adakah", "bolehkah", "di mana",
+)
+_TOPIC_PHRASES = (
+    "agenda", "today we", "let's talk about", "let's discuss", "moving on",
+    "next item", "next topic", "the topic", "first item", "regarding",
+    "topik", "seterusnya", "mengenai", "berkenaan", "kita bincang",
+    "in this video", "in this session", "in this tutorial", "we will guide",
+    "we will show", "we will cover", "today's", "welcome to",
+)
+_FILLER_WORDS = {
+    "um", "uh", "umm", "uhm", "hmm", "mm", "ah", "eh", "er", "erm", "oh", "ha",
+}
+
+
+def _normalize_for_rules(text: str) -> str:
+    text = text.lower().replace("\u2019", "'")
+    return " ".join(re.sub(r"[^\w\s']", " ", text).split())
+
+
+def _contains_phrase(normalized: str, phrases) -> bool:
+    return any(re.search(rf"(?<![\w']){re.escape(p)}(?![\w'])", normalized) for p in phrases)
+
+
+def _starts_with_phrase(normalized: str, phrases) -> bool:
+    return any(re.match(rf"{re.escape(p)}(?![\w'])", normalized) for p in phrases)
+
+
+def classify_sentence(text: str) -> str:
+    """Label a transcript turn as Question, Topic, Comment or Unknown."""
+    stripped = text.strip()
+    normalized = _normalize_for_rules(stripped)
+    words = [word for word in normalized.split() if re.search(r"[^\W\d_]", word)]
+    if not words or all(word in _FILLER_WORDS for word in words):
+        return "Unknown"
+
+    if "?" in stripped or "\uff1f" in stripped or (
+        _starts_with_phrase(normalized, _QUESTION_STARTERS) and len(words) <= 20
+    ):
+        return "Question"
+    if _contains_phrase(normalized, _TOPIC_PHRASES):
+        return "Topic"
+    return "Comment"
+
+
+def absorb_minor_speakers(
+    segments: Iterable[TranscriptionSegment],
+    blip_ms: Optional[int] = None,
+    minor_total_ms: Optional[int] = None,
+) -> list[TranscriptionSegment]:
+    """Reassign short stray unknown-speaker fragments to the surrounding speaker.
+
+    Diarization often gives a single short window its own unknown cluster;
+    identified (named) speakers are never relabeled.
+    """
+    blip_ms = config.TRANSCRIPT_SPEAKER_BLIP_MS if blip_ms is None else blip_ms
+    minor_total_ms = (
+        config.TRANSCRIPT_MINOR_SPEAKER_TOTAL_MS if minor_total_ms is None else minor_total_ms
+    )
+    ordered = sorted(segments, key=lambda item: item.start_ms)
+    total_ms: dict[str, int] = {}
+    for segment in ordered:
+        total_ms[segment.speaker_label] = (
+            total_ms.get(segment.speaker_label, 0) + segment.end_ms - segment.start_ms
+        )
+
+    def is_stray(segment):
+        label = segment.speaker_label
+        if not label.startswith(_UNKNOWN_SPEAKER_PREFIX):
+            return False
+        if label == _UNKNOWN_SPEAKER_PREFIX:
+            return segment.end_ms - segment.start_ms <= blip_ms
+        return total_ms[label] <= minor_total_ms
+
+    result = list(ordered)
+    for index, segment in enumerate(result):
+        if not is_stray(segment):
+            continue
+        previous = next((s for s in reversed(result[:index]) if not is_stray(s)), None)
+        following = next((s for s in ordered[index + 1:] if not is_stray(s)), None)
+        if previous is not None and following is not None:
+            gap_before = segment.start_ms - previous.end_ms
+            gap_after = following.start_ms - segment.end_ms
+            neighbour = previous if gap_before <= gap_after else following
+        else:
+            neighbour = previous or following
+        if neighbour is None:
+            continue
+        result[index] = TranscriptionSegment(
+            neighbour.speaker_label,
+            segment.start_ms,
+            segment.end_ms,
+            segment.text,
+            segment.confidence,
+            segment.sentence_type,
+        )
+    return result
+
+
+def merge_speaker_sentences(
+    segments: Iterable[TranscriptionSegment],
+    max_gap_ms: Optional[int] = None,
+    max_chars: Optional[int] = None,
+) -> list[TranscriptionSegment]:
+    """Join consecutive same-speaker fragments into one speaking turn.
+
+    A turn ends on a speaker change or a long pause; past ``max_chars`` it
+    ends at the next sentence boundary so sentences are never cut.
+    """
+    max_gap_ms = config.TRANSCRIPT_MERGE_MAX_GAP_MS if max_gap_ms is None else max_gap_ms
+    max_chars = config.TRANSCRIPT_MERGE_MAX_CHARS if max_chars is None else max_chars
+
+    merged: list[TranscriptionSegment] = []
+    for segment in sorted(segments, key=lambda item: item.start_ms):
+        text = segment.text.strip()
+        if not text:
+            continue
+        if merged:
+            last = merged[-1]
+            can_merge = (
+                last.speaker_label == segment.speaker_label
+                and segment.start_ms - last.end_ms <= max_gap_ms
+                and (
+                    len(last.text) + 1 + len(text) <= max_chars
+                    or not last.text.rstrip().endswith(_SENTENCE_END)
+                )
+            )
+            if can_merge:
+                merged[-1] = TranscriptionSegment(
+                    last.speaker_label,
+                    last.start_ms,
+                    max(last.end_ms, segment.end_ms),
+                    f"{last.text} {text}",
+                    _weighted_confidence(last, segment),
+                )
+                continue
+        merged.append(TranscriptionSegment(
+            segment.speaker_label,
+            segment.start_ms,
+            segment.end_ms,
+            text,
+            segment.confidence,
+        ))
+    return merged
+
+
+def group_transcript_turns(
+    segments: Iterable[TranscriptionSegment],
+    max_gap_ms: Optional[int] = None,
+) -> list[list[TranscriptionSegment]]:
+    """Group adjacent segments from the same speaker for transcript display."""
+    max_gap_ms = config.TRANSCRIPT_MERGE_MAX_GAP_MS if max_gap_ms is None else max_gap_ms
+    turns: list[list[TranscriptionSegment]] = []
+    for segment in sorted(segments, key=lambda item: item.start_ms):
+        if (
+            turns
+            and turns[-1][-1].speaker_label == segment.speaker_label
+            and segment.start_ms - turns[-1][-1].end_ms <= max_gap_ms
+        ):
+            turns[-1].append(segment)
+        else:
+            turns.append([segment])
+    return turns
+
+
+def _weighted_confidence(first: TranscriptionSegment, second: TranscriptionSegment) -> Optional[float]:
+    weighted = [
+        (segment.confidence, max(1, segment.end_ms - segment.start_ms))
+        for segment in (first, second)
+        if segment.confidence is not None
+    ]
+    if not weighted:
+        return None
+    return sum(value * weight for value, weight in weighted) / sum(weight for _v, weight in weighted)
+
+
+def classify_segments(segments: Iterable[TranscriptionSegment]) -> list[TranscriptionSegment]:
+    return [
+        TranscriptionSegment(
+            segment.speaker_label,
+            segment.start_ms,
+            segment.end_ms,
+            segment.text,
+            segment.confidence,
+            classify_sentence(segment.text),
+        )
+        for segment in segments
+    ]
 
 
 def extract_audio_from_video(video_path: str | Path, output_path: str | Path) -> Path:
@@ -373,8 +572,8 @@ def save_transcripts(
                 """
                 INSERT INTO transcription_segments(
                     meeting_id, speaker_label, person_id, start_ms, end_ms,
-                    text, confidence, created_at
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
+                    text, confidence, sentence_type, created_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
                 """,
                 [
                     (
@@ -385,12 +584,37 @@ def save_transcripts(
                         segment.end_ms,
                         apply_text_cleanup(segment.text),
                         segment.confidence,
+                        segment.sentence_type,
                     )
                     for segment in segments
                 ],
             )
 
     return paths
+
+
+def reanalyze_meeting_segments(meeting_id: int) -> int:
+    """Re-merge and re-classify a meeting's stored segments without re-transcribing."""
+    with sqlite3.connect(config.DB_PATH) as connection:
+        rows = connection.execute(
+            """
+            SELECT speaker_label, start_ms, end_ms, text, confidence
+            FROM transcription_segments WHERE meeting_id=? ORDER BY start_ms
+            """,
+            (meeting_id,),
+        ).fetchall()
+    sentences = classify_segments(merge_speaker_sentences(absorb_minor_speakers(
+        TranscriptionSegment(*row) for row in rows
+    )))
+    meeting_dir = Path(config.TRANSCRIPTS_DIR) / str(meeting_id)
+    for stale_path in meeting_dir.glob("*.txt"):
+        try:
+            stale_path.unlink(missing_ok=True)
+        except OSError:
+            # Windows refuses to delete files another process has open.
+            logger.warning("Could not remove stale transcript %s", stale_path)
+    save_transcripts(sentences, meeting_dir, meeting_id)
+    return len(sentences)
 
 
 def process_meeting_transcription(
@@ -441,24 +665,8 @@ def process_meeting_transcription(
             )
             for segment in segments
         ]
-        save_transcripts(cleaned_segments, meeting_dir, meeting_id)
-
-        if config.WHISPER_TRANSLATION_ENABLED:
-            translated_segments = transcribe_with_diarization(
-                audio_path,
-                model_size=config.WHISPER_MODEL,
-                diarize=diarize,
-                task="translate",
-            )
-            save_transcripts(
-                translated_segments,
-                meeting_dir / "english_translation",
-            )
-            logger.info(
-                "Saved %d English translation segments for meeting %s",
-                len(translated_segments),
-                meeting_id,
-            )
+        sentences = classify_segments(merge_speaker_sentences(absorb_minor_speakers(cleaned_segments)))
+        save_transcripts(sentences, meeting_dir, meeting_id)
 
         with sqlite3.connect(config.DB_PATH) as connection:
             connection.execute(

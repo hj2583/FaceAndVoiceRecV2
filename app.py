@@ -1,3 +1,4 @@
+import html
 import json
 import os
 import sqlite3
@@ -47,12 +48,23 @@ from database import (
     delete_unknown,
     resolve_unknown,
     resolve_unknown_voice,
+    update_transcription_segments,
 )
 from face_core import FaceIndex
 from realtime_launcher import launch_realtime
 from video_processor import process_video_pipeline
-from transcription_core import extract_audio_from_video, process_meeting_transcription
+from transcription_core import (
+    SENTENCE_TYPES,
+    TranscriptionSegment,
+    extract_audio_from_video,
+    group_transcript_turns,
+    process_meeting_transcription,
+    reanalyze_meeting_segments,
+)
 import voice_core
+
+LOW_CONFIDENCE_WARN = 0.7
+LOW_CONFIDENCE_BAD = 0.5
 
 
 st.set_page_config(
@@ -891,9 +903,25 @@ def render_transcripts():
     )
 
     with sqlite3.connect(DB_PATH) as connection:
+        needs_analysis = connection.execute(
+            f"""
+            SELECT 1 FROM transcription_segments
+            WHERE meeting_id=? AND (
+                sentence_type IS NULL
+                OR sentence_type NOT IN ({",".join("?" * len(SENTENCE_TYPES))})
+            )
+            LIMIT 1
+            """,
+            (selected_id, *SENTENCE_TYPES),
+        ).fetchone()
+    if needs_analysis or st.button("Re-merge & classify sentences", key=f"reanalyze_{selected_id}"):
+        with st.spinner("Merging speaker turns and classifying sentences..."):
+            reanalyze_meeting_segments(selected_id)
+
+    with sqlite3.connect(DB_PATH) as connection:
         rows = connection.execute(
             """
-            SELECT speaker_label, start_ms, end_ms, text, confidence
+            SELECT speaker_label, start_ms, end_ms, text, confidence, sentence_type, segment_id
             FROM transcription_segments
             WHERE meeting_id=? ORDER BY start_ms
             """,
@@ -910,24 +938,138 @@ def render_transcripts():
                 "Speaker": speaker,
                 "Start": fmt_time(start_ms / 1000),
                 "End": fmt_time(end_ms / 1000),
+                "Type": sentence_type or "",
                 "Text": text,
                 "Confidence": confidence,
+                "segment_id": segment_id,
             }
-            for speaker, start_ms, end_ms, text, confidence in rows
+            for speaker, start_ms, end_ms, text, confidence, sentence_type, segment_id in rows
         ]
     )
 
-    original_tab, translation_tab = st.tabs(
-        ["Original transcript", "English translation"]
-    )
+    with st.container():
+        present_types = [t for t in SENTENCE_TYPES if t in set(original_data["Type"])]
+        selected_types = st.multiselect(
+            "Filter by type",
+            present_types,
+            key=f"type_filter_{selected_id}",
+        )
+        visible_data = (
+            original_data[original_data["Type"].isin(selected_types)]
+            if selected_types
+            else original_data
+        )
 
-    with original_tab:
-        st.dataframe(original_data, width="stretch")
+        st.caption(
+            f"Confidence below {LOW_CONFIDENCE_WARN} is yellow, "
+            f"below {LOW_CONFIDENCE_BAD} is red. Consecutive entries by the same speaker are shown together."
+        )
+        display_segments = [
+            TranscriptionSegment(
+                speaker,
+                start_ms,
+                end_ms,
+                text,
+                confidence,
+                sentence_type,
+            )
+            for speaker, start_ms, end_ms, text, confidence, sentence_type, _segment_id in rows
+        ]
+        for turn in group_transcript_turns(display_segments):
+            shown_segments = [
+                segment for segment in turn
+                if not selected_types or segment.sentence_type in selected_types
+            ]
+            if not shown_segments:
+                continue
+
+            start_ms = shown_segments[0].start_ms
+            end_ms = shown_segments[-1].end_ms
+            turn_types = list(dict.fromkeys(
+                segment.sentence_type for segment in shown_segments
+                if segment.sentence_type
+            ))
+            confidences = [
+                segment.confidence for segment in shown_segments
+                if segment.confidence is not None
+            ]
+            lowest_confidence = min(confidences) if confidences else None
+            if lowest_confidence is None or lowest_confidence < LOW_CONFIDENCE_BAD:
+                background = "#ffb3b3"
+            elif lowest_confidence < LOW_CONFIDENCE_WARN:
+                background = "#fff3b0"
+            else:
+                background = "transparent"
+
+            confidence_label = (
+                f"Lowest confidence {lowest_confidence:.2f}"
+                if lowest_confidence is not None else "Confidence unavailable"
+            )
+            type_label = ", ".join(turn_types) if turn_types else "Unclassified"
+            text_color = "#111" if background != "transparent" else "inherit"
+            st.caption(
+                f"{shown_segments[0].speaker_label} · "
+                f"{fmt_time(start_ms / 1000)}–{fmt_time(end_ms / 1000)} · "
+                f"{type_label} · {confidence_label}"
+            )
+            turn_text = " ".join(segment.text.strip() for segment in shown_segments)
+            st.markdown(
+                f'<div style="background-color:{background};color:{text_color};padding:0.2rem 0.35rem;'
+                f'white-space:pre-wrap;overflow-wrap:anywhere;margin-bottom:0.8rem">'
+                f'{html.escape(turn_text)}</div>',
+                unsafe_allow_html=True,
+            )
+
+        low_confidence = visible_data[
+            visible_data["Confidence"].isna()
+            | (visible_data["Confidence"] < LOW_CONFIDENCE_WARN)
+        ]
+        if not low_confidence.empty:
+            st.subheader(f"Review low-confidence sentences ({len(low_confidence)})")
+            edited = st.data_editor(
+                low_confidence,
+                key=f"low_conf_editor_{selected_id}",
+                width="stretch",
+                hide_index=True,
+                disabled=["Speaker", "Start", "End", "Confidence"],
+                column_config={
+                    "segment_id": None,
+                    "Type": st.column_config.SelectboxColumn(
+                        "Type", options=list(SENTENCE_TYPES), required=True
+                    ),
+                    "Text": st.column_config.TextColumn("Text", width="large", required=True),
+                    "Confidence": st.column_config.NumberColumn("Confidence", format="%.2f"),
+                },
+            )
+            if st.button("Save corrections", key=f"save_corrections_{selected_id}"):
+                original_by_id = low_confidence.set_index("segment_id")
+                updates = []
+                for record in edited.to_dict("records"):
+                    before = original_by_id.loc[record["segment_id"]]
+                    text = str(record["Text"]).strip()
+                    if not text:
+                        continue
+                    text_changed = text != before["Text"]
+                    if text_changed or record["Type"] != before["Type"]:
+                        updates.append({
+                            "segment_id": int(record["segment_id"]),
+                            "text": text,
+                            "sentence_type": record["Type"] or None,
+                            # A human-corrected sentence is no longer low confidence.
+                            "confidence": 1.0 if text_changed else before["Confidence"],
+                        })
+                if updates:
+                    update_transcription_segments(selected_id, updates)
+                    st.success(f"Saved {len(updates)} correction(s).")
+                    st.rerun()
+                else:
+                    st.info("No changes to save.")
 
         original_lines = []
-        for speaker, start_ms, _end_ms, text, _confidence in rows:
+        for speaker, start_ms, _end_ms, text, _confidence, sentence_type, _segment_id in rows:
+            type_tag = f" ({sentence_type})" if sentence_type else ""
             original_lines.append(
-                f"[{fmt_time(start_ms / 1000)}] {speaker}: {text}"
+                f"[{fmt_time(start_ms / 1000)}] {speaker}{type_tag}: {text}"
             )
         st.download_button(
             "Download original transcript",
@@ -936,59 +1078,6 @@ def render_transcripts():
             mime="text/plain",
             key=f"download_original_{selected_id}",
         )
-
-    with translation_tab:
-        translation_dir = TRANSCRIPTS_DIR / str(selected_id) / "english_translation"
-        translation_files = sorted(translation_dir.glob("*.txt")) if translation_dir.exists() else []
-
-        if not translation_files:
-            st.info(
-                "No English translation is available for this meeting. "
-                "Set WHISPER_TRANSLATION_ENABLED = True and transcribe the video again."
-            )
-        else:
-            speaker_by_file_stem = {}
-            for speaker, *_rest in rows:
-                stem = "_".join(
-                    part
-                    for part in "".join(
-                        character if character.isalnum() else " "
-                        for character in speaker.lower()
-                    ).split()
-                    if part
-                ) or "unknown_speaker"
-                speaker_by_file_stem[stem] = speaker
-
-            translation_rows = []
-            for translation_file in translation_files:
-                speaker = speaker_by_file_stem.get(
-                    translation_file.stem,
-                    translation_file.stem.replace("_", " ").title(),
-                )
-                for line in translation_file.read_text(encoding="utf-8").splitlines():
-                    if line.startswith("[") and "]" in line:
-                        timestamp, text = line.split("]", 1)
-                        translation_rows.append({
-                            "Speaker": speaker,
-                            "Time": timestamp.strip("[]"),
-                            "English translation": text.strip(),
-                        })
-
-            if translation_rows:
-                st.dataframe(pd.DataFrame(translation_rows), width="stretch")
-                st.download_button(
-                    "Download English translation",
-                    "\n".join(
-                        f"[{row['Time']}] {row['Speaker']}: {row['English translation']}"
-                        for row in translation_rows
-                    ),
-                    file_name=f"meeting_{selected_id}_english.txt",
-                    mime="text/plain",
-                    key=f"download_translation_{selected_id}",
-                )
-            else:
-                st.warning("The translation folder exists, but contains no readable transcript lines.")
-
 
 def render_voice_enrollment():
     st.header("🎙️ Voice Enrollment")

@@ -5,10 +5,121 @@ import database
 
 from transcription_core import (
     TranscriptionSegment,
+    absorb_minor_speakers,
     apply_text_cleanup,
+    classify_segments,
+    classify_sentence,
+    group_transcript_turns,
+    merge_speaker_sentences,
     process_meeting_transcription,
     save_transcripts,
 )
+
+
+def test_merge_joins_whole_same_speaker_turn():
+    segments = [
+        TranscriptionSegment("Alice", 0, 1000, "So the budget", 0.8),
+        TranscriptionSegment("Alice", 1200, 2000, "is approved.", 0.6),
+        TranscriptionSegment("Alice", 2100, 3000, "Next point", 0.9),
+        TranscriptionSegment("Bob", 3100, 4000, "Okay", 0.9),
+    ]
+
+    merged = merge_speaker_sentences(segments, max_gap_ms=1500, max_chars=400)
+
+    assert [(s.speaker_label, s.text) for s in merged] == [
+        ("Alice", "So the budget is approved. Next point"),
+        ("Bob", "Okay"),
+    ]
+    assert merged[0].start_ms == 0 and merged[0].end_ms == 3000
+
+
+def test_merge_weights_confidence_by_duration():
+    merged = merge_speaker_sentences([
+        TranscriptionSegment("Alice", 0, 1000, "So the budget", 0.8),
+        TranscriptionSegment("Alice", 1200, 2000, "is approved.", 0.6),
+    ], max_gap_ms=1500, max_chars=400)
+
+    assert abs(merged[0].confidence - (0.8 * 1000 + 0.6 * 800) / 1800) < 1e-6
+
+
+def test_merge_long_turn_only_splits_at_sentence_boundary():
+    segments = [
+        TranscriptionSegment("Alice", 0, 1000, "a" * 10),
+        TranscriptionSegment("Alice", 1000, 2000, "b" * 10),
+        TranscriptionSegment("Alice", 2000, 3000, "end."),
+        TranscriptionSegment("Alice", 3000, 4000, "next"),
+    ]
+
+    merged = merge_speaker_sentences(segments, max_gap_ms=1500, max_chars=15)
+
+    assert [s.text for s in merged] == [f"{'a' * 10} {'b' * 10} end.", "next"]
+
+
+def test_merge_does_not_join_across_long_pause():
+    segments = [
+        TranscriptionSegment("Alice", 0, 1000, "first part"),
+        TranscriptionSegment("Alice", 5000, 6000, "second part"),
+    ]
+
+    assert len(merge_speaker_sentences(segments, max_gap_ms=1500, max_chars=400)) == 2
+
+
+def test_group_transcript_turns_keeps_adjacent_same_speaker_entries_together():
+    segments = [
+        TranscriptionSegment("Alice", 0, 1000, "First sentence.", sentence_type="Comment"),
+        TranscriptionSegment("Alice", 2000, 3000, "Second sentence.", sentence_type="Question"),
+        TranscriptionSegment("Bob", 4000, 5000, "Reply.", sentence_type="Comment"),
+        TranscriptionSegment("Alice", 20_000, 21_000, "Later turn.", sentence_type="Comment"),
+    ]
+
+    turns = group_transcript_turns(segments, max_gap_ms=10_000)
+
+    assert [[segment.text for segment in turn] for turn in turns] == [
+        ["First sentence.", "Second sentence."],
+        ["Reply."],
+        ["Later turn."],
+    ]
+
+
+def test_classify_sentence_rules():
+    assert classify_sentence("What is the timeline?") == "Question"
+    assert classify_sentence("Okay, so when do we start? I think May.") == "Question"
+    assert classify_sentence("Bilakah projek ini siap") == "Question"
+    assert classify_sentence("Moving on to the marketing plan.") == "Topic"
+    assert classify_sentence("Welcome to PBE Tutorial. In this video, we will guide you.") == "Topic"
+    assert classify_sentence("The sales grew ten percent last quarter.") == "Comment"
+    assert classify_sentence("Okay.") == "Comment"
+    assert classify_sentence("2.") == "Unknown"
+    assert classify_sentence("Um, uh...") == "Unknown"
+
+
+def test_absorb_minor_speakers_relabels_stray_unknown_fragments():
+    segments = [
+        TranscriptionSegment("Unknown Speaker 35", 0, 20_000, "Long intro"),
+        TranscriptionSegment("Unknown Speaker", 20_500, 21_000, "1."),
+        TranscriptionSegment("Unknown Speaker 36", 21_500, 23_000, "Display screen. The"),
+        TranscriptionSegment("Unknown Speaker 35", 23_000, 40_000, "token switches off."),
+        TranscriptionSegment("Alice", 41_000, 42_000, "Hi."),
+    ]
+
+    result = absorb_minor_speakers(segments, blip_ms=3000, minor_total_ms=8000)
+
+    assert [s.speaker_label for s in result] == [
+        "Unknown Speaker 35",
+        "Unknown Speaker 35",
+        "Unknown Speaker 35",
+        "Unknown Speaker 35",
+        "Alice",
+    ]
+
+
+def test_classify_segments_labels_each_turn():
+    classified = classify_segments([
+        TranscriptionSegment("Alice", 0, 1000, "When is the launch?"),
+        TranscriptionSegment("Bob", 1000, 2000, "Early next month."),
+    ])
+
+    assert [s.sentence_type for s in classified] == ["Question", "Comment"]
 
 
 def test_cleanup_normalizes_whitespace():
@@ -164,6 +275,86 @@ def test_transcribe_with_diarization_splits_word_timestamps_at_speaker_change(tm
     ]
 
 
+def test_update_transcription_segments_saves_corrections_and_rewrites_files(tmp_path, monkeypatch):
+    db_path = tmp_path / "meeting.db"
+    monkeypatch.setattr(config, "DB_PATH", db_path)
+    monkeypatch.setattr(database, "DB_PATH", db_path)
+    monkeypatch.setattr(config, "TRANSCRIPTS_DIR", tmp_path / "transcripts")
+    database.init_db()
+
+    video_path = tmp_path / "meeting.mp4"
+    video_path.write_bytes(b"video")
+
+    def fake_extract(_video_path, output_path):
+        output_path.parent.mkdir(parents=True, exist_ok=True)
+        output_path.write_bytes(b"audio")
+        return output_path
+
+    monkeypatch.setattr("transcription_core.extract_audio_from_video", fake_extract)
+    monkeypatch.setattr(
+        "transcription_core.transcribe_with_diarization",
+        lambda *_a, **_k: [TranscriptionSegment("Ivy", 0, 1000, "helo wrld.", 0.4)],
+    )
+    meeting_id = process_meeting_transcription(video_path)
+
+    with database.get_conn() as connection:
+        segment_id = connection.execute(
+            "SELECT segment_id FROM transcription_segments WHERE meeting_id=?",
+            (meeting_id,),
+        ).fetchone()[0]
+
+    database.update_transcription_segments(meeting_id, [{
+        "segment_id": segment_id,
+        "text": "Hello world.",
+        "sentence_type": "Topic",
+        "confidence": 1.0,
+    }])
+
+    with database.get_conn() as connection:
+        row = connection.execute(
+            "SELECT text, sentence_type, confidence FROM transcription_segments WHERE segment_id=?",
+            (segment_id,),
+        ).fetchone()
+    assert row == ("Hello world.", "Topic", 1.0)
+    assert (config.TRANSCRIPTS_DIR / str(meeting_id) / "ivy.txt").read_text(encoding="utf-8") == "[00:00] Hello world.\n"
+
+
+def test_reanalyze_meeting_segments_merges_and_classifies_old_rows(tmp_path, monkeypatch):
+    db_path = tmp_path / "meeting.db"
+    monkeypatch.setattr(config, "DB_PATH", db_path)
+    monkeypatch.setattr(database, "DB_PATH", db_path)
+    monkeypatch.setattr(config, "TRANSCRIPTS_DIR", tmp_path / "transcripts")
+    database.init_db()
+
+    from transcription_core import reanalyze_meeting_segments
+
+    with database.get_conn() as connection:
+        connection.execute(
+            "INSERT INTO meetings(video_path, created_at, transcription_status) VALUES ('v.mp4', 'now', 'completed')"
+        )
+        meeting_id = connection.execute("SELECT meeting_id FROM meetings").fetchone()[0]
+        connection.executemany(
+            """
+            INSERT INTO transcription_segments(meeting_id, speaker_label, start_ms, end_ms, text, confidence, created_at)
+            VALUES (?, ?, ?, ?, ?, ?, 'now')
+            """,
+            [
+                (meeting_id, "Speaker 35", 6000, 9000, "video, we will guide you on how to use the token", 0.9),
+                (meeting_id, "Speaker 35", 9000, 16000, "and perform signing. The token is a security device", 0.9),
+                (meeting_id, "Speaker 35", 16000, 24000, "so never reveal the pin to anyone.", 0.7),
+            ],
+        )
+
+    assert reanalyze_meeting_segments(meeting_id) == 1
+
+    with database.get_conn() as connection:
+        rows = connection.execute(
+            "SELECT start_ms, end_ms, sentence_type FROM transcription_segments WHERE meeting_id=?",
+            (meeting_id,),
+        ).fetchall()
+    assert rows == [(6000, 24000, "Topic")]
+
+
 def test_save_transcripts_groups_by_speaker(tmp_path: Path):
     segments = [
         TranscriptionSegment("Speaker A", 65_000, 70_000, "later"),
@@ -226,7 +417,7 @@ def test_process_meeting_transcription_persists_completed_segments(
     assert (config.TRANSCRIPTS_DIR / str(meeting_id) / "speaker_a.txt").exists()
 
 
-def test_process_meeting_transcription_writes_optional_english_translation(
+def test_process_meeting_transcription_does_not_run_english_translation(
     tmp_path: Path,
     monkeypatch,
 ):
@@ -234,7 +425,6 @@ def test_process_meeting_transcription_writes_optional_english_translation(
     monkeypatch.setattr(config, "DB_PATH", db_path)
     monkeypatch.setattr(database, "DB_PATH", db_path)
     monkeypatch.setattr(config, "TRANSCRIPTS_DIR", tmp_path / "transcripts")
-    monkeypatch.setattr(config, "WHISPER_TRANSLATION_ENABLED", True)
     database.init_db()
 
     video_path = tmp_path / "meeting.mp4"
@@ -258,9 +448,9 @@ def test_process_meeting_transcription_writes_optional_english_translation(
     meeting_id = process_meeting_transcription(video_path)
 
     meeting_dir = config.TRANSCRIPTS_DIR / str(meeting_id)
-    assert calls == [None, "translate"]
+    assert calls == [None]
     assert (meeting_dir / "alice.txt").read_text(encoding="utf-8") == "[00:00] Hola\n"
-    assert (meeting_dir / "english_translation" / "alice.txt").read_text(encoding="utf-8") == "[00:00] Hello\n"
+    assert not (meeting_dir / "english_translation").exists()
 
 
 def test_process_meeting_transcription_uses_voice_core_diarizer_by_default(tmp_path, monkeypatch):
