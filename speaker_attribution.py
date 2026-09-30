@@ -59,6 +59,8 @@ class SpeakerAttributor:
         self._current_track_id: Optional[int] = None
         self._current_open_since: Optional[float] = None
         self._current_confidence: float = 0.0
+        self._current_run_sum: float = 0.0
+        self._current_run_count: int = 0
         self._last_voice_at: Optional[float] = None
         self._closed_events: list[dict] = []
 
@@ -146,18 +148,19 @@ class SpeakerAttributor:
             self._log_debug(scored)
 
         if not voice_active:
-            return self._handle_silence(timestamp)
+            return self._handle_silence(timestamp, scored)
 
         self._last_voice_at = timestamp
 
         if not scored:
             if self._current_speaker is not None:
                 self._close_current_event(timestamp)
-            return self._result(timestamp, "UNKNOWN", None, 0.0, {})
+            reason = self._build_reason(timestamp, None, voice_confidence, scored)
+            return self._result(timestamp, "UNKNOWN", None, 0.0, reason)
 
         return self._decide(timestamp, voice_confidence, scored)
 
-    def _handle_silence(self, timestamp):
+    def _handle_silence(self, timestamp, scored):
         if self._current_speaker is None:
             return self._result(timestamp, None, None, 0.0, {})
 
@@ -166,9 +169,12 @@ class SpeakerAttributor:
             self._close_current_event(self._last_voice_at)
             return self._result(timestamp, None, None, 0.0, {})
 
+        reason = self._build_reason(
+            timestamp, self._current_track_id, 0.0, scored, {"grace_period": True},
+        )
         return self._result(
             timestamp, self._current_speaker, self._current_track_id,
-            self._current_confidence, {"grace_period": True},
+            self._current_confidence, reason,
         )
 
     def _decide(self, timestamp, voice_confidence, scored):
@@ -177,22 +183,41 @@ class SpeakerAttributor:
         label = observation.person_name if observation.person_id is not None else "UNKNOWN"
         smoothed = self._smoothed_score(observation.track_id, timestamp)
 
-        if self._current_track_id is None:
+        incumbent_id = self._current_track_id
+        incumbent_smoothed = self._smoothed_score(incumbent_id, timestamp) if incumbent_id is not None else 0.0
+
+        if incumbent_id is None:
             switch = best["score"] >= self._min_confidence
-        elif observation.track_id == self._current_track_id:
+        elif observation.track_id == incumbent_id:
             switch = True
         else:
-            incumbent_smoothed = self._smoothed_score(self._current_track_id, timestamp)
             switch = (
                 smoothed >= self._min_confidence
                 and smoothed - incumbent_smoothed >= self._switch_threshold
             )
 
+        challenger_switching = switch and incumbent_id is not None and observation.track_id != incumbent_id
+
+        if incumbent_id is not None and not challenger_switching and incumbent_smoothed < self._min_confidence:
+            # Weak incumbent: demote on the smoothed score, not this frame's flicker.
+            self._close_current_event(timestamp)
+            reason = self._build_reason(timestamp, None, voice_confidence, scored)
+            return self._result(timestamp, "UNKNOWN", None, 0.0, reason)
+
         if not switch:
             if self._current_speaker is not None:
+                current_score = self._find_score(incumbent_id, scored)
+                reported_confidence = current_score if current_score is not None else incumbent_smoothed
+                if current_score is not None:
+                    self._current_run_sum += current_score
+                    self._current_run_count += 1
+                self._current_confidence = reported_confidence
+                reason = self._build_reason(
+                    timestamp, incumbent_id, voice_confidence, scored, {"held_incumbent": True},
+                )
                 return self._result(
                     timestamp, self._current_speaker, self._current_track_id,
-                    self._current_confidence, {"held_incumbent": True},
+                    reported_confidence, reason,
                 )
             label = "UNKNOWN"
 
@@ -202,29 +227,59 @@ class SpeakerAttributor:
             self._current_speaker = label
             self._current_track_id = observation.track_id
             self._current_open_since = timestamp
+            self._current_run_sum = best["score"]
+            self._current_run_count = 1
+        else:
+            self._current_run_sum += best["score"]
+            self._current_run_count += 1
 
         self._current_confidence = best["score"]
-        reason = {
-            "voice_activity": voice_confidence,
-            "mouth_motion": best["motion_score"],
-            "face_confidence": observation.face_confidence,
-            "temporal_consistency": smoothed,
-        }
+        reason = self._build_reason(timestamp, observation.track_id, voice_confidence, scored)
         return self._result(timestamp, label, observation.track_id, best["score"], reason)
+
+    def _find_entry(self, track_id, scored):
+        for item in scored:
+            if item["observation"].track_id == track_id:
+                return item
+        return None
+
+    def _find_score(self, track_id, scored):
+        entry = self._find_entry(track_id, scored)
+        return entry["score"] if entry is not None else None
+
+    def _build_reason(self, timestamp, track_id, voice_activity, scored, extra=None):
+        entry = self._find_entry(track_id, scored)
+        mouth_motion = entry["motion_score"] if entry is not None else 0.0
+        face_confidence = entry["observation"].face_confidence if entry is not None else 0.0
+        reason = {
+            "voice_activity": voice_activity,
+            "mouth_motion": mouth_motion,
+            "face_confidence": face_confidence,
+            "temporal_consistency": self._smoothed_score(track_id, timestamp),
+        }
+        if extra:
+            reason.update(extra)
+        return reason
 
     def _close_current_event(self, timestamp):
         if self._current_speaker is not None and self._current_open_since is not None:
+            if self._current_run_count > 0:
+                confidence = self._current_run_sum / self._current_run_count
+            else:
+                confidence = self._current_confidence
             self._closed_events.append({
                 "speaker": self._current_speaker,
                 "track_id": self._current_track_id,
                 "start_time": self._current_open_since,
                 "end_time": timestamp,
-                "confidence": self._current_confidence,
+                "confidence": confidence,
             })
         self._current_speaker = None
         self._current_track_id = None
         self._current_open_since = None
         self._current_confidence = 0.0
+        self._current_run_sum = 0.0
+        self._current_run_count = 0
 
     def _result(self, timestamp, speaker, track_id, confidence, reason):
         result = {"timestamp": timestamp, "active_speaker": speaker}

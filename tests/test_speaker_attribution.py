@@ -158,3 +158,105 @@ def test_unknown_face_can_be_the_active_speaker():
     )
     assert result["active_speaker"] == "UNKNOWN"
     assert result["track_id"] == 12
+
+
+_REASON_KEYS = ("voice_activity", "mouth_motion", "face_confidence", "temporal_consistency")
+
+
+def test_reason_has_all_four_keys_on_held_incumbent_path():
+    attributor = SpeakerAttributor()
+    attributor.update_audio(1.0, True, 1.0)
+    attributor.update_faces(
+        1.0,
+        [
+            _observation(1, person_name="Alice", face_confidence=0.9, lip_open_ratio=0.05),
+            _observation(2, person_id=2, person_name="Bob", face_confidence=0.1, lip_open_ratio=0.0),
+        ],
+    )
+
+    attributor.update_audio(1.1, True, 1.0)
+    result = attributor.update_faces(
+        1.1,
+        [
+            _observation(1, person_name="Alice", face_confidence=0.9, lip_open_ratio=0.05),
+            # Raw score briefly beats Alice's, but not by enough on the smoothed score to switch.
+            _observation(2, person_id=2, person_name="Bob", face_confidence=1.0, lip_open_ratio=0.5),
+        ],
+    )
+    assert result["active_speaker"] == "Alice"
+    assert result["reason"]["held_incumbent"] is True
+    for key in _REASON_KEYS:
+        assert key in result["reason"]
+
+
+def test_reason_has_all_four_keys_on_grace_path():
+    attributor = SpeakerAttributor()
+    attributor.update_audio(1.0, True, 1.0)
+    attributor.update_faces(1.0, [_observation(1, person_name="Alice", face_confidence=0.9)])
+
+    attributor.update_audio(1.1, False)
+    result = attributor.update_faces(1.1, [_observation(1, person_name="Alice", face_confidence=0.9)])
+    assert result["active_speaker"] == "Alice"
+    assert result["reason"]["grace_period"] is True
+    assert result["reason"]["voice_activity"] == 0.0
+    for key in _REASON_KEYS:
+        assert key in result["reason"]
+
+
+def test_reason_has_all_four_keys_on_no_faces_path():
+    attributor = SpeakerAttributor()
+    attributor.update_audio(1.0, True, 0.9)
+    result = attributor.update_faces(1.0, [])
+    assert result["active_speaker"] == "UNKNOWN"
+    assert result["reason"]["voice_activity"] == 0.9
+    assert result["reason"]["mouth_motion"] == 0.0
+    assert result["reason"]["face_confidence"] == 0.0
+    for key in _REASON_KEYS:
+        assert key in result["reason"]
+
+
+def test_weak_incumbent_is_demoted_using_smoothed_score():
+    attributor = SpeakerAttributor()
+    attributor.update_audio(1.0, True, 1.0)
+    attributor.update_faces(1.0, [_observation(1, person_name="Alice", face_confidence=0.9)])
+
+    result = None
+    t = 1.0
+    for _ in range(30):
+        t = round(t + 0.05, 2)
+        attributor.update_audio(t, True, 0.0)
+        result = attributor.update_faces(t, [_observation(1, person_name="Alice", face_confidence=0.05)])
+        if result["active_speaker"] == "UNKNOWN":
+            break
+
+    assert result["active_speaker"] == "UNKNOWN"
+    assert result["track_id"] is None
+    assert any(event["speaker"] == "Alice" for event in attributor._closed_events)
+
+
+def test_closed_event_confidence_is_mean_of_run_scores():
+    attributor = SpeakerAttributor()
+    attributor.update_audio(1.0, True, 1.0)
+    attributor.update_faces(1.0, [_observation(1, person_name="Alice", face_confidence=0.9)])
+
+    attributor.update_audio(1.1, True, 1.0)
+    attributor.update_faces(1.1, [_observation(1, person_name="Alice", face_confidence=0.9)])
+
+    grace_s = config.SPEAKER_GRACE_PERIOD_MS / 1000.0
+    silent_t = round(1.1 + grace_s + 0.1, 2)
+    attributor.update_audio(silent_t, False)
+    attributor.update_faces(silent_t, [_observation(1, person_name="Alice", face_confidence=0.9)])
+
+    assert len(attributor._closed_events) == 1
+    event = attributor._closed_events[0]
+
+    # Frame 1: Alice is not yet the incumbent (no temporal bonus).
+    score_1 = config.VOICE_ACTIVITY_WEIGHT * 1.0 + config.FACE_CONFIDENCE_WEIGHT * 0.9
+    # Frame 2: Alice is the incumbent (temporal bonus); lip ratio unchanged so mouth motion is 0.
+    score_2 = (
+        config.VOICE_ACTIVITY_WEIGHT * 1.0
+        + config.FACE_CONFIDENCE_WEIGHT * 0.9
+        + config.TEMPORAL_WEIGHT * 1.0
+    )
+    expected_mean = (score_1 + score_2) / 2
+    assert abs(event["confidence"] - expected_mean) < 1e-6
