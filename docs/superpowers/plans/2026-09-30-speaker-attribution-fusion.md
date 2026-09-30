@@ -382,7 +382,7 @@ class SpeakerAttributor:
         self._current_track_id: Optional[int] = None
         self._current_open_since: Optional[float] = None
         self._current_confidence: float = 0.0
-        self._silence_started_at: Optional[float] = None
+        self._last_voice_at: Optional[float] = None
         self._closed_events: list[dict] = []
 
     # ------------------------------------------------------------------
@@ -530,25 +530,33 @@ def test_does_not_flip_on_single_frame_fluctuation():
     assert result["active_speaker"] == "Alice"
 
 
-def test_switches_after_sustained_margin():
-    attributor = SpeakerAttributor()
-    for t in (1.0, 1.1, 1.2, 1.3):
+def _run_alice_then_bob(attributor):
+    """Alice speaks alone at t=1.0; from t=1.1 Bob appears with a moving
+    mouth while Alice's mouth is still. Returns the first time Bob wins."""
+    attributor.update_audio(1.0, True, 1.0)
+    attributor.update_faces(1.0, [_observation(1, person_name="Alice", face_confidence=0.9)])
+    switch_time = None
+    for i in range(1, 11):
+        t = round(1.0 + 0.1 * i, 2)
         attributor.update_audio(t, True, 1.0)
-        attributor.update_faces(
+        result = attributor.update_faces(
             t,
             [
-                _observation(1, person_name="Alice", face_confidence=0.5),
-                _observation(2, person_name="Bob", face_confidence=0.95),
+                _observation(1, person_name="Alice", face_confidence=0.9, lip_open_ratio=0.05),
+                _observation(2, person_id=2, person_name="Bob", face_confidence=0.9,
+                             lip_open_ratio=0.0 if i % 2 else 0.06),
             ],
         )
-    result = attributor.update_faces(
-        1.3,
-        [
-            _observation(1, person_name="Alice", face_confidence=0.5),
-            _observation(2, person_name="Bob", face_confidence=0.95),
-        ],
-    )
-    assert result["active_speaker"] == "Bob"
+        if result["active_speaker"] == "Bob" and switch_time is None:
+            switch_time = t
+    return switch_time
+
+
+def test_switches_after_sustained_margin_not_immediately():
+    attributor = SpeakerAttributor()
+    switch_time = _run_alice_then_bob(attributor)
+    assert switch_time is not None
+    assert switch_time > 1.1
 
 
 def test_grace_period_keeps_speaker_through_brief_silence():
@@ -567,6 +575,8 @@ def test_speaker_becomes_none_after_grace_period_expires():
     attributor.update_faces(1.0, [_observation(1, person_name="Alice", face_confidence=0.9)])
 
     grace_s = config.SPEAKER_GRACE_PERIOD_MS / 1000.0
+    # Grace is measured from the last voiced timestamp, so a single silent
+    # update past the grace window must already end the run.
     attributor.update_audio(1.0 + grace_s + 0.1, False)
     result = attributor.update_faces(1.0 + grace_s + 0.1, [_observation(1, person_name="Alice", face_confidence=0.9)])
     assert result["active_speaker"] is None
@@ -610,7 +620,7 @@ Append to the `SpeakerAttributor` class in `speaker_attribution.py`:
         if not voice_active:
             return self._handle_silence(timestamp)
 
-        self._silence_started_at = None
+        self._last_voice_at = timestamp
 
         if not scored:
             if self._current_speaker is not None:
@@ -623,10 +633,9 @@ Append to the `SpeakerAttributor` class in `speaker_attribution.py`:
         if self._current_speaker is None:
             return self._result(timestamp, None, None, 0.0, {})
 
-        if self._silence_started_at is None:
-            self._silence_started_at = timestamp
-        elif timestamp - self._silence_started_at >= self._grace_period_s:
-            self._close_current_event(timestamp)
+        if timestamp - self._last_voice_at >= self._grace_period_s:
+            # The run ended when voice stopped, not when the grace window expired.
+            self._close_current_event(self._last_voice_at)
             return self._result(timestamp, None, None, 0.0, {})
 
         return self._result(
@@ -688,7 +697,6 @@ Append to the `SpeakerAttributor` class in `speaker_attribution.py`:
         self._current_track_id = None
         self._current_open_since = None
         self._current_confidence = 0.0
-        self._silence_started_at = None
 
     def _result(self, timestamp, speaker, track_id, confidence, reason):
         result = {"timestamp": timestamp, "active_speaker": speaker}
@@ -723,14 +731,14 @@ git commit -m "feat(speaker_attribution): add hysteresis, grace period, and deci
 
 ---
 
-### Task 5: Speaker events — `pop_closed_events`
+### Task 5: Speaker events — `pop_closed_events` and `finish`
 
 **Files:**
-- Modify: `speaker_attribution.py` (already implements `_close_current_event`; this task adds the public accessor and covers boundary cases)
+- Modify: `speaker_attribution.py` (already implements `_close_current_event`; this task adds the public accessors and covers boundary cases)
 - Modify: `tests/test_speaker_attribution.py`
 
 **Interfaces:**
-- Produces: `SpeakerAttributor.pop_closed_events() -> list[dict]` with keys `speaker`, `track_id`, `start_time`, `end_time`, `confidence`. Consumed by Tasks 6, 7.
+- Produces: `SpeakerAttributor.pop_closed_events() -> list[dict]` with keys `speaker`, `track_id`, `start_time`, `end_time`, `confidence`; `SpeakerAttributor.finish() -> None`, which closes any still-open run at the last voiced timestamp (called once when a pipeline ends so the final speaker run is not lost). Consumed by Tasks 6, 7.
 
 - [ ] **Step 1: Write the failing tests**
 
@@ -744,47 +752,55 @@ def test_pop_closed_events_returns_empty_list_initially():
 
 def test_switching_speaker_closes_previous_event():
     attributor = SpeakerAttributor()
-    for t in (1.0, 1.1, 1.2, 1.3):
-        attributor.update_audio(t, True, 1.0)
-        attributor.update_faces(
-            t,
-            [
-                _observation(1, person_name="Alice", face_confidence=0.5),
-                _observation(2, person_name="Bob", face_confidence=0.95),
-            ],
-        )
-    attributor.update_faces(
-        1.3,
-        [
-            _observation(1, person_name="Alice", face_confidence=0.5),
-            _observation(2, person_name="Bob", face_confidence=0.95),
-        ],
-    )
+    switch_time = _run_alice_then_bob(attributor)
 
     events = attributor.pop_closed_events()
     assert len(events) == 1
     assert events[0]["speaker"] == "Alice"
+    assert events[0]["track_id"] == 1
     assert events[0]["start_time"] == 1.0
-    assert events[0]["end_time"] == 1.3
+    assert events[0]["end_time"] == switch_time
 
     # Draining again returns nothing new until another switch/close happens.
     assert attributor.pop_closed_events() == []
 
 
-def test_event_closes_when_speech_ends_after_grace_period():
+def test_event_closes_at_last_voiced_time_after_grace_period():
     attributor = SpeakerAttributor()
     attributor.update_audio(1.0, True, 1.0)
     attributor.update_faces(1.0, [_observation(1, person_name="Alice", face_confidence=0.9)])
+    attributor.update_audio(1.1, True, 1.0)
+    attributor.update_faces(1.1, [_observation(1, person_name="Alice", face_confidence=0.9)])
 
     grace_s = config.SPEAKER_GRACE_PERIOD_MS / 1000.0
-    end_t = 1.0 + grace_s + 0.1
-    attributor.update_audio(end_t, False)
-    attributor.update_faces(end_t, [_observation(1, person_name="Alice", face_confidence=0.9)])
+    silent_t = 1.1 + grace_s + 0.1
+    attributor.update_audio(silent_t, False)
+    attributor.update_faces(silent_t, [_observation(1, person_name="Alice", face_confidence=0.9)])
 
     events = attributor.pop_closed_events()
-    assert events == [{
-        "speaker": "Alice", "track_id": 1, "start_time": 1.0, "end_time": end_t, "confidence": events[0]["confidence"],
-    }]
+    assert len(events) == 1
+    assert (events[0]["speaker"], events[0]["track_id"], events[0]["start_time"], events[0]["end_time"]) == (
+        "Alice", 1, 1.0, 1.1,
+    )
+
+
+def test_finish_closes_open_run_at_last_voiced_time():
+    attributor = SpeakerAttributor()
+    attributor.update_audio(1.0, True, 1.0)
+    attributor.update_faces(1.0, [_observation(1, person_name="Alice", face_confidence=0.9)])
+    attributor.update_audio(1.2, True, 1.0)
+    attributor.update_faces(1.2, [_observation(1, person_name="Alice", face_confidence=0.9)])
+
+    attributor.finish()
+
+    events = attributor.pop_closed_events()
+    assert [(e["speaker"], e["start_time"], e["end_time"]) for e in events] == [("Alice", 1.0, 1.2)]
+
+
+def test_finish_without_open_run_produces_no_event():
+    attributor = SpeakerAttributor()
+    attributor.finish()
+    assert attributor.pop_closed_events() == []
 ```
 
 - [ ] **Step 2: Run tests to verify they fail**
@@ -792,7 +808,7 @@ def test_event_closes_when_speech_ends_after_grace_period():
 Run: `.\directmlvenv\Scripts\python.exe -m pytest tests/test_speaker_attribution.py -v`
 Expected: FAIL — `AttributeError: 'SpeakerAttributor' object has no attribute 'pop_closed_events'`
 
-- [ ] **Step 3: Add the accessor**
+- [ ] **Step 3: Add the accessors**
 
 Append to the `SpeakerAttributor` class:
 
@@ -804,6 +820,11 @@ Append to the `SpeakerAttributor` class:
     def pop_closed_events(self):
         events, self._closed_events = self._closed_events, []
         return events
+
+    def finish(self):
+        """Close any still-open speaker run; call once when a pipeline ends."""
+        if self._current_speaker is not None:
+            self._close_current_event(self._last_voice_at)
 ```
 
 - [ ] **Step 4: Run tests to verify they pass**
@@ -815,7 +836,7 @@ Expected: PASS (full file)
 
 ```powershell
 git add speaker_attribution.py tests/test_speaker_attribution.py
-git commit -m "feat(speaker_attribution): add pop_closed_events for speaker-run logging"
+git commit -m "feat(speaker_attribution): add pop_closed_events and finish for speaker-run logging"
 ```
 
 ---
@@ -837,41 +858,49 @@ Append to `tests/test_video_processor.py` (reusing this file's existing `_patch_
 def test_process_video_pipeline_logs_unknown_speaker_events(tmp_path, monkeypatch):
     """An unknown-but-speaking track must now produce an audio_logs event,
     where the old `if speaker.person_id is not None` guard used to drop it."""
-    capture = _FakeCapture(frame_count=1)
+    capture = _FakeCapture(frame_count=3)
     writer = _FakeWriter()
     _patch_common(monkeypatch, capture, writer)
+    monkeypatch.setattr(video_processor, "extract_audio_to_wav", lambda _p: tmp_path / "audio.wav")
     monkeypatch.setattr(video_processor, "detect_speech_segments", lambda *_a, **_k: [(0.0, 10.0)])
+    monkeypatch.setattr(video_processor, "extract_embedding", lambda *_a, **_k: None)
+    monkeypatch.setattr(video_processor, "lip_open_ratio", lambda _landmarks: 0.05)
 
-    class _Track:
-        def __init__(self):
-            self.track_id = 1
-            self.person_id = None
-            self.person_name = "Unknown"
-            self.confidence = 0.0
-            self.embedding = None
-            self.lip_open = 1.0
-            self.speech_frames = 0
-            self.silent_frames = 0
+    class _Landmarker:
+        def detect_for_video(self, *_a, **_k):
+            return SimpleNamespace(face_landmarks=[object()])
 
-    track = _Track()
+        def close(self):
+            return None
+
+    monkeypatch.setattr(video_processor, "create_face_landmarker", lambda: _Landmarker())
+
+    from tracking import Track
+
+    track = Track(track_id=1, center_x=30, center_y=30, area=3600)
     monkeypatch.setattr(
         video_processor, "CentroidTracker",
         lambda: SimpleNamespace(update=lambda dets, _n: [(dets[0], track)] if dets else [], tracks={1: track}),
     )
-    monkeypatch.setattr(video_processor, "detect_faces_tiled", lambda *_a, **_k: [(0, 0, 60, 60, 0.9)])
+    # 70x70 box: large enough for landmarks (LANDMARK_MIN_FACE_SIZE=60).
+    monkeypatch.setattr(video_processor, "detect_faces_tiled", lambda *_a, **_k: [(0, 0, 70, 70, 0.9)])
 
     logged = []
     monkeypatch.setattr(video_processor, "log_audio", lambda *args, **kwargs: logged.append((args, kwargs)))
 
     video_processor.process_video_pipeline(
-        Path("dummy.mp4"), tmp_path / "out.mp4", tmp_path / "log.json",
+        tmp_path / "in.mp4", tmp_path / "out.mp4", tmp_path / "log.json",
     )
 
-    assert logged, "an UNKNOWN speaking event should have been logged, not skipped"
+    assert len(logged) == 1, "the open UNKNOWN run must be flushed once when the video ends"
     args, kwargs = logged[0]
     # log_audio(start, end, person_id, person_name, confidence, source, track_id=...)
+    assert args[2] is None
     assert args[3] == "UNKNOWN"
+    assert args[5] == "video"
     assert kwargs["track_id"] == 1
+    speech = json.loads((tmp_path / "log.json").read_text(encoding="utf-8"))["speech"]
+    assert [entry["person_name"] for entry in speech] == ["UNKNOWN"]
 ```
 
 - [ ] **Step 2: Run test to verify it fails**
@@ -887,14 +916,43 @@ At the top of `video_processor.py`, add the import:
 from speaker_attribution import FaceObservation, SpeakerAttributor
 ```
 
-Where `speaking_candidates = []` is initialized per-frame (around `video_processor.py:586`), also build face observations instead:
+Next to `active_speech_logs = []` (`video_processor.py:~478`), create the attributor once per pipeline run and a logging helper shared by the per-frame drain and the end-of-video flush:
 
 ```python
-        speaking_candidates = []
-        face_observations = []
+    attributor = SpeakerAttributor()
+
+    def _log_speaker_events(events):
+        for event in events:
+            person_id = None
+            if event["speaker"] != "UNKNOWN":
+                speaker_track = tracker.tracks.get(event["track_id"])
+                person_id = speaker_track.person_id if speaker_track is not None else None
+            log_audio(
+                event["start_time"],
+                event["end_time"],
+                person_id,
+                event["speaker"],
+                event["confidence"],
+                "video",
+                track_id=event["track_id"],
+            )
+            active_speech_logs.append({
+                "start_time": round(event["start_time"], 2),
+                "end_time": round(event["end_time"], 2),
+                "person_name": event["speaker"],
+                "confidence": round(event["confidence"], 4),
+                "source": "video",
+            })
 ```
 
-Where each track currently appends to `speaking_candidates` (around `video_processor.py:960-966`), replace:
+In `_process`, replace `speaking_candidates = []` (`video_processor.py:586`) with:
+
+```python
+        face_observations = []
+        track_label_origins = {}
+```
+
+Where each track currently appends to `speaking_candidates` (around `video_processor.py:955-968`), replace:
 
 ```python
             if (
@@ -911,7 +969,7 @@ Where each track currently appends to `speaking_candidates` (around `video_proce
                 )
 ```
 
-with:
+with (tracks without landmarks have no lip signal and are not scored; if speech has no scored face the attributor reports `UNKNOWN`):
 
 ```python
             if track.lip_open is not None:
@@ -924,115 +982,46 @@ with:
                     lip_open_ratio=track.lip_open,
                     face_visible=True,
                 ))
+            track_label_origins[track.track_id] = (x0, max(20, y0 - 30))
 ```
 
-Before the frame loop begins (near `frame_no = 0` at `video_processor.py:~479`), instantiate the attributor once per pipeline run:
+In the same per-track loop, delete the now-meaningless label suffix block:
 
 ```python
-    attributor = SpeakerAttributor()
-```
-
-Replace the `# Select ONE active speaker` block (`video_processor.py:1037-1100`) — which today does:
-
-```python
-        if (
-            audio_is_speech
-            and
-            speaking_candidates
-        ):
-
-            speaker = max(
-                speaking_candidates,
-                key=lambda t:
-                    t.lip_open,
-            )
-
-            speaker.speech_frames += 1
-            speaker.silent_frames = 0
-
             if (
-                speaker.speech_frames
-                >= 2
+                track
+                in speaking_candidates
             ):
 
-                start = max(
-                    0.0,
-                    timestamp - 0.1,
-                )
-
-                end = timestamp
-
-                if (
-                    speaker.person_id
-                    is not None
-                ):
-
-                    log_audio(
-                        start,
-                        end,
-                        speaker.person_id,
-                        speaker.person_name,
-                        speaker.confidence,
-                        "video",
-                    )
-
-                    active_speech_logs.append(
-                        {
-                            "start_time": round(
-                                start,
-                                2,
-                            ),
-                            "end_time": round(
-                                end,
-                                2,
-                            ),
-                            "person_name": (
-                                speaker.person_name
-                            ),
-                            "confidence": round(
-                                speaker.confidence,
-                                4,
-                            ),
-                            "source": "video",
-                        }
-                    )
+                label += " [Speaking]"
 ```
 
-with:
+Replace the entire `# Select ONE active speaker` `if ... else:` block (`video_processor.py:1037-1116`, from `if (audio_is_speech and speaking_candidates):` through the `else:` branch that increments `track.silent_frames` — `speech_frames`/`silent_frames` are read nowhere else) with:
 
 ```python
         attributor.update_audio(timestamp, audio_is_speech)
         result = attributor.update_faces(timestamp, face_observations)
+        _log_speaker_events(attributor.pop_closed_events())
 
-        for event in attributor.pop_closed_events():
-            person_id = None
-            if event["speaker"] != "UNKNOWN":
-                match = next(
-                    (t for t in tracker.tracks.values() if t.track_id == event["track_id"]),
-                    None,
-                )
-                person_id = match.person_id if match is not None else None
-
-            log_audio(
-                event["start_time"],
-                event["end_time"],
-                person_id,
-                event["speaker"],
-                event["confidence"],
-                "video",
-                track_id=event["track_id"],
+        speaker_origin = track_label_origins.get(result.get("track_id"))
+        if result["active_speaker"] is not None and speaker_origin is not None:
+            cv2.putText(
+                frame,
+                f"{result['active_speaker']} [Speaking] {result['confidence']:.0%}",
+                speaker_origin,
+                cv2.FONT_HERSHEY_SIMPLEX,
+                0.6,
+                (0, 255, 255),
+                2,
             )
-
-            active_speech_logs.append({
-                "start_time": round(event["start_time"], 2),
-                "end_time": round(event["end_time"], 2),
-                "person_name": event["speaker"],
-                "confidence": round(event["confidence"], 4),
-                "source": "video",
-            })
 ```
 
-Note the existing `else:` branch immediately following (the one incrementing `track.silent_frames`) stays as-is — it is unrelated to speaker *selection* and still tracks per-track silence bookkeeping used elsewhere.
+After the `try: run_threaded_pipeline(...) finally: ...` block (`video_processor.py:~1126-1137`) and before the H264 conversion, flush the last open run:
+
+```python
+    attributor.finish()
+    _log_speaker_events(attributor.pop_closed_events())
+```
 
 - [ ] **Step 4: Run test to verify it passes**
 
@@ -1102,23 +1091,17 @@ def test_run_logs_unknown_speaking_track(monkeypatch):
         def release(self):
             return None
 
-    class _Track:
-        def __init__(self):
-            self.track_id = 9
-            self.person_id = None
-            self.person_name = "Unknown"
-            self.confidence = 0.0
-            self.embedding = None
-            self.center_x = 60
-            self.center_y = 60
-            self.lip_open = 1.0
+    from tracking import Track
+
+    track = Track(track_id=9, center_x=60, center_y=60, area=2500)
+    track.lip_open = 1.0
 
     class _Tracker:
         def __init__(self):
-            self.tracks = {9: _Track()}
+            self.tracks = {9: track}
 
         def update(self, detections, frame_no):
-            return [(detections[0], self.tracks[9])] if detections else []
+            return [(detections[0], track)] if detections else []
 
     class _Mesh:
         def detect_for_video(self, *_args, **_kwargs):
@@ -1151,6 +1134,7 @@ def test_run_logs_unknown_speaking_track(monkeypatch):
     monkeypatch.setattr(realtime, "face_quality", lambda *_args, **_kwargs: 0.0)
     monkeypatch.setattr(realtime, "log_recognition", lambda *_args, **_kwargs: None)
     monkeypatch.setattr(realtime, "log_audio", lambda *args, **kwargs: logged.append((args, kwargs)))
+    monkeypatch.setattr(realtime.voice_core, "has_enrolled_voiceprints", lambda: False)
     monkeypatch.setattr(realtime.cv2, "cvtColor", lambda image, _code: image)
     monkeypatch.setattr(realtime.cv2, "imshow", lambda *_args, **_kwargs: None)
     monkeypatch.setattr(realtime.cv2, "waitKey", lambda *_args, **_kwargs: 0)
@@ -1168,10 +1152,12 @@ def test_run_logs_unknown_speaking_track(monkeypatch):
 
     realtime.run(camera=0, width=160, height=120)
 
-    assert logged, "an UNKNOWN speaking track should be logged on realtime exit, not skipped"
+    assert len(logged) == 1, "an UNKNOWN speaking track should be logged once on realtime exit, not skipped"
     args, kwargs = logged[0]
     # log_audio(start, end, person_id, person_name, confidence, source, track_id=...)
+    assert args[2] is None
     assert args[3] == "UNKNOWN"
+    assert args[5] == "realtime"
     assert kwargs["track_id"] == 9
 ```
 
@@ -1188,10 +1174,37 @@ Add the import at the top of `realtime.py`:
 from speaker_attribution import FaceObservation, SpeakerAttributor
 ```
 
-Near the other per-run state initialization (`realtime.py:294-296`, alongside `last_speaker_id = None`), add:
+Near the other per-run state initialization (`realtime.py:294-296`, alongside `last_speaker_id = None`), add the attributor plus a map of voice-fallback identities per track, so an `UNKNOWN` face run that voice recognition identified is still logged under that identity (existing behavior covered by `test_run_uses_voice_identity_for_display_and_log_without_mutating_track`):
 
 ```python
     attributor = SpeakerAttributor()
+    voice_identity_by_track = {}
+
+    def _log_speaker_events(events):
+        for event in events:
+            voice_match = voice_identity_by_track.get(event["track_id"])
+            if event["speaker"] == "UNKNOWN" and voice_match is not None:
+                person_id = voice_match["person_id"]
+                person_name = voice_match["person_name"]
+                confidence = voice_match["similarity"]
+            else:
+                speaker_track = tracker.tracks.get(event["track_id"]) if tracker is not None else None
+                person_id = (
+                    speaker_track.person_id
+                    if event["speaker"] != "UNKNOWN" and speaker_track is not None
+                    else None
+                )
+                person_name = event["speaker"]
+                confidence = event["confidence"]
+            log_audio(
+                event["start_time"],
+                event["end_time"],
+                person_id,
+                person_name,
+                confidence,
+                "realtime",
+                track_id=event["track_id"],
+            )
 ```
 
 Where `candidates.append(track)` happens today (`realtime.py:990-1006`):
@@ -1266,29 +1279,27 @@ Replace the `# Select active speaker` block (`realtime.py:1133-1260`):
                 last_speech_start = None
 ```
 
-with:
+with (wall-clock `time.time()` keeps `audio_logs` values consistent with existing realtime rows; audio and face samples share that clock, so sync still works):
 
 ```python
-            attributor.update_audio(timestamp, bool(audio_available and audio_state.value))
-            result = attributor.update_faces(timestamp, face_observations)
+            now = time.time()
+            attributor.update_audio(now, bool(audio_available and audio_state.value))
+            result = attributor.update_faces(now, face_observations)
 
             speaker_track = None
             if result["active_speaker"] is not None:
                 speaker_track = tracker.tracks.get(result["track_id"])
 
             if speaker_track is not None:
-                speaker_id = speaker_track.person_id
                 speaker_name = result["active_speaker"]
-                speaker_confidence = result["confidence"]
 
-                # Voice-identity fallback: only overrides display/logging for
-                # this frame, exactly as before — never written onto the track.
+                # Voice-identity fallback: overrides display/logging only,
+                # never written onto the track.
                 if speaker_track.person_id is None or speaker_track.confidence < RECOGNITION_THRESHOLD:
                     voice_match = voice_fallback_match(speaker_track, frame_no, vad)
                     if voice_match is not None:
-                        speaker_id = voice_match["person_id"]
                         speaker_name = voice_match["person_name"]
-                        speaker_confidence = voice_match["similarity"]
+                        voice_identity_by_track[speaker_track.track_id] = voice_match
 
                 cv2.putText(
                     frame,
@@ -1307,32 +1318,15 @@ with:
                     3,
                 )
 
-            for event in attributor.pop_closed_events():
-                log_audio(
-                    event["start_time"],
-                    event["end_time"],
-                    None if event["speaker"] == "UNKNOWN" else tracker.tracks.get(event["track_id"], SimpleNamespace(person_id=None)).person_id,
-                    event["speaker"],
-                    event["confidence"],
-                    "realtime",
-                    track_id=event["track_id"],
-                )
+            _log_speaker_events(attributor.pop_closed_events())
 ```
 
-At the `finally:` block's final-event flush (`realtime.py:1367-1380`), replace the `last_speaker_id`-based flush with:
+At the `finally:` block's final-event flush (`realtime.py:1360-1385`), replace the `last_speaker_id`-based flush with:
 
 ```python
         try:
-            for event in attributor.pop_closed_events():
-                log_audio(
-                    event["start_time"],
-                    event["end_time"],
-                    None if event["speaker"] == "UNKNOWN" else tracker.tracks.get(event["track_id"], SimpleNamespace(person_id=None)).person_id,
-                    event["speaker"],
-                    event["confidence"],
-                    "realtime",
-                    track_id=event["track_id"],
-                )
+            attributor.finish()
+            _log_speaker_events(attributor.pop_closed_events())
         except Exception:
             logging.exception("Failed to save final realtime audio event")
 ```
@@ -1342,7 +1336,7 @@ Remove the now-unused `last_speaker_id`, `last_speaker_name`, `last_speaker_conf
 - [ ] **Step 4: Run test to verify it passes**
 
 Run: `.\directmlvenv\Scripts\python.exe -m pytest tests/test_realtime.py -v`
-Expected: PASS, including the pre-existing `test_speaking_banner_drawn_below_fps_line` (default weights place a single confident, incumbent-less candidate — `VOICE_ACTIVITY_WEIGHT*1.0 + FACE_CONFIDENCE_WEIGHT*0.99 = 0.598 >= SPEAKER_MIN_CONFIDENCE=0.35` — above the immediate-assignment floor even with `mouth_motion_score=0.0` on the very first frame)
+Expected: PASS, including the pre-existing `test_speaking_banner_drawn_below_fps_line` (default weights place a single confident, incumbent-less candidate — `VOICE_ACTIVITY_WEIGHT*1.0 + FACE_CONFIDENCE_WEIGHT*0.99 = 0.598 >= SPEAKER_MIN_CONFIDENCE=0.35` — above the immediate-assignment floor even with `mouth_motion_score=0.0` on the very first frame) and the pre-existing `test_run_uses_voice_identity_for_display_and_log_without_mutating_track` (an unrecognized face scores `VOICE_ACTIVITY_WEIGHT*1.0 = 0.40 >= 0.35`, becomes the `UNKNOWN` speaker, and its run is logged at exit under the voice identity `(5, "Vera", 0.8, "realtime")`)
 
 - [ ] **Step 5: Run the full suite**
 
