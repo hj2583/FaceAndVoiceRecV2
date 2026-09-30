@@ -318,3 +318,34 @@ def test_finish_without_open_run_produces_no_event():
     attributor = SpeakerAttributor()
     attributor.finish()
     assert attributor.pop_closed_events() == []
+
+
+def test_closed_event_carries_named_speaker_person_id():
+    attributor = SpeakerAttributor()
+    attributor.update_audio(1.0, True, 1.0)
+    attributor.update_faces(1.0, [_observation(1, person_id=1, person_name="Alice", face_confidence=0.9)])
+    attributor.update_audio(1.2, True, 1.0)
+    attributor.update_faces(1.2, [_observation(1, person_id=1, person_name="Alice", face_confidence=0.9)])
+
+    attributor.finish()
+
+    events = attributor.pop_closed_events()
+    assert len(events) == 1
+    assert events[0]["speaker"] == "Alice"
+    assert events[0]["person_id"] == 1
+
+
+def test_closed_event_carries_none_person_id_for_unknown_run():
+    attributor = SpeakerAttributor()
+    attributor.update_audio(1.0, True, 0.0)
+    # face_confidence and voice confidence are both low, so the score stays
+    # below the switch threshold and the opened run is labeled UNKNOWN even
+    # though the observation itself has a person_id.
+    attributor.update_faces(1.0, [_observation(1, person_id=1, person_name="Alice", face_confidence=0.0)])
+
+    attributor.finish()
+
+    events = attributor.pop_closed_events()
+    assert len(events) == 1
+    assert events[0]["speaker"] == "UNKNOWN"
+    assert events[0]["person_id"] is None

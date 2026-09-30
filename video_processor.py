@@ -483,14 +483,10 @@ def process_video_pipeline(
 
     def _log_speaker_events(events):
         for event in events:
-            person_id = None
-            if event["speaker"] != "UNKNOWN":
-                speaker_track = tracker.tracks.get(event["track_id"])
-                person_id = speaker_track.person_id if speaker_track is not None else None
             log_audio(
                 event["start_time"],
                 event["end_time"],
-                person_id,
+                event["person_id"],
                 event["speaker"],
                 event["confidence"],
                 "video",

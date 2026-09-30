@@ -57,6 +57,7 @@ class SpeakerAttributor:
 
         self._current_speaker: Optional[str] = None
         self._current_track_id: Optional[int] = None
+        self._current_person_id: Optional[int] = None
         self._current_open_since: Optional[float] = None
         self._current_confidence: float = 0.0
         self._current_run_sum: float = 0.0
@@ -226,6 +227,7 @@ class SpeakerAttributor:
                 self._close_current_event(timestamp)
             self._current_speaker = label
             self._current_track_id = observation.track_id
+            self._current_person_id = observation.person_id if label != "UNKNOWN" else None
             self._current_open_since = timestamp
             self._current_run_sum = best["score"]
             self._current_run_count = 1
@@ -270,12 +272,14 @@ class SpeakerAttributor:
             self._closed_events.append({
                 "speaker": self._current_speaker,
                 "track_id": self._current_track_id,
+                "person_id": self._current_person_id,
                 "start_time": self._current_open_since,
                 "end_time": timestamp,
                 "confidence": confidence,
             })
         self._current_speaker = None
         self._current_track_id = None
+        self._current_person_id = None
         self._current_open_since = None
         self._current_confidence = 0.0
         self._current_run_sum = 0.0
