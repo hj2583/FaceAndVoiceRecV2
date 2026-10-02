@@ -303,6 +303,44 @@ def test_transcribe_with_diarization_splits_word_timestamps_at_speaker_change(tm
     ]
 
 
+def test_transcribe_with_diarization_preserves_segment_when_words_have_single_speaker_consensus(tmp_path, monkeypatch):
+    wav_path = tmp_path / "audio.wav"
+    wav_path.write_bytes(b"fake wav")
+    monkeypatch.setattr("transcription_core.detect_speech_segments", lambda *_a, **_k: [(0.0, 10.0)])
+
+    class FakeModel:
+        def transcribe(self, path, verbose=False, **kwargs):
+            return {
+                "segments": [{
+                    "start": 0.0,
+                    "end": 10.0,
+                    "text": "Hello there everyone.",
+                    "avg_logprob": -0.1,
+                    "words": [
+                        {"word": " Hello", "start": 2.0, "end": 2.4},
+                        {"word": " there", "start": 2.4, "end": 2.8},
+                    ],
+                }]
+            }
+
+    fake_whisper = type("FakeWhisperModule", (), {"load_model": staticmethod(lambda *_a, **_k: FakeModel())})
+    monkeypatch.setitem(__import__("sys").modules, "whisper", fake_whisper)
+
+    from transcription_core import transcribe_with_diarization
+
+    segments = transcribe_with_diarization(
+        wav_path,
+        diarize=lambda *_a: [("Alice", 2.0, 2.8)],
+        minimum_speaker_overlap=0.8,
+    )
+
+    assert len(segments) == 1
+    assert segments[0].speaker_label == "Alice"
+    assert segments[0].start_ms == 0
+    assert segments[0].end_ms == 10_000
+    assert segments[0].text == "Hello there everyone."
+
+
 def test_update_transcription_segments_saves_corrections_and_rewrites_files(tmp_path, monkeypatch):
     db_path = tmp_path / "meeting.db"
     monkeypatch.setattr(config, "DB_PATH", db_path)

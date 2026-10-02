@@ -365,8 +365,8 @@ git commit -m "feat(app): combine video processing and face-attributed transcrip
 
 **Interfaces:**
 - Produces `get_runtime_status() -> dict[str, str]` with exactly `{"torch": ..., "face": ...}`.
-- Torch reports `CUDA (<device name>)` only when PyTorch CUDA is available; otherwise `CPU`.
-- Face reports `CUDA (ONNX Runtime)` only when `CUDAExecutionProvider` is active; reports `CPU (CUDA provider unavailable)` for `CPUExecutionProvider`; reports `Unavailable` if provider detection raises.
+- Torch reports `CUDA (<device name>)` only when PyTorch CUDA is available; reports `CPU` when probe succeeds and CUDA is unavailable; reports `Unavailable` when Torch import/probe raises.
+- Face reports `CUDA provider available (active session unverified)` when `CUDAExecutionProvider` is listed; reports `CPU (CUDA provider unavailable)` for `CPUExecutionProvider`; reports `Unavailable` if provider detection raises.
 
 - [ ] **Step 1: Write failing runtime-status tests**
 
@@ -411,7 +411,24 @@ def test_reports_cuda_face_provider():
         torch_module=_fake_torch(True),
         face_provider_getter=lambda: ["CUDAExecutionProvider"],
     )
-    assert status["face"] == "CUDA (ONNX Runtime)"
+    assert status["face"] == "CUDA provider available (active session unverified)"
+
+
+def test_reports_torch_unavailable_when_cuda_probe_raises_but_face_probe_still_runs():
+    class FailingCuda:
+        def is_available(self):
+            raise RuntimeError("cuda probe failed")
+
+        def get_device_name(self, _index):
+            return "ignored"
+
+    status = get_runtime_status(
+        torch_module=SimpleNamespace(cuda=FailingCuda()),
+        face_provider_getter=lambda: ["CPUExecutionProvider"],
+    )
+
+    assert status["torch"] == "Unavailable"
+    assert status["face"] == "CPU (CUDA provider unavailable)"
 
 
 def test_reports_face_runtime_unavailable_when_provider_detection_fails():

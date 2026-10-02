@@ -36,7 +36,24 @@ def test_reports_cuda_face_provider():
         torch_module=_fake_torch(True),
         face_provider_getter=lambda: ["CUDAExecutionProvider"],
     )
-    assert status["face"] == "CUDA (ONNX Runtime)"
+    assert status["face"] == "CUDA provider available (active session unverified)"
+
+
+def test_reports_torch_unavailable_when_cuda_probe_raises_but_face_probe_still_runs():
+    class FailingCuda:
+        def is_available(self):
+            raise RuntimeError("cuda probe failed")
+
+        def get_device_name(self, _index):
+            return "ignored"
+
+    status = get_runtime_status(
+        torch_module=SimpleNamespace(cuda=FailingCuda()),
+        face_provider_getter=lambda: ["CPUExecutionProvider"],
+    )
+
+    assert status["torch"] == "Unavailable"
+    assert status["face"] == "CPU (CUDA provider unavailable)"
 
 
 def test_reports_face_runtime_unavailable_when_provider_detection_fails():

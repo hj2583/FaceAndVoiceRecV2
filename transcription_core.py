@@ -393,8 +393,7 @@ def _speaker_for_interval(
     return best_speaker
 
 
-def _split_segment_by_words(raw_segment, diarization, minimum_overlap: float = 0.0):
-    """Split a Whisper segment when timed words cross speaker intervals."""
+def _timed_words_if_reliable(raw_segment):
     raw_text = str(raw_segment.get("text", "")).strip()
     words = raw_segment.get("words") or []
     timed_words = [
@@ -419,6 +418,37 @@ def _split_segment_by_words(raw_segment, diarization, minimum_overlap: float = 0
             timed_token_count,
             raw_token_count,
         )
+        return None
+    return timed_words
+
+
+def _word_consensus_speaker(raw_segment, diarization, minimum_overlap: float = 0.0):
+    timed_words = _timed_words_if_reliable(raw_segment)
+    if not timed_words:
+        return None
+
+    speakers = {
+        _speaker_for_interval(
+            float(word["start"]),
+            float(word["end"]),
+            diarization,
+            minimum_overlap,
+        )
+        for word in timed_words
+    }
+    if len(speakers) != 1:
+        return None
+
+    speaker = next(iter(speakers))
+    if speaker in {"UNKNOWN", "Unknown Speaker"}:
+        return None
+    return speaker
+
+
+def _split_segment_by_words(raw_segment, diarization, minimum_overlap: float = 0.0):
+    """Split a Whisper segment when timed words cross speaker intervals."""
+    timed_words = _timed_words_if_reliable(raw_segment)
+    if not timed_words:
         return None
 
     pieces = []
@@ -544,12 +574,16 @@ def transcribe_with_diarization(
             )
             continue
 
-        label = _speaker_for_interval(
-            start_seconds,
-            end_seconds,
-            diarization,
-            minimum_speaker_overlap,
-        )
+        label = None
+        if diarization and minimum_speaker_overlap > 0:
+            label = _word_consensus_speaker(raw, diarization, minimum_speaker_overlap)
+        if not label:
+            label = _speaker_for_interval(
+                start_seconds,
+                end_seconds,
+                diarization,
+                minimum_speaker_overlap,
+            )
         segments.append(TranscriptionSegment(label, start_ms, end_ms, text, confidence))
     return segments
 

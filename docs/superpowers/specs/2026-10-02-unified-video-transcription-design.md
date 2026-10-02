@@ -71,8 +71,8 @@ flowchart LR
 
 Replace the aggregate `get_runtime_mode()` result with independently computed status values:
 
-- **Torch audio runtime:** `CUDA (<device name>)` when `torch.cuda.is_available()`; otherwise `CPU`.
-- **Face model runtime:** first active ONNX Runtime provider (`CUDAExecutionProvider`, or `CPUExecutionProvider` with a clear explanation that CUDA provider is unavailable).
+- **Torch audio runtime:** `CUDA (<device name>)` when `torch.cuda.is_available()`; otherwise `CPU`. If Torch import/probe fails, report `Unavailable`.
+- **Face model runtime:** report provider availability truthfully without claiming active session execution. If `CUDAExecutionProvider` is listed, display `CUDA provider available (active session unverified)`; if only `CPUExecutionProvider` is listed, display `CPU (CUDA provider unavailable)`.
 
 The UI must not collapse these into one `GPU` label. Runtime availability is not a utilization measurement; actual per-process GPU utilization remains best checked during inference with `nvidia-smi`.
 
@@ -96,7 +96,7 @@ The UI must not collapse these into one `GPU` label. Runtime availability is not
 - Unit tests for interval coverage: full/threshold overlap assigns speaker; low/ambiguous/no overlap gives `UNKNOWN`; word timestamps split correctly at a speaker change.
 - Pipeline test verifies the video workflow forwards the generated face-event intervals into transcription and does not invoke voice-only diarization for that run.
 - UI/orchestration test verifies one video action runs face processing then transcription, and MP3 still runs audio-only transcription.
-- Runtime-status tests mock Torch and ONNX provider availability independently, including Torch CUDA + ONNX CPU as a mixed result.
+- Runtime-status tests mock Torch and ONNX provider availability independently, including Torch CUDA + ONNX CPU mixed status and Torch CUDA-probe failures that still preserve independent face-provider reporting.
 - Run the full existing suite. Manual validation should process one multi-person video and inspect whether transcript labels align with face-event timelines; do not claim accuracy improvement without labelled references.
 
 ## Remaining Limitations
