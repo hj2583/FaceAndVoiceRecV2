@@ -68,7 +68,7 @@ If your machine has NVIDIA CUDA support and you want to use the GPU-accelerated 
 pip install -r requirements-gpu.txt
 ```
 
-The project prefers CUDA automatically when it is available. If CUDA is missing or unavailable, it falls back to CPU mode.
+The project prefers CUDA automatically when it is available. If CUDA is missing or unavailable, it falls back to CPU mode. GPU acceleration covers both face recognition (ONNX Runtime) and the torch-based audio models (Whisper, Silero VAD, SpeechBrain voice embeddings) — `requirements-gpu.txt` pulls a CUDA-enabled build of `torch` from PyTorch's own package index for this reason. If you already have a CPU-only `torch` installed from `requirements.txt`, re-run `pip install -r requirements-gpu.txt` to replace it with the CUDA build.
 
 ## Project structure
 

@@ -1,3 +1,4 @@
+--extra-index-url https://download.pytorch.org/whl/cu128
 streamlit>=1.40
 opencv-contrib-python>=4.10,<4.12
 numpy>=1.26.4
@@ -13,4 +14,8 @@ silero-vad>=6.2.2
 torch>=2.2
 Pillow>=10.0
 openai-whisper>=20231117
+speechbrain>=1.0
 pytest>=8.0
+transformers
+numba
+flair

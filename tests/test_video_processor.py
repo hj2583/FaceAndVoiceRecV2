@@ -111,3 +111,104 @@ def test_process_video_pipeline_propagates_detection_errors(monkeypatch, tmp_pat
         video_processor.process_video_pipeline(
             tmp_path / "in.mp4", tmp_path / "out.mp4", tmp_path / "log.json"
         )
+
+
+def test_process_video_pipeline_logs_unknown_speaker_events(tmp_path, monkeypatch):
+    """An unknown-but-speaking track must now produce an audio_logs event,
+    where the old `if speaker.person_id is not None` guard used to drop it."""
+    capture = _FakeCapture(frame_count=3)
+    writer = _FakeWriter()
+    _patch_common(monkeypatch, capture, writer)
+    monkeypatch.setattr(video_processor, "extract_audio_to_wav", lambda _p: tmp_path / "audio.wav")
+    monkeypatch.setattr(video_processor, "detect_speech_segments", lambda *_a, **_k: [(0.0, 10.0)])
+    monkeypatch.setattr(video_processor, "extract_embedding", lambda *_a, **_k: None)
+    monkeypatch.setattr(video_processor, "lip_open_ratio", lambda _landmarks: 0.05)
+
+    class _Landmarker:
+        def detect_for_video(self, *_a, **_k):
+            return SimpleNamespace(face_landmarks=[object()])
+
+        def close(self):
+            return None
+
+    monkeypatch.setattr(video_processor, "create_face_landmarker", lambda: _Landmarker())
+
+    from tracking import Track
+
+    track = Track(track_id=1, center_x=30, center_y=30, area=3600)
+    monkeypatch.setattr(
+        video_processor, "CentroidTracker",
+        lambda: SimpleNamespace(update=lambda dets, _n: [(dets[0], track)] if dets else [], tracks={1: track}),
+    )
+    # 70x70 box: large enough for landmarks (LANDMARK_MIN_FACE_SIZE=60).
+    monkeypatch.setattr(video_processor, "detect_faces_tiled", lambda *_a, **_k: [(0, 0, 70, 70, 0.9)])
+
+    logged = []
+    monkeypatch.setattr(video_processor, "log_audio", lambda *args, **kwargs: logged.append((args, kwargs)))
+
+    video_processor.process_video_pipeline(
+        tmp_path / "in.mp4", tmp_path / "out.mp4", tmp_path / "log.json",
+    )
+
+    assert len(logged) == 1, "the open UNKNOWN run must be flushed once when the video ends"
+    args, kwargs = logged[0]
+    # log_audio(start, end, person_id, person_name, confidence, source, track_id=...)
+    assert args[2] is None
+    assert args[3] == "UNKNOWN"
+    assert args[5] == "video"
+    assert kwargs["track_id"] == 1
+    speech = json.loads((tmp_path / "log.json").read_text(encoding="utf-8"))["speech"]
+    assert len(speech) == 1
+    assert speech[0]["person_id"] is None
+    assert speech[0]["track_id"] == 1
+    assert speech[0]["speaker"] == "UNKNOWN"
+    assert [entry["person_name"] for entry in speech] == ["UNKNOWN"]
+
+
+def test_process_video_pipeline_logs_recognized_speaker_with_evicted_track(tmp_path, monkeypatch):
+    """A recognized speaker's event must carry person_id even if the tracker
+    has already evicted the track by the time the run closes."""
+    capture = _FakeCapture(frame_count=3)
+    writer = _FakeWriter()
+    _patch_common(monkeypatch, capture, writer)
+    monkeypatch.setattr(video_processor, "extract_audio_to_wav", lambda _p: tmp_path / "audio.wav")
+    monkeypatch.setattr(video_processor, "detect_speech_segments", lambda *_a, **_k: [(0.0, 10.0)])
+    monkeypatch.setattr(video_processor, "extract_embedding", lambda *_a, **_k: None)
+    monkeypatch.setattr(video_processor, "lip_open_ratio", lambda _landmarks: 0.05)
+
+    class _Landmarker:
+        def detect_for_video(self, *_a, **_k):
+            return SimpleNamespace(face_landmarks=[object()])
+
+        def close(self):
+            return None
+
+    monkeypatch.setattr(video_processor, "create_face_landmarker", lambda: _Landmarker())
+
+    from tracking import Track
+
+    track = Track(
+        track_id=2, center_x=30, center_y=30, area=3600,
+        person_id=7, person_name="Alice", confidence=0.95,
+    )
+    # Simulate the track already being evicted by the time the run closes.
+    monkeypatch.setattr(
+        video_processor, "CentroidTracker",
+        lambda: SimpleNamespace(update=lambda dets, _n: [(dets[0], track)] if dets else [], tracks={}),
+    )
+    # 70x70 box: large enough for landmarks (LANDMARK_MIN_FACE_SIZE=60).
+    monkeypatch.setattr(video_processor, "detect_faces_tiled", lambda *_a, **_k: [(0, 0, 70, 70, 0.9)])
+
+    logged = []
+    monkeypatch.setattr(video_processor, "log_audio", lambda *args, **kwargs: logged.append((args, kwargs)))
+
+    video_processor.process_video_pipeline(
+        tmp_path / "in.mp4", tmp_path / "out.mp4", tmp_path / "log.json",
+    )
+
+    assert len(logged) == 1, "the open recognized run must be flushed once when the video ends"
+    args, kwargs = logged[0]
+    # log_audio(start, end, person_id, person_name, confidence, source, track_id=...)
+    assert args[2] == 7
+    assert args[3] == "Alice"
+    assert kwargs["track_id"] == 2

@@ -1,0 +1,477 @@
+I already have a working Python project with two separate components:
+
+1. Face recognition
+
+   * Detects faces
+   * Tracks faces
+   * Recognizes known people
+   * Produces a stable person ID / track ID
+   * Can detect lip/mouth movement
+   * Can identify unknown faces
+   * Uses the existing face recognition pipeline and database
+
+2. Voice/audio processing
+
+   * Detects voice activity using VAD
+   * Determines when someone is speaking
+   * Processes microphone/audio input
+   * Has its own existing audio pipeline
+
+I now want to combine these two systems so that the application can determine:
+
+"WHO is speaking?"
+
+The goal is NOT to replace either face recognition or voice recognition. Keep both systems working independently and create a new speaker-attribution/fusion layer that combines their outputs.
+
+IMPORTANT:
+Before changing anything, inspect the entire existing project and understand how the current face pipeline and audio pipeline work. Do not rewrite working components unnecessarily.
+
+### Main objective
+
+Create a pipeline similar to:
+
+Camera
+→ Face Detection
+→ Face Tracking
+→ Face Recognition
+→ Person/Track information
+
+Microphone/Audio
+→ VAD
+→ Voice Activity
+
+Then combine both streams:
+
+Face + Voice Activity + Lip Movement + Temporal Tracking
+→ Speaker Attribution
+→ Active Speaker = Person ID
+
+### Expected behavior
+
+For example, if Alice and Bob are visible:
+
+Time 10.0s:
+Alice = face detected
+Bob = face detected
+Voice activity = YES
+Alice's mouth is moving
+Bob's mouth is not moving
+
+Result:
+active_speaker = Alice
+
+If Bob starts speaking:
+
+Time 15.0s:
+Alice = face detected
+Bob = face detected
+Voice activity = YES
+Alice's mouth is not moving
+Bob's mouth is moving
+
+Result:
+active_speaker = Bob
+
+If nobody is speaking:
+
+active_speaker = None
+
+If speech is detected but no visible face is confidently associated with it:
+
+active_speaker = "UNKNOWN"
+
+### Very important
+
+Do NOT simply use:
+
+if VAD == True:
+assign speech to the first detected face
+
+That would be incorrect.
+
+The system should score all visible tracked faces and determine which person is the most likely speaker.
+
+### Speaker attribution scoring
+
+Design a configurable scoring system.
+
+Possible signals:
+
+1. Voice Activity Detection
+
+   * Is speech currently happening?
+
+2. Lip/Mouth Movement
+
+   * Is the person's mouth moving?
+   * Existing lip/mouth detection code should be reused if reliable.
+
+3. Face tracking
+
+   * Which tracked face is stable over time?
+
+4. Face recognition confidence
+
+   * How confident are we that Track X belongs to Person Y?
+
+5. Face orientation / visibility
+
+   * Is the person's face sufficiently visible?
+   * Is the person facing toward the camera?
+
+6. Temporal consistency
+
+   * Avoid changing speaker every frame.
+   * Use a rolling window / smoothing mechanism.
+
+7. Optional voice identity information
+
+   * If the existing voice recognition system can identify a speaker independently, use that as an additional signal.
+   * Do not require voice identity recognition if the current audio system only provides VAD.
+
+The architecture should allow additional signals to be added later.
+
+### Suggested architecture
+
+Create a dedicated module such as:
+
+speaker_attribution.py
+
+or another appropriate name based on the existing project structure.
+
+It should NOT contain face detection or audio processing itself.
+
+Instead, it receives normalized observations from the existing systems.
+
+For example:
+
+Face observation:
+
+{
+"timestamp": 12.53,
+"track_id": 3,
+"person_id": "alice",
+"face_confidence": 0.95,
+"mouth_open": true,
+"mouth_motion_score": 0.82,
+"face_visible": true
+}
+
+Audio observation:
+
+{
+"timestamp": 12.53,
+"voice_active": true,
+"voice_confidence": 0.91
+}
+
+The speaker attribution module should combine these observations.
+
+### Output
+
+Produce a structured result such as:
+
+{
+"timestamp": 12.53,
+"active_speaker": "alice",
+"track_id": 3,
+"confidence": 0.89,
+"reason": {
+"voice_activity": 0.91,
+"mouth_motion": 0.82,
+"face_confidence": 0.95,
+"temporal_consistency": 0.88
+}
+}
+
+Also support:
+
+{
+"active_speaker": null
+}
+
+when there is no speech.
+
+And:
+
+{
+"active_speaker": "UNKNOWN"
+}
+
+when speech is detected but no visible person can be confidently associated with it.
+
+### Temporal smoothing
+
+This is very important.
+
+Do not switch:
+
+Alice → Bob → Alice → Bob
+
+because of small frame-to-frame fluctuations.
+
+Implement a temporal smoothing / hysteresis mechanism.
+
+For example:
+
+* Maintain recent speaker candidates.
+* Require a candidate to remain strong for several frames/time.
+* Require a new speaker to exceed the current speaker's score by a configurable margin before switching.
+* Allow a short grace period when speech temporarily disappears.
+* Make all thresholds configurable.
+
+Example configuration:
+
+SPEAKER_WINDOW_MS
+SPEAKER_SWITCH_THRESHOLD
+SPEAKER_MIN_CONFIDENCE
+SPEAKER_GRACE_PERIOD_MS
+LIP_MOTION_WEIGHT
+FACE_CONFIDENCE_WEIGHT
+VOICE_ACTIVITY_WEIGHT
+TEMPORAL_WEIGHT
+
+Do not hard-code these values throughout the code.
+
+### Synchronization
+
+The face pipeline and audio pipeline may run at different rates.
+
+Do NOT assume that one video frame equals one audio frame.
+
+Use timestamps.
+
+Create a common timeline based on timestamps and associate audio observations with the nearest/current video observations.
+
+For example:
+
+Video:
+12.50s
+12.53s
+12.56s
+
+Audio:
+12.51s
+12.54s
+
+These should be associated based on time tolerance.
+
+Make the synchronization tolerance configurable.
+
+### Multiple people
+
+The system must support multiple faces in the same frame.
+
+Example:
+
+Person A
+Person B
+Person C
+Person D
+
+Only one person may normally be the active speaker, but the system should calculate a speaker score for every visible tracked person.
+
+Do not assume the first detected face is speaking.
+
+### Unknown faces
+
+Unknown faces must still be eligible for speaker attribution.
+
+For example:
+
+Track 12:
+person_id = UNKNOWN
+
+If that person is clearly speaking:
+
+active_speaker = UNKNOWN
+
+The system should preserve the track ID so that the unknown person can potentially be identified later.
+
+### Important separation of concepts
+
+Keep these concepts separate:
+
+track_id
+person_id
+speaker_id
+
+For example:
+
+track_id = 17
+person_id = "John"
+speaker_id = "John"
+
+But if recognition fails:
+
+track_id = 17
+person_id = UNKNOWN
+speaker_id = UNKNOWN
+
+Do not use track_id as the permanent identity.
+
+### Event/logging
+
+Create speaker events rather than logging the same speaker every frame.
+
+For example:
+
+12.50s - 15.20s:
+John speaking
+
+15.21s - 18.70s:
+Mary speaking
+
+18.71s - 19.10s:
+No speaker
+
+19.11s - 22.40s:
+John speaking
+
+This should produce clean events instead of thousands of repeated records.
+
+Example:
+
+{
+"speaker": "John",
+"start_time": 12.50,
+"end_time": 15.20,
+"confidence": 0.89
+}
+
+### Realtime and recorded video
+
+The design should work for both:
+
+1. Realtime camera + microphone
+2. Uploaded/recorded meeting video + audio
+
+Avoid creating two completely separate speaker-attribution implementations.
+
+Create a common fusion/attribution layer that both realtime and offline processing can use.
+
+### UI
+
+If the existing application has a UI, display:
+
+Active Speaker:
+John
+
+Confidence:
+89%
+
+Optionally display:
+
+John
+Speaking
+
+on the corresponding tracked face.
+
+Do not create a new complicated UI unless necessary.
+
+### Database
+
+Inspect the existing database schema first.
+
+If speaker events need to be stored, propose the smallest database change necessary.
+
+Do not destroy or migrate the existing database unnecessarily.
+
+### Debug mode
+
+Add an optional debug mode that can show:
+
+Track 1 → John → speaker score 0.82
+Track 2 → Mary → speaker score 0.21
+Track 3 → UNKNOWN → speaker score 0.08
+
+This will be extremely useful for tuning the algorithm.
+
+### Development process
+
+Follow these steps:
+
+STEP 1:
+Inspect the entire existing project.
+
+STEP 2:
+Identify:
+
+* face detection entry point
+* face tracking entry point
+* face recognition output
+* mouth/lip movement output
+* audio/VAD entry point
+* audio timestamps
+* realtime pipeline
+* offline video pipeline
+* database schema
+* existing configuration system
+
+STEP 3:
+Explain the current architecture and identify exactly where the new speaker-attribution layer should be inserted.
+
+STEP 4:
+Design the data structures/interfaces between:
+Face Pipeline → Speaker Attribution
+Audio Pipeline → Speaker Attribution
+
+STEP 5:
+Implement the speaker attribution module.
+
+STEP 6:
+Integrate it into realtime processing.
+
+STEP 7:
+Integrate it into recorded-video processing.
+
+STEP 8:
+Add temporal smoothing and speaker-event generation.
+
+STEP 9:
+Add debug logging.
+
+STEP 10:
+Run tests using existing project data.
+
+### Critical coding rules
+
+* Do not rewrite working face recognition code.
+* Do not rewrite working audio/VAD code unless integration requires it.
+* Reuse existing functions/classes.
+* Do not duplicate face detection or audio processing.
+* Do not introduce unnecessary frameworks.
+* Keep the new fusion layer modular.
+* Avoid global state where possible.
+* Use timestamps for synchronization.
+* Make thresholds configurable.
+* Preserve backward compatibility.
+* Explain every file that needs to be changed before making major changes.
+* If an existing function is unclear, inspect its implementation instead of guessing.
+* If something is missing, ask or clearly state the assumption instead of inventing an API.
+
+### Final deliverables
+
+After implementation, provide:
+
+1. Architecture diagram
+2. Files changed
+3. New modules/classes/functions
+4. Data flow explanation
+5. Speaker scoring algorithm
+6. Timestamp synchronization method
+7. Temporal smoothing method
+8. Configuration parameters
+9. Test procedure
+10. Example output
+
+The final system should allow the application to produce a reliable meeting timeline such as:
+
+00:00 - Unknown
+00:03 - Alice
+00:17 - Bob
+00:31 - Alice
+00:45 - Charlie
+00:52 - No speaker
+
+The priority is correctness, modularity, timestamp synchronization, and stable speaker attribution rather than simply making the first detected face the speaker.

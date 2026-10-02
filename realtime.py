@@ -1,5 +1,7 @@
 import argparse
+from collections import deque
 import logging
+import threading
 import time
 from datetime import datetime
 
@@ -7,6 +9,7 @@ import cv2
 import numpy as np
 
 from audio_core import RealtimeVAD
+import voice_core
 
 from config import (
     LIP_OPEN_THRESHOLD,
@@ -30,6 +33,8 @@ from config import (
     UNKNOWN_MAX_SAMPLES,
     UNKNOWN_CAPTURE_INTERVAL,
     UNKNOWN_MIN_QUALITY,
+
+    VOICE_FALLBACK_INTERVAL_FRAMES,
 
     LIVE_VIDEO_DIR,
 )
@@ -57,6 +62,7 @@ from detection_core import ensure_opencv_face_detector_available
 from face_backend import get_face_backend
 from frame_pipeline import PipelineStop, run_threaded_pipeline
 from realtime_runtime import DetectionScheduler, RollingFps
+from speaker_attribution import FaceObservation, SpeakerAttributor
 
 
 # ============================================================
@@ -79,6 +85,29 @@ class SpeakingState:
         self.value = value
 
 
+class RealtimeAudioState:
+
+    def __init__(self):
+        self._lock = threading.Lock()
+        self._samples = deque()
+        self._value = False
+
+    def push(self, value, timestamp):
+        with self._lock:
+            self._value = bool(value)
+            self._samples.append((float(timestamp), bool(value)))
+
+    def current(self):
+        with self._lock:
+            return self._value
+
+    def pop_samples(self):
+        with self._lock:
+            samples = list(self._samples)
+            self._samples.clear()
+        return samples
+
+
 def start_realtime_vad(callback, vad_factory=RealtimeVAD):
     try:
         vad = vad_factory(callback=callback)
@@ -87,6 +116,31 @@ def start_realtime_vad(callback, vad_factory=RealtimeVAD):
     except Exception:
         logging.exception("Realtime microphone is unavailable")
         return None, False
+
+
+def voice_fallback_match(track, frame_no, vad):
+    """Return the track's voice match, re-running inference at most once per interval.
+
+    The result is cached on track.voice_match only; the track's face-recognition
+    person_id/person_name/confidence are never modified.
+    """
+    if (
+        track.last_voice_check_frame is not None
+        and frame_no - track.last_voice_check_frame < VOICE_FALLBACK_INTERVAL_FRAMES
+    ):
+        return track.voice_match
+
+    track.last_voice_check_frame = frame_no
+    track.voice_match = None
+    if vad is None or not voice_core.has_enrolled_voiceprints():
+        return None
+
+    voice_embedding = voice_core.extract_voice_embedding(
+        vad.get_recent_pcm(seconds=1.5)
+    )
+    if voice_embedding is not None:
+        track.voice_match = voice_core.match_voice_embedding(voice_embedding)
+    return track.voice_match
 
 
 # ============================================================
@@ -263,10 +317,37 @@ def run(
     tracker = None
     vad = None
     mesh = None
-    last_speaker_id = None
-    last_speech_start = None
 
-    audio_state = SpeakingState()
+    attributor = SpeakerAttributor()
+    voice_identity_by_run = {}
+    wall_clock_offset_s = time.time() - time.monotonic()
+
+    def _mono_to_wall_clock(monotonic_ts):
+        return float(monotonic_ts) + wall_clock_offset_s
+
+    def _log_speaker_events(events):
+        for event in events:
+            run_key = (event.get("track_id"), event.get("start_time"))
+            voice_match = voice_identity_by_run.pop(run_key, None)
+            if voice_match is not None:
+                person_id = voice_match["person_id"]
+                person_name = voice_match["person_name"]
+                confidence = voice_match["similarity"]
+            else:
+                person_id = event["person_id"]
+                person_name = event["speaker"]
+                confidence = event["confidence"]
+            log_audio(
+                _mono_to_wall_clock(event["start_time"]),
+                _mono_to_wall_clock(event["end_time"]),
+                person_id,
+                person_name,
+                confidence,
+                "realtime",
+                track_id=event["track_id"],
+            )
+
+    audio_state = RealtimeAudioState()
     audio_available = False
 
     window_name = "AI Face + Active Speaker Recognition"
@@ -308,9 +389,10 @@ def run(
         # Realtime VAD
         # ========================================================
 
-        vad, audio_available = start_realtime_vad(
-            callback=audio_state.set
-        )
+        def _on_vad_state(state):
+            audio_state.push(state, time.monotonic())
+
+        vad, audio_available = start_realtime_vad(callback=_on_vad_state)
 
         # ========================================================
         # Face landmarks
@@ -349,7 +431,7 @@ def run(
             return frame if ok else None
 
         def _process(frame):
-            nonlocal frame_no, face_detections, last_landmark_timestamp_ms, last_speaker_id, last_speech_start, audio_available
+            nonlocal frame_no, face_detections, last_landmark_timestamp_ms, audio_available
 
             frame_no += 1
 
@@ -364,7 +446,7 @@ def run(
                 and not getattr(vad, "available", False)
             ):
                 audio_available = False
-                audio_state.set(False)
+                audio_state.push(False, timestamp)
                 logging.warning(
                     "Realtime microphone became unavailable during processing"
                 )
@@ -430,7 +512,7 @@ def run(
                 frame_no,
             )
 
-            candidates = []
+            face_observations = []
 
             # =================================================
             # Process tracked faces
@@ -967,18 +1049,16 @@ def run(
                 # Active speaker candidate
                 # =================================================
 
-                if (
-                    audio_available
-                    and audio_state.value
-                    and track.lip_open is not None
-                    and
-                    track.lip_open
-                    >= LIP_OPEN_THRESHOLD
-                ):
-
-                    candidates.append(
-                        track
-                    )
+                if track.lip_open is not None:
+                    face_observations.append(FaceObservation(
+                        track_id=track.track_id,
+                        person_id=track.person_id,
+                        person_name=track.person_name if track.person_id is not None else "UNKNOWN",
+                        face_confidence=track.confidence,
+                        mouth_open=track.lip_open >= LIP_OPEN_THRESHOLD,
+                        lip_open_ratio=track.lip_open,
+                        face_visible=True,
+                    ))
 
                 # =================================================
                 # Recognition logging
@@ -1103,125 +1183,45 @@ def run(
             # Select active speaker
             # =====================================================
 
-            if (
-                audio_available
-                and audio_state.value
-                and
-                candidates
-            ):
+            now = time.monotonic()
+            for sample_ts, sample_state in audio_state.pop_samples():
+                attributor.update_audio(sample_ts, bool(audio_available and sample_state))
+            result = attributor.update_faces(now, face_observations)
 
-                speaker = max(
-                    candidates,
-                    key=lambda t:
-                        t.lip_open,
+            speaker_track = None
+            if result["active_speaker"] is not None:
+                speaker_track = tracker.tracks.get(result["track_id"])
+
+            if speaker_track is not None:
+                speaker_name = result["active_speaker"]
+
+                # Voice-identity fallback: overrides display/logging only,
+                # never written onto the track.
+                if speaker_track.person_id is None or speaker_track.confidence < RECOGNITION_THRESHOLD:
+                    voice_match = voice_fallback_match(speaker_track, frame_no, vad)
+                    if voice_match is not None:
+                        speaker_name = voice_match["person_name"]
+                        run_key = (result["track_id"], result.get("run_start_time"))
+                        voice_identity_by_run[run_key] = voice_match
+
+                cv2.putText(
+                    frame,
+                    f"SPEAKING: {speaker_name}",
+                    (20, 60),
+                    cv2.FONT_HERSHEY_SIMPLEX,
+                    0.9,
+                    (0, 255, 0),
+                    2,
+                )
+                cv2.rectangle(
+                    frame,
+                    (int(speaker_track.center_x - 80), int(speaker_track.center_y - 100)),
+                    (int(speaker_track.center_x + 80), int(speaker_track.center_y + 100)),
+                    (0, 255, 0),
+                    3,
                 )
 
-                if (
-                    speaker.person_id
-                    is not None
-                ):
-
-                    if (
-                        last_speaker_id
-                        != speaker.person_id
-                    ):
-
-                        last_speaker_id = (
-                            speaker.person_id
-                        )
-
-                        last_speech_start = (
-                            time.time()
-                        )
-
-                    cv2.putText(
-                        frame,
-                        (
-                            f"SPEAKING: "
-                            f"{speaker.person_name}"
-                        ),
-                        (20, 60),
-                        cv2.FONT_HERSHEY_SIMPLEX,
-                        0.9,
-                        (0, 255, 0),
-                        2,
-                    )
-
-                    cv2.rectangle(
-                        frame,
-                        (
-                            int(
-                                speaker.center_x
-                                - 80
-                            ),
-                            int(
-                                speaker.center_y
-                                - 100
-                            ),
-                        ),
-                        (
-                            int(
-                                speaker.center_x
-                                + 80
-                            ),
-                            int(
-                                speaker.center_y
-                                + 100
-                            ),
-                        ),
-                        (0, 255, 0),
-                        3,
-                    )
-
-            else:
-
-                if (
-                    last_speaker_id
-                    is not None
-                    and
-                    last_speech_start
-                    is not None
-                    and tracker is not None
-                ):
-
-                    speaker_name = next(
-                        (
-                            t.person_name
-                            for t
-                            in tracker.tracks.values()
-                            if (
-                                t.person_id
-                                == last_speaker_id
-                            )
-                        ),
-                        "Unknown",
-                    )
-
-                    speaker_confidence = next(
-                        (
-                            t.confidence
-                            for t
-                            in tracker.tracks.values()
-                            if (
-                                t.person_id
-                                == last_speaker_id
-                            )
-                        ),
-                        0.0,
-                    )
-
-                    log_audio(
-                        last_speech_start,
-                        time.time(),
-                        last_speaker_id,
-                        speaker_name,
-                        speaker_confidence,
-                        "realtime",
-                    )
-
-                last_speaker_id = None
-
-                last_speech_start = None
+            _log_speaker_events(attributor.pop_closed_events())
 
             cv2.putText(
                 frame,
@@ -1244,7 +1244,7 @@ def run(
                     if not audio_available
                     else (
                         "MIC: SPEECH"
-                        if audio_state.value
+                        if audio_state.current()
                         else
                         "MIC: SILENT"
                     )
@@ -1257,7 +1257,7 @@ def run(
                 0.7,
                 (
                     (0, 255, 0)
-                    if (audio_available and audio_state.value)
+                    if (audio_available and audio_state.current())
                     else
                     (255, 255, 255)
                 ),
@@ -1325,49 +1325,8 @@ def run(
         # =====================================================
 
         try:
-            if (
-                last_speaker_id
-                is not None
-                and
-                last_speech_start
-                is not None
-                and tracker is not None
-            ):
-
-                speaker_name = next(
-                    (
-                        t.person_name
-                        for t
-                        in tracker.tracks.values()
-                        if (
-                            t.person_id
-                            == last_speaker_id
-                        )
-                    ),
-                    "Unknown",
-                )
-
-                speaker_confidence = next(
-                    (
-                        t.confidence
-                        for t
-                        in tracker.tracks.values()
-                        if (
-                            t.person_id
-                            == last_speaker_id
-                        )
-                    ),
-                    0.0,
-                )
-
-                log_audio(
-                    last_speech_start,
-                    time.time(),
-                    last_speaker_id,
-                    speaker_name,
-                    speaker_confidence,
-                    "realtime",
-                )
+            attributor.finish()
+            _log_speaker_events(attributor.pop_closed_events())
         except Exception:
             logging.exception("Failed to save final realtime audio event")
 

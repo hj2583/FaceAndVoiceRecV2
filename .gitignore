@@ -5,13 +5,18 @@ __pycache__/
 faces.db
 face_index.npz
 known_faces/*
+known_voices/*
 unknown_faces/*
+unknown_voices/*
 initialVideo/*
 trackedVideo/*
+transcripts/*
 live/*
 logs/*
 !known_faces/.gitkeep
+!known_voices/.gitkeep
 !unknown_faces/.gitkeep
+!unknown_voices/.gitkeep
 !initialVideo/.gitkeep
 !trackedVideo/.gitkeep
 !live/.gitkeep
@@ -26,3 +31,4 @@ directmlvenv/
 *.db-shm
 *.db-wal
 *.log
+transcripts

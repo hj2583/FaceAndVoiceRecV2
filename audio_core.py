@@ -16,6 +16,11 @@ except Exception:
     load_silero_vad = None
 
 
+# Prefer CUDA for all torch-based models (Silero VAD, Whisper, SpeechBrain);
+# fall back to CPU automatically when no GPU is available.
+TORCH_DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
+
+
 # ============================================================
 # Audio configuration
 # ============================================================
@@ -108,7 +113,7 @@ def _speech_probability(model, frame_bytes, sample_rate=SAMPLE_RATE):
         audio = np.pad(audio, (0, FRAME_SAMPLES - audio.size))
 
     with torch.no_grad():
-        result = model(torch.from_numpy(audio), sample_rate)
+        result = model(torch.from_numpy(audio).to(TORCH_DEVICE), sample_rate)
 
     return float(result.item()) if hasattr(result, "item") else float(result)
 
@@ -148,6 +153,11 @@ class RealtimeVAD:
         self.startup_succeeded = False
         self.available = False
         self.startup_error = None
+
+        self._pcm_buffer = bytearray()
+        self._pcm_buffer_lock = threading.Lock()
+        # Cap the buffer so memory use stays bounded regardless of session length.
+        self._pcm_buffer_max_bytes = SAMPLE_RATE * SAMPLE_WIDTH * 5
 
     def start(self, startup_timeout=2.0):
         check_audio_dependencies()
@@ -198,6 +208,18 @@ class RealtimeVAD:
                 )
             else:
                 self.thread = None
+
+    def _append_pcm(self, frame_bytes):
+        with self._pcm_buffer_lock:
+            self._pcm_buffer.extend(frame_bytes)
+            overflow = len(self._pcm_buffer) - self._pcm_buffer_max_bytes
+            if overflow > 0:
+                del self._pcm_buffer[:overflow]
+
+    def get_recent_pcm(self, seconds=1.5):
+        with self._pcm_buffer_lock:
+            wanted_bytes = int(seconds * SAMPLE_RATE) * SAMPLE_WIDTH
+            return bytes(self._pcm_buffer[-wanted_bytes:])
 
     def _emit(self, state):
         """
@@ -258,6 +280,7 @@ class RealtimeVAD:
         try:
 
             model = load_silero_vad()
+            model = model.to(TORCH_DEVICE) if hasattr(model, "to") else model
 
             stream = sd.RawInputStream(
                 samplerate=SAMPLE_RATE,
@@ -277,6 +300,8 @@ class RealtimeVAD:
                 data, _overflowed = stream.read(
                     FRAME_SAMPLES,
                 )
+
+                self._append_pcm(bytes(data))
 
                 raw_speech = _speech_probability(
                     model,
@@ -316,7 +341,9 @@ class RealtimeVAD:
                     )
 
 def read_wav_pcm(wav_path):
-    with wave.open(str(wav_path), "rb") as wf:
+    """Read 16kHz mono PCM16 frames from a WAV path or binary file-like object."""
+    source = wav_path if hasattr(wav_path, "read") else str(wav_path)
+    with wave.open(source, "rb") as wf:
         rate = wf.getframerate()
         channels = wf.getnchannels()
         width = wf.getsampwidth()
@@ -368,6 +395,7 @@ def detect_speech_segments(
     )
 
     model = load_silero_vad()
+    model = model.to(TORCH_DEVICE) if hasattr(model, "to") else model
 
     bytes_per_frame = FRAME_BYTES
 

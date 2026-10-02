@@ -53,6 +53,7 @@ from face_core import (
 
 from tracking import CentroidTracker
 from frame_pipeline import run_threaded_pipeline
+from speaker_attribution import FaceObservation, SpeakerAttributor
 
 
 # ============================================================
@@ -478,6 +479,30 @@ def process_video_pipeline(
     active_speech_logs = []
     last_tiled_detections = []
 
+    attributor = SpeakerAttributor()
+
+    def _log_speaker_events(events):
+        for event in events:
+            log_audio(
+                event["start_time"],
+                event["end_time"],
+                event["person_id"],
+                event["speaker"],
+                event["confidence"],
+                "video",
+                track_id=event["track_id"],
+            )
+            active_speech_logs.append({
+                "start_time": round(event["start_time"], 2),
+                "end_time": round(event["end_time"], 2),
+                "person_id": event["person_id"],
+                "track_id": event["track_id"],
+                "speaker": event["speaker"],
+                "person_name": event["speaker"],
+                "confidence": round(event["confidence"], 4),
+                "source": "video",
+            })
+
     # ========================================================
     # Processing
     # ========================================================
@@ -583,7 +608,8 @@ def process_video_pipeline(
             for start, end in speech_segments
         )
 
-        speaking_candidates = []
+        face_observations = []
+        track_label_origins = {}
 
         # =================================================
         # Process tracked faces
@@ -954,18 +980,17 @@ def process_video_pipeline(
             # Active speaker candidates
             # =================================================
 
-            if (
-                audio_is_speech
-                and
-                track.lip_open is not None
-                and
-                track.lip_open
-                >= LIP_OPEN_THRESHOLD
-            ):
-
-                speaking_candidates.append(
-                    track
-                )
+            if track.lip_open is not None:
+                face_observations.append(FaceObservation(
+                    track_id=track.track_id,
+                    person_id=track.person_id,
+                    person_name=track.person_name if track.person_id is not None else "UNKNOWN",
+                    face_confidence=track.confidence,
+                    mouth_open=track.lip_open >= LIP_OPEN_THRESHOLD,
+                    lip_open_ratio=track.lip_open,
+                    face_visible=True,
+                ))
+            track_label_origins[track.track_id] = (x0, max(20, y0 - 30))
 
             # =================================================
             # Draw bounding box
@@ -1002,13 +1027,6 @@ def process_video_pipeline(
                         "Recognition Pending"
                     )
 
-            if (
-                track
-                in speaking_candidates
-            ):
-
-                label += " [Speaking]"
-
             cv2.rectangle(
                 frame,
                 (x0, y0),
@@ -1037,82 +1055,21 @@ def process_video_pipeline(
         # Select ONE active speaker
         # =====================================================
 
-        if (
-            audio_is_speech
-            and
-            speaking_candidates
-        ):
+        attributor.update_audio(timestamp, audio_is_speech)
+        result = attributor.update_faces(timestamp, face_observations)
+        _log_speaker_events(attributor.pop_closed_events())
 
-            speaker = max(
-                speaking_candidates,
-                key=lambda t:
-                    t.lip_open,
+        speaker_origin = track_label_origins.get(result.get("track_id"))
+        if result["active_speaker"] is not None and speaker_origin is not None:
+            cv2.putText(
+                frame,
+                f"{result['active_speaker']} [Speaking] {result['confidence']:.0%}",
+                speaker_origin,
+                cv2.FONT_HERSHEY_SIMPLEX,
+                0.6,
+                (0, 255, 255),
+                2,
             )
-
-            speaker.speech_frames += 1
-            speaker.silent_frames = 0
-
-            if (
-                speaker.speech_frames
-                >= 2
-            ):
-
-                start = max(
-                    0.0,
-                    timestamp - 0.1,
-                )
-
-                end = timestamp
-
-                if (
-                    speaker.person_id
-                    is not None
-                ):
-
-                    log_audio(
-                        start,
-                        end,
-                        speaker.person_id,
-                        speaker.person_name,
-                        speaker.confidence,
-                        "video",
-                    )
-
-                    active_speech_logs.append(
-                        {
-                            "start_time": round(
-                                start,
-                                2,
-                            ),
-                            "end_time": round(
-                                end,
-                                2,
-                            ),
-                            "person_name": (
-                                speaker.person_name
-                            ),
-                            "confidence": round(
-                                speaker.confidence,
-                                4,
-                            ),
-                            "source": "video",
-                        }
-                    )
-
-        else:
-
-            for track in (
-                tracker.tracks.values()
-            ):
-
-                track.silent_frames += 1
-
-                if (
-                    track.silent_frames
-                    >= 4
-                ):
-
-                    track.speech_frames = 0
 
         return frame_no, frame
 
@@ -1135,6 +1092,9 @@ def process_video_pipeline(
         cap.release()
         writer.release()
         face_landmarker.close()
+
+    attributor.finish()
+    _log_speaker_events(attributor.pop_closed_events())
 
     # ==========================================================
     # Convert to H264
