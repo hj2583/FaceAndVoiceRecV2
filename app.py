@@ -52,7 +52,7 @@ from database import (
 )
 from face_core import FaceIndex
 from realtime_launcher import launch_realtime
-from video_processor import process_video_pipeline
+from video_workflow import TranscriptStageError, process_video_and_transcribe
 from transcription_core import (
     SENTENCE_TYPES,
     TranscriptionSegment,
@@ -217,7 +217,7 @@ def render_video():
     output_path = TRACKED_VIDEO_DIR / f"tracked_{input_path.stem}.mp4"
     log_path = LOG_DIR / f"{input_path.stem}.json"
 
-    if st.button("🚀 Process Video", type="primary"):
+    if st.button("🚀 Process Video + Transcript", type="primary"):
         progress = st.progress(0)
         status = st.empty()
 
@@ -227,24 +227,26 @@ def render_video():
             status.write(f"Processing: {value * 100:.1f}%")
 
         try:
-            process_video_pipeline(
+            meeting_id = process_video_and_transcribe(
                 input_path,
                 output_path,
                 log_path,
                 progress_callback=update_progress,
             )
             progress.progress(1.0)
-            status.success("Processing completed.")
+            status.success("Processing and transcription completed.")
+            st.success(
+                f"Meeting {meeting_id} completed. Tracked video output: {output_path}"
+            )
+        except TranscriptStageError as exc:
+            progress.progress(1.0)
+            status.warning("Video processing completed, but transcription failed.")
+            st.warning(
+                "Video output is available at "
+                f"{exc.video_output_path}, but transcription failed: {exc}"
+            )
         except Exception as exc:
             st.exception(exc)
-
-    if st.button("📝 Transcribe Selected Video"):
-        with st.spinner("Extracting audio and transcribing..."):
-            try:
-                meeting_id = process_meeting_transcription(input_path)
-                st.success(f"Transcription completed for meeting {meeting_id}.")
-            except Exception as exc:
-                st.error(f"Transcription failed: {exc}")
 
     col1, col2 = st.columns(2)
 
