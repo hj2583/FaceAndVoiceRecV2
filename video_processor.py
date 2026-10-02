@@ -495,6 +495,9 @@ def process_video_pipeline(
             active_speech_logs.append({
                 "start_time": round(event["start_time"], 2),
                 "end_time": round(event["end_time"], 2),
+                "person_id": event["person_id"],
+                "track_id": event["track_id"],
+                "speaker": event["speaker"],
                 "person_name": event["speaker"],
                 "confidence": round(event["confidence"], 4),
                 "source": "video",
