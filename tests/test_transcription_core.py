@@ -7,6 +7,7 @@ from transcription_core import (
     TranscriptionSegment,
     absorb_minor_speakers,
     apply_text_cleanup,
+    build_face_event_diarizer,
     classify_segments,
     classify_sentence,
     group_transcript_turns,
@@ -128,6 +129,33 @@ def test_cleanup_normalizes_whitespace():
 
 def test_cleanup_none_preserves_text():
     assert apply_text_cleanup("  hello  ", "none") == "  hello  "
+
+
+def test_face_event_diarizer_fills_uncovered_speech_with_unknown():
+    diarize = build_face_event_diarizer([
+        {"speaker": "Alice", "start_time": 1.0, "end_time": 2.0},
+    ])
+
+    assert diarize(Path("audio.wav"), [(0.0, 3.0)]) == [
+        ("UNKNOWN", 0.0, 1.0),
+        ("Alice", 1.0, 2.0),
+        ("UNKNOWN", 2.0, 3.0),
+    ]
+
+
+def test_speaker_interval_requires_minimum_overlap_coverage():
+    from transcription_core import _speaker_for_interval
+
+    events = [("Alice", 0.0, 0.6), ("Bob", 0.6, 1.0)]
+
+    assert _speaker_for_interval(0.0, 1.0, events, 0.8) == "UNKNOWN"
+    assert _speaker_for_interval(0.0, 0.7, events, 0.8) == "Alice"
+
+
+def test_empty_face_diarization_with_threshold_is_unknown():
+    from transcription_core import _speaker_for_interval
+
+    assert _speaker_for_interval(3.0, 4.0, [], 0.8) == "UNKNOWN"
 
 
 def test_transcribe_with_diarization_only_transcribes_vad_speech_regions(tmp_path, monkeypatch):

@@ -329,11 +329,53 @@ def _detect_meeting_language(model, audio_path, speech_regions):
         return None
 
 
+def build_face_event_diarizer(speech_events):
+    events = sorted(
+        [
+            (
+                str(event.get("speaker") or event.get("person_name") or "UNKNOWN"),
+                float(event["start_time"]),
+                float(event["end_time"]),
+            )
+            for event in speech_events
+            if float(event.get("end_time", 0.0)) > float(event.get("start_time", 0.0))
+        ],
+        key=lambda event: event[1],
+    )
+
+    def diarize(_audio_path, speech_regions):
+        if speech_regions is None:
+            return events
+        intervals = []
+        for region_start, region_end in speech_regions:
+            cursor = float(region_start)
+            region_end = float(region_end)
+            for speaker, event_start, event_end in events:
+                start = max(cursor, float(region_start), event_start)
+                end = min(region_end, event_end)
+                if end <= start:
+                    continue
+                if start > cursor:
+                    intervals.append(("UNKNOWN", cursor, start))
+                intervals.append((speaker, start, end))
+                cursor = end
+            if cursor < region_end:
+                intervals.append(("UNKNOWN", cursor, region_end))
+        return intervals
+
+    return diarize
+
+
 def _speaker_for_interval(
     start_seconds: float,
     end_seconds: float,
     diarization: list[tuple[str, float, float]],
+    minimum_overlap: float = 0.0,
 ) -> str:
+    duration = end_seconds - start_seconds
+    if duration <= 0:
+        return "UNKNOWN" if minimum_overlap > 0 else "Unknown Speaker"
+
     overlap_by_speaker: dict[str, float] = {}
     for speaker, speaker_start, speaker_end in diarization:
         overlap = min(end_seconds, speaker_end) - max(start_seconds, speaker_start)
@@ -341,10 +383,17 @@ def _speaker_for_interval(
             overlap_by_speaker[str(speaker)] = (
                 overlap_by_speaker.get(str(speaker), 0.0) + overlap
             )
-    return max(overlap_by_speaker, key=overlap_by_speaker.get) if overlap_by_speaker else "Unknown Speaker"
+    if not overlap_by_speaker:
+        return "UNKNOWN" if minimum_overlap > 0 else "Unknown Speaker"
+
+    best_speaker = max(overlap_by_speaker, key=overlap_by_speaker.get)
+    best_overlap = overlap_by_speaker[best_speaker]
+    if minimum_overlap > 0 and (best_overlap / duration) < minimum_overlap:
+        return "UNKNOWN"
+    return best_speaker
 
 
-def _split_segment_by_words(raw_segment, diarization):
+def _split_segment_by_words(raw_segment, diarization, minimum_overlap: float = 0.0):
     """Split a Whisper segment when timed words cross speaker intervals."""
     raw_text = str(raw_segment.get("text", "")).strip()
     words = raw_segment.get("words") or []
@@ -378,7 +427,7 @@ def _split_segment_by_words(raw_segment, diarization):
     for word in timed_words:
         word_start = float(word["start"])
         word_end = float(word["end"])
-        speaker = _speaker_for_interval(word_start, word_end, diarization)
+        speaker = _speaker_for_interval(word_start, word_end, diarization, minimum_overlap)
         if current_words and speaker != current_speaker:
             pieces.append((current_speaker, current_words[0][0], current_words[-1][1], "".join(current_words[i][2] for i in range(len(current_words)))))
             current_words = []
@@ -397,6 +446,7 @@ def transcribe_with_diarization(
     model_size: Optional[str] = None,
     diarize: Optional[Callable[[Path, list[tuple[float, float]]], Iterable[tuple[str, float, float]]]] = None,
     task: Optional[str] = None,
+    minimum_speaker_overlap: float = 0.0,
 ) -> list[TranscriptionSegment]:
     """Transcribe audio and assign speakers from an optional diarizer.
 
@@ -479,7 +529,7 @@ def transcribe_with_diarization(
         end_ms = int(end_seconds * 1000)
 
         confidence = _segment_confidence(raw)
-        word_pieces = _split_segment_by_words(raw, diarization) if diarization else None
+        word_pieces = _split_segment_by_words(raw, diarization, minimum_speaker_overlap) if diarization else None
         if word_pieces:
             segments.extend(
                 TranscriptionSegment(
@@ -494,7 +544,12 @@ def transcribe_with_diarization(
             )
             continue
 
-        label = _speaker_for_interval(start_seconds, end_seconds, diarization) if diarization else "Unknown Speaker"
+        label = _speaker_for_interval(
+            start_seconds,
+            end_seconds,
+            diarization,
+            minimum_speaker_overlap,
+        )
         segments.append(TranscriptionSegment(label, start_ms, end_ms, text, confidence))
     return segments
 
@@ -620,6 +675,7 @@ def reanalyze_meeting_segments(meeting_id: int) -> int:
 def process_meeting_transcription(
     video_path: str | Path,
     diarize: Optional[Callable[[Path, list[tuple[float, float]]], Iterable[tuple[str, float, float]]]] = None,
+    minimum_speaker_overlap: float = 0.0,
 ) -> int:
     """Run the offline transcription pipeline for one meeting video."""
     if not config.ENABLE_TRANSCRIPTION:
@@ -654,6 +710,7 @@ def process_meeting_transcription(
             audio_path,
             model_size=config.WHISPER_MODEL,
             diarize=diarize,
+            minimum_speaker_overlap=minimum_speaker_overlap,
         )
         cleaned_segments = [
             TranscriptionSegment(
