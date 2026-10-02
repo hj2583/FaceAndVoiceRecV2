@@ -170,7 +170,7 @@ def test_reason_has_all_four_keys_on_held_incumbent_path():
         1.0,
         [
             _observation(1, person_name="Alice", face_confidence=0.9, lip_open_ratio=0.05),
-            _observation(2, person_id=2, person_name="Bob", face_confidence=0.1, lip_open_ratio=0.0),
+            _observation(2, person_id=2, person_name="Bob", face_confidence=0.1, lip_open_ratio=0.04),
         ],
     )
 
@@ -179,8 +179,8 @@ def test_reason_has_all_four_keys_on_held_incumbent_path():
         1.1,
         [
             _observation(1, person_name="Alice", face_confidence=0.9, lip_open_ratio=0.05),
-            # Raw score briefly beats Alice's, but not by enough on the smoothed score to switch.
-            _observation(2, person_id=2, person_name="Bob", face_confidence=1.0, lip_open_ratio=0.5),
+            # Bob spikes this frame, but not by enough on the smoothed score to switch.
+            _observation(2, person_id=2, person_name="Bob", face_confidence=1.0, lip_open_ratio=0.08),
         ],
     )
     assert result["active_speaker"] == "Alice"
@@ -343,9 +343,149 @@ def test_closed_event_carries_none_person_id_for_unknown_run():
     # though the observation itself has a person_id.
     attributor.update_faces(1.0, [_observation(1, person_id=1, person_name="Alice", face_confidence=0.0)])
 
+    attributor.update_audio(1.1, True, 0.0)
+    attributor.update_faces(1.1, [_observation(1, person_id=1, person_name="Alice", face_confidence=0.0)])
+
     attributor.finish()
 
     events = attributor.pop_closed_events()
     assert len(events) == 1
     assert events[0]["speaker"] == "UNKNOWN"
     assert events[0]["person_id"] is None
+
+
+def test_two_seconds_silence_then_sustained_speech_stays_single_named_run():
+    attributor = SpeakerAttributor()
+
+    # Long silence with visible face observations must not poison voiced-score
+    # history and demote the speaker when speech starts.
+    t = 0.0
+    for _ in range(10):
+        attributor.update_audio(t, False, 0.0)
+        attributor.update_faces(t, [_observation(1, person_name="Alice", face_confidence=0.9, lip_open_ratio=0.0)])
+        t = round(t + 0.2, 2)
+
+    voiced_results = []
+    for _ in range(5):
+        attributor.update_audio(t, True, 1.0)
+        voiced_results.append(
+            attributor.update_faces(t, [_observation(1, person_name="Alice", face_confidence=0.9, lip_open_ratio=0.06)])
+        )
+        t = round(t + 0.1, 2)
+
+    assert [result["active_speaker"] for result in voiced_results] == ["Alice"] * 5
+
+    attributor.finish()
+    events = attributor.pop_closed_events()
+    assert len(events) == 1
+    assert events[0]["speaker"] == "Alice"
+
+
+def test_brief_pause_shorter_than_grace_keeps_one_continuous_run():
+    attributor = SpeakerAttributor()
+    grace_s = config.SPEAKER_GRACE_PERIOD_MS / 1000.0
+
+    attributor.update_audio(1.0, True, 1.0)
+    attributor.update_faces(1.0, [_observation(1, person_name="Alice", face_confidence=0.9, lip_open_ratio=0.06)])
+
+    attributor.update_audio(1.1, False, 0.0)
+    pause_result = attributor.update_faces(1.1, [_observation(1, person_name="Alice", face_confidence=0.9, lip_open_ratio=0.0)])
+    assert pause_result["active_speaker"] == "Alice"
+
+    resume_t = round(1.1 + grace_s / 2.0, 2)
+    attributor.update_audio(resume_t, True, 1.0)
+    resume_result = attributor.update_faces(
+        resume_t,
+        [_observation(1, person_name="Alice", face_confidence=0.9, lip_open_ratio=0.06)],
+    )
+    assert resume_result["active_speaker"] == "Alice"
+
+    attributor.finish()
+    events = attributor.pop_closed_events()
+    assert len(events) == 1
+    assert events[0]["speaker"] == "Alice"
+
+
+def test_single_voiced_frame_followed_by_silence_does_not_emit_zero_length_event():
+    attributor = SpeakerAttributor()
+    grace_s = config.SPEAKER_GRACE_PERIOD_MS / 1000.0
+
+    attributor.update_audio(1.0, True, 1.0)
+    attributor.update_faces(1.0, [_observation(1, person_name="Alice", face_confidence=0.9, lip_open_ratio=0.06)])
+
+    attributor.update_audio(1.0 + grace_s + 0.1, False, 0.0)
+    result = attributor.update_faces(
+        1.0 + grace_s + 0.1,
+        [_observation(1, person_name="Alice", face_confidence=0.9, lip_open_ratio=0.0)],
+    )
+
+    assert result["active_speaker"] is None
+    assert attributor.pop_closed_events() == []
+
+
+def test_closed_still_face_stays_unknown_but_open_mouth_face_can_be_selected():
+    attributor = SpeakerAttributor()
+
+    attributor.update_audio(1.0, True, 1.0)
+    closed_face = attributor.update_faces(
+        1.0,
+        [_observation(1, person_id=1, person_name="Alice", face_confidence=0.95, lip_open_ratio=0.0)],
+    )
+    assert closed_face["active_speaker"] == "UNKNOWN"
+    assert closed_face["track_id"] is None
+
+    attributor.update_audio(1.1, True, 1.0)
+    open_face = attributor.update_faces(
+        1.1,
+        [_observation(1, person_id=1, person_name="Alice", face_confidence=0.95, lip_open_ratio=0.08)],
+    )
+    assert open_face["active_speaker"] == "Alice"
+    assert open_face["track_id"] == 1
+
+
+def test_missing_face_observation_is_held_by_grace_before_demotion():
+    attributor = SpeakerAttributor()
+    grace_s = config.SPEAKER_GRACE_PERIOD_MS / 1000.0
+
+    attributor.update_audio(1.0, True, 1.0)
+    attributor.update_faces(1.0, [_observation(1, person_name="Alice", face_confidence=0.9, lip_open_ratio=0.06)])
+
+    attributor.update_audio(1.1, True, 1.0)
+    missing_once = attributor.update_faces(1.1, [])
+    assert missing_once["active_speaker"] == "Alice"
+
+    attributor.update_audio(1.1 + grace_s + 0.1, True, 1.0)
+    after_grace = attributor.update_faces(1.1 + grace_s + 0.1, [])
+    assert after_grace["active_speaker"] == "UNKNOWN"
+
+
+def test_sustained_speech_with_no_faces_produces_unknown_event_on_finish():
+    attributor = SpeakerAttributor()
+    attributor.update_audio(1.0, True, 1.0)
+    first = attributor.update_faces(1.0, [])
+    attributor.update_audio(1.2, True, 1.0)
+    second = attributor.update_faces(1.2, [])
+
+    assert first["active_speaker"] == "UNKNOWN"
+    assert second["active_speaker"] == "UNKNOWN"
+
+    attributor.finish()
+    events = attributor.pop_closed_events()
+    assert len(events) == 1
+    assert events[0]["speaker"] == "UNKNOWN"
+    assert events[0]["track_id"] is None
+    assert events[0]["end_time"] > events[0]["start_time"]
+
+
+def test_track_history_is_pruned_for_stale_tracks():
+    attributor = SpeakerAttributor()
+    attributor.update_audio(1.0, True, 1.0)
+    attributor.update_faces(1.0, [_observation(1, person_name="Alice", face_confidence=0.9, lip_open_ratio=0.06)])
+
+    ttl_s = config.SPEAKER_TRACK_HISTORY_TTL_MS / 1000.0
+    t2 = 1.0 + ttl_s + 0.1
+    attributor.update_audio(t2, True, 1.0)
+    attributor.update_faces(t2, [_observation(2, person_id=2, person_name="Bob", face_confidence=0.9, lip_open_ratio=0.06)])
+
+    assert 1 not in attributor._track_history
+    assert 2 in attributor._track_history

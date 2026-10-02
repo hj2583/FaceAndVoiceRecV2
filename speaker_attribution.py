@@ -32,6 +32,7 @@ class _AudioSample:
 class _TrackHistory:
     lip_ratios: deque = field(default_factory=lambda: deque(maxlen=config.SPEAKER_HISTORY_MAXLEN))
     scores: deque = field(default_factory=lambda: deque(maxlen=config.SPEAKER_HISTORY_MAXLEN))
+    last_seen: float = 0.0
 
 
 class SpeakerAttributor:
@@ -51,6 +52,8 @@ class SpeakerAttributor:
         self._face_weight = config.FACE_CONFIDENCE_WEIGHT
         self._temporal_weight = config.TEMPORAL_WEIGHT
         self._lip_motion_norm = config.LIP_MOTION_NORM
+        self._min_mouth_motion_score = config.SPEAKER_MIN_MOUTH_MOTION_SCORE
+        self._track_history_ttl_s = config.SPEAKER_TRACK_HISTORY_TTL_MS / 1000.0
 
         self._audio_samples: deque = deque(maxlen=config.SPEAKER_HISTORY_MAXLEN)
         self._track_history: dict[int, _TrackHistory] = {}
@@ -59,6 +62,7 @@ class SpeakerAttributor:
         self._current_track_id: Optional[int] = None
         self._current_person_id: Optional[int] = None
         self._current_open_since: Optional[float] = None
+        self._current_last_face_at: Optional[float] = None
         self._current_confidence: float = 0.0
         self._current_run_sum: float = 0.0
         self._current_run_count: int = 0
@@ -89,6 +93,7 @@ class SpeakerAttributor:
 
     def _mouth_motion_score(self, track_id, lip_open_ratio, timestamp):
         history = self._track_history.setdefault(track_id, _TrackHistory())
+        history.last_seen = timestamp
         history.lip_ratios.append((timestamp, lip_open_ratio))
         window_start = timestamp - self._window_s
         recent = [ratio for ts, ratio in history.lip_ratios if ts >= window_start]
@@ -99,7 +104,29 @@ class SpeakerAttributor:
 
     def _record_score(self, track_id, timestamp, score):
         history = self._track_history.setdefault(track_id, _TrackHistory())
+        history.last_seen = timestamp
         history.scores.append((timestamp, score))
+
+    def _prune_track_history(self, timestamp):
+        window_start = timestamp - self._window_s
+        stale_cutoff = timestamp - self._track_history_ttl_s
+        stale_ids = []
+
+        for track_id, history in self._track_history.items():
+            while history.lip_ratios and history.lip_ratios[0][0] < window_start:
+                history.lip_ratios.popleft()
+            while history.scores and history.scores[0][0] < window_start:
+                history.scores.popleft()
+            if history.last_seen < stale_cutoff:
+                stale_ids.append(track_id)
+
+        for track_id in stale_ids:
+            self._track_history.pop(track_id, None)
+
+    def _has_mouth_evidence(self, observation, motion_score):
+        if not observation.face_visible:
+            return False
+        return observation.mouth_open or motion_score >= self._min_mouth_motion_score
 
     def _smoothed_score(self, track_id, timestamp):
         history = self._track_history.get(track_id)
@@ -113,18 +140,25 @@ class SpeakerAttributor:
         scored = []
         for observation in face_observations:
             motion_score = self._mouth_motion_score(observation.track_id, observation.lip_open_ratio, timestamp)
+            has_mouth_evidence = self._has_mouth_evidence(observation, motion_score)
             is_incumbent = observation.track_id == self._current_track_id
-            if voice_active:
+            if voice_active and has_mouth_evidence:
                 score = (
                     self._voice_weight * voice_confidence
                     + self._lip_weight * motion_score
                     + self._face_weight * observation.face_confidence
                     + self._temporal_weight * (1.0 if is_incumbent else 0.0)
                 )
+                # Silent or ineligible frames must not poison voiced smoothing.
+                self._record_score(observation.track_id, timestamp, score)
             else:
                 score = 0.0
-            self._record_score(observation.track_id, timestamp, score)
-            scored.append({"observation": observation, "score": score, "motion_score": motion_score})
+            scored.append({
+                "observation": observation,
+                "score": score,
+                "motion_score": motion_score,
+                "eligible": has_mouth_evidence,
+            })
         return scored
 
     def _score_candidates_from_timestamp(self, timestamp, face_observations):
@@ -143,6 +177,8 @@ class SpeakerAttributor:
         voice_active = bool(audio and audio.voice_active)
         voice_confidence = audio.voice_confidence if audio else 0.0
 
+        self._prune_track_history(timestamp)
+
         scored = self._score_candidates(timestamp, voice_active, voice_confidence, face_observations)
 
         if self.debug:
@@ -153,21 +189,19 @@ class SpeakerAttributor:
 
         self._last_voice_at = timestamp
 
-        if not scored:
-            if self._current_speaker is not None:
-                self._close_current_event(timestamp)
-            reason = self._build_reason(timestamp, None, voice_confidence, scored)
-            return self._result(timestamp, "UNKNOWN", None, 0.0, reason)
+        eligible_scored = [entry for entry in scored if entry["eligible"]]
+        if not eligible_scored:
+            return self._handle_voice_with_no_eligible_face(timestamp, voice_confidence, scored)
 
-        return self._decide(timestamp, voice_confidence, scored)
+        return self._decide(timestamp, voice_confidence, eligible_scored)
 
     def _handle_silence(self, timestamp, scored):
         if self._current_speaker is None:
             return self._result(timestamp, None, None, 0.0, {})
 
-        if timestamp - self._last_voice_at >= self._grace_period_s:
+        if self._last_voice_at is None or timestamp - self._last_voice_at >= self._grace_period_s:
             # The run ended when voice stopped, not when the grace window expired.
-            self._close_current_event(self._last_voice_at)
+            self._close_current_event(self._last_voice_at if self._last_voice_at is not None else timestamp)
             return self._result(timestamp, None, None, 0.0, {})
 
         reason = self._build_reason(
@@ -176,6 +210,60 @@ class SpeakerAttributor:
         return self._result(
             timestamp, self._current_speaker, self._current_track_id,
             self._current_confidence, reason,
+        )
+
+    def _open_or_continue_unknown_run(self, timestamp, voice_confidence, scored, extra_reason=None):
+        frame_confidence = self._voice_weight * voice_confidence
+
+        if self._current_speaker == "UNKNOWN" and self._current_track_id is None:
+            self._current_run_sum += frame_confidence
+            self._current_run_count += 1
+            self._current_confidence = frame_confidence
+            reason = self._build_reason(timestamp, None, voice_confidence, scored, extra_reason)
+            return self._result(timestamp, "UNKNOWN", None, frame_confidence, reason)
+
+        if self._current_speaker is not None:
+            close_at = self._current_last_face_at if self._current_last_face_at is not None else timestamp
+            self._close_current_event(close_at)
+
+        self._current_speaker = "UNKNOWN"
+        self._current_track_id = None
+        self._current_person_id = None
+        self._current_open_since = timestamp
+        self._current_last_face_at = None
+        self._current_run_sum = frame_confidence
+        self._current_run_count = 1
+        self._current_confidence = frame_confidence
+        reason = self._build_reason(timestamp, None, voice_confidence, scored, extra_reason)
+        return self._result(timestamp, "UNKNOWN", None, frame_confidence, reason)
+
+    def _handle_voice_with_no_eligible_face(self, timestamp, voice_confidence, scored):
+        if (
+            self._current_track_id is not None
+            and self._current_speaker is not None
+            and self._current_last_face_at is not None
+            and timestamp - self._current_last_face_at < self._grace_period_s
+        ):
+            reason = self._build_reason(
+                timestamp,
+                self._current_track_id,
+                voice_confidence,
+                scored,
+                {"grace_period": True, "missing_face": True},
+            )
+            return self._result(
+                timestamp,
+                self._current_speaker,
+                self._current_track_id,
+                self._current_confidence,
+                reason,
+            )
+
+        return self._open_or_continue_unknown_run(
+            timestamp,
+            voice_confidence,
+            scored,
+            {"no_eligible_face": True},
         )
 
     def _decide(self, timestamp, voice_confidence, scored):
@@ -213,6 +301,8 @@ class SpeakerAttributor:
                     self._current_run_sum += current_score
                     self._current_run_count += 1
                 self._current_confidence = reported_confidence
+                if incumbent_id is not None and self._find_entry(incumbent_id, scored) is not None:
+                    self._current_last_face_at = timestamp
                 reason = self._build_reason(
                     timestamp, incumbent_id, voice_confidence, scored, {"held_incumbent": True},
                 )
@@ -220,7 +310,7 @@ class SpeakerAttributor:
                     timestamp, self._current_speaker, self._current_track_id,
                     reported_confidence, reason,
                 )
-            label = "UNKNOWN"
+            return self._open_or_continue_unknown_run(timestamp, voice_confidence, scored)
 
         if label != self._current_speaker or observation.track_id != self._current_track_id:
             if self._current_speaker is not None:
@@ -229,11 +319,13 @@ class SpeakerAttributor:
             self._current_track_id = observation.track_id
             self._current_person_id = observation.person_id if label != "UNKNOWN" else None
             self._current_open_since = timestamp
+            self._current_last_face_at = timestamp
             self._current_run_sum = best["score"]
             self._current_run_count = 1
         else:
             self._current_run_sum += best["score"]
             self._current_run_count += 1
+            self._current_last_face_at = timestamp
 
         self._current_confidence = best["score"]
         reason = self._build_reason(timestamp, observation.track_id, voice_confidence, scored)
@@ -269,18 +361,20 @@ class SpeakerAttributor:
                 confidence = self._current_run_sum / self._current_run_count
             else:
                 confidence = self._current_confidence
-            self._closed_events.append({
-                "speaker": self._current_speaker,
-                "track_id": self._current_track_id,
-                "person_id": self._current_person_id,
-                "start_time": self._current_open_since,
-                "end_time": timestamp,
-                "confidence": confidence,
-            })
+            if timestamp > self._current_open_since:
+                self._closed_events.append({
+                    "speaker": self._current_speaker,
+                    "track_id": self._current_track_id,
+                    "person_id": self._current_person_id,
+                    "start_time": self._current_open_since,
+                    "end_time": timestamp,
+                    "confidence": confidence,
+                })
         self._current_speaker = None
         self._current_track_id = None
         self._current_person_id = None
         self._current_open_since = None
+        self._current_last_face_at = None
         self._current_confidence = 0.0
         self._current_run_sum = 0.0
         self._current_run_count = 0
@@ -290,6 +384,7 @@ class SpeakerAttributor:
         if speaker is not None:
             result["track_id"] = track_id
             result["confidence"] = confidence
+            result["run_start_time"] = self._current_open_since
             result["reason"] = reason
         return result
 

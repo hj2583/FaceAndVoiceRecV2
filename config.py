@@ -226,6 +226,14 @@ TEMPORAL_WEIGHT = 0.10
 # by this constant, then clamped to [0, 1], to produce mouth_motion_score.
 LIP_MOTION_NORM = 0.02
 
+# Minimum recent mouth-motion score required (when mouth_open is False) before
+# a visible face can be confidently attributed to active speech.
+SPEAKER_MIN_MOUTH_MOTION_SCORE = 0.25
+
+# Drop per-track score/lip history after this much inactivity to prevent
+# unbounded growth of the _track_history map over long sessions.
+SPEAKER_TRACK_HISTORY_TTL_MS = 4000
+
 # Max samples kept per track (lip ratios, scores) and for audio; must cover
 # SPEAKER_WINDOW_MS at the highest expected frame rate.
 SPEAKER_HISTORY_MAXLEN = 64
