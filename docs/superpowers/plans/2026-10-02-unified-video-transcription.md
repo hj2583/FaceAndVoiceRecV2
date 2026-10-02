@@ -60,6 +60,12 @@ def test_speaker_interval_requires_minimum_overlap_coverage():
 
     assert _speaker_for_interval(0.0, 1.0, events, 0.8) == "UNKNOWN"
     assert _speaker_for_interval(0.0, 0.7, events, 0.8) == "Alice"
+
+
+def test_empty_face_diarization_with_threshold_is_unknown():
+    from transcription_core import _speaker_for_interval
+
+    assert _speaker_for_interval(3.0, 4.0, [], 0.8) == "UNKNOWN"
 ```
 
 - [ ] **Step 2: Run the focused tests and verify they fail**
@@ -110,7 +116,7 @@ def build_face_event_diarizer(speech_events):
     return diarize
 ```
 
-Extend `_speaker_for_interval(start_seconds, end_seconds, diarization, minimum_overlap=0.0)`. For the existing default `0.0`, preserve current behavior, including its existing `"Unknown Speaker"` fallback when no interval overlaps. For a positive threshold, return `"UNKNOWN"` when `best_overlap / (end_seconds - start_seconds) < minimum_overlap`. Pass this parameter through `_split_segment_by_words()` and `transcribe_with_diarization()` so timed words receive the same coverage rule. This keeps voice-only callers backward-compatible while the combined face-attribution path uses uppercase `UNKNOWN` below its configured coverage threshold.
+Extend `_speaker_for_interval(start_seconds, end_seconds, diarization, minimum_overlap=0.0)`. For the existing default `0.0`, preserve current behavior, including its existing `"Unknown Speaker"` fallback when no interval overlaps. For a positive threshold, return `"UNKNOWN"` when no speaker overlaps or when `best_overlap / (end_seconds - start_seconds) < minimum_overlap`. Pass this parameter through `_split_segment_by_words()` and `transcribe_with_diarization()` so timed words receive the same coverage rule. If the explicit face-event callback returns no intervals (including VAD failure plus no face events) and `minimum_speaker_overlap > 0`, assign `"UNKNOWN"` rather than the legacy `"Unknown Speaker"` fallback. This keeps voice-only callers backward-compatible while the combined face-attribution path uses uppercase `UNKNOWN` below its configured coverage threshold.
 
 Add `minimum_speaker_overlap: float = 0.0` to `transcribe_with_diarization()` and `process_meeting_transcription()`. Forward it from the latter into the former. Existing call sites omit it and retain previous behavior. The video workflow in Task 3 passes `config.SPEAKER_FACE_OVERLAP_THRESHOLD`.
 
