@@ -151,11 +151,12 @@ def render_realtime():
     if rows:
         data = []
         for row in rows:
-            _id, start, end, name, confidence, source, transcript = row
+            _id, start, end, name, confidence, source, transcript, track_id = row
             data.append({
                 "Start": fmt_time(start),
                 "End": fmt_time(end),
                 "Person": name or "Unknown",
+                "Track": track_id if track_id is not None else "",
                 "Confidence": round(confidence, 3),
                 "Transcript": transcript or "",
             })
@@ -860,13 +861,14 @@ def render_audio_logs():
     data = []
 
     for row in rows:
-        _id, start, end, name, confidence, source, transcript = row
+        _id, start, end, name, confidence, source, transcript, track_id = row
 
         data.append({
             "Start": fmt_time(start),
             "End": fmt_time(end),
             "Duration": round(float(end) - float(start), 2),
             "Person": name or "Unknown",
+            "Track": track_id if track_id is not None else "",
             "Confidence": round(float(confidence), 3),
             "Source": source,
             "Transcript": transcript or "",
