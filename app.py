@@ -52,6 +52,7 @@ from database import (
 )
 from face_core import FaceIndex
 from realtime_launcher import launch_realtime
+from runtime_status import get_runtime_status
 from video_workflow import TranscriptStageError, process_video_and_transcribe
 from transcription_core import (
     SENTENCE_TYPES,
@@ -86,28 +87,6 @@ def fmt_time(seconds):
     minutes = int(seconds // 60)
     secs = int(seconds % 60)
     return f"{minutes:02d}:{secs:02d}"
-
-
-def get_runtime_mode():
-    try:
-        import torch
-
-        if torch.cuda.is_available():
-            return "GPU (CUDA)"
-    except Exception:
-        pass
-
-    try:
-        from face_backend import get_cuda_providers
-
-        provider = get_cuda_providers()[0]
-        if provider == "CUDAExecutionProvider":
-            return "GPU (CUDA)"
-        if provider == "CPUExecutionProvider":
-            return "CPU"
-        return provider
-    except Exception:
-        return "CPU"
 
 
 def render_realtime():
@@ -1178,13 +1157,9 @@ def render_voice_enrollment():
 def main():
     st.title("🎥 AI Face + Active Speaker Recognition")
 
-    runtime_mode = get_runtime_mode()
-    if runtime_mode == "GPU (CUDA)":
-        st.success(f"Runtime mode: {runtime_mode}")
-    elif runtime_mode == "CPU":
-        st.warning(f"Runtime mode: {runtime_mode}")
-    else:
-        st.info(f"Runtime mode: {runtime_mode}")
+    runtime_status = get_runtime_status()
+    st.caption(f"Audio models (PyTorch): {runtime_status['torch']}")
+    st.caption(f"Face models (ONNX Runtime): {runtime_status['face']}")
 
     # st.caption(
     #     "Shared ArcFace embeddings + SQLite database + NumPy similarity index. "
