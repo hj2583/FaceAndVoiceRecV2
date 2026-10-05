@@ -205,24 +205,43 @@ def render_video():
             progress.progress(value)
             status.write(f"Processing: {value * 100:.1f}%")
 
+        def update_stage(message):
+            status.write(message)
+
         try:
             meeting_id = process_video_and_transcribe(
                 input_path,
                 output_path,
                 log_path,
                 progress_callback=update_progress,
+                stage_callback=update_stage,
             )
             progress.progress(1.0)
             status.success("Processing and transcription completed.")
             st.success(
-                f"Meeting {meeting_id} completed. Tracked video output: {output_path}"
+                f"✅ Meeting {meeting_id} processed successfully.\n"
+                f"Tracked video: {output_path}\n"
+                f"Includes original audio and burned-in subtitles."
             )
         except TranscriptStageError as exc:
             progress.progress(1.0)
-            status.warning("Video processing completed, but transcription failed.")
+            audio_note = ""
+            if exc.stage == "transcription":
+                audio_note = "Transcription failed; video has original audio (no subtitles)."
+            elif exc.stage == "subtitle":
+                audio_note = "Subtitle burning failed; video has original audio (no subtitles)."
+            elif exc.stage == "audio_mux":
+                audio_note = "Audio restoration failed; video contains captions only (silent)."
+            meeting_note = f" (Meeting ID: {exc.meeting_id})" if exc.meeting_id else ""
+            status.warning(
+                f"Stage '{exc.stage}' failed{meeting_note}. {audio_note}"
+            )
             st.warning(
-                "Video output is available at "
-                f"{exc.video_output_path}, but transcription failed: {exc}"
+                f"**Stage:** {exc.stage}\n"
+                f"**Output path:** {exc.video_output_path}\n"
+                f"**Partial result:** {audio_note}\n"
+                f"**Error:** {exc.cause}\n"
+                + (f"**Meeting ID:** {exc.meeting_id}\n" if exc.meeting_id else "")
             )
         except Exception as exc:
             st.exception(exc)
