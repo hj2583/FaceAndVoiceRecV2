@@ -1,7 +1,15 @@
 from dataclasses import dataclass
 from typing import List, Tuple, Optional
 from pathlib import Path
+import os
+import shutil
+import subprocess
+import uuid
 import config
+
+
+class VideoMuxError(RuntimeError):
+    """Raised when FFmpeg subtitle burn-in and muxing cannot be safely finalized."""
 
 
 @dataclass
@@ -251,3 +259,69 @@ def _ms_to_ass_time(ms: int) -> str:
     seconds = total_seconds % 60
     
     return f"{hours}:{minutes:02d}:{seconds:02d}.{centiseconds:02d}"
+
+
+def unique_temp_sibling(output_path) -> Path:
+    """Create a collision-free temp file path beside output_path."""
+    output_path = Path(output_path)
+    return output_path.with_name(
+        f".{output_path.stem}.{uuid.uuid4().hex}.tmp{output_path.suffix}"
+    )
+
+
+def _mux_args(ffmpeg, annotated_video, source_video, temp_output, subtitle_path, audio_codec) -> List[str]:
+    """Build FFmpeg args for subtitle burn-in + source audio mux."""
+    args = [ffmpeg, "-y", "-i", str(annotated_video), "-i", str(source_video)]
+    if subtitle_path is not None:
+        args.extend(["-vf", f"subtitles=filename={Path(subtitle_path).name}"])
+    args.extend([
+        "-map", "0:v:0",
+        "-map", "1:a:0?",
+        "-c:v", "libx264",
+        "-c:a", audio_codec,
+    ])
+    if audio_codec == "aac":
+        args.extend(["-b:a", "192k"])
+    args.extend(["-movflags", "+faststart", str(temp_output)])
+    return args
+
+
+def mux_tracked_video(annotated_video, source_video, output_path, subtitle_path=None, ffmpeg=None) -> Path:
+    """Burn ASS subtitles into an annotated video and mux audio from source video."""
+    output_path = Path(output_path)
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    ffmpeg_bin = ffmpeg or shutil.which("ffmpeg")
+    if ffmpeg_bin is None:
+        raise VideoMuxError("FFmpeg was not found in PATH")
+
+    subtitle_file = Path(subtitle_path) if subtitle_path is not None else None
+    subtitle_cwd = str(subtitle_file.parent) if subtitle_file is not None else None
+
+    last_error = ""
+    for audio_codec in ("copy", "aac"):
+        temp_output = unique_temp_sibling(output_path)
+        args = _mux_args(
+            ffmpeg_bin,
+            annotated_video,
+            source_video,
+            temp_output,
+            subtitle_file,
+            audio_codec,
+        )
+        result = subprocess.run(
+            args,
+            cwd=subtitle_cwd,
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        if result.returncode == 0 and temp_output.is_file():
+            os.replace(temp_output, output_path)
+            return output_path
+
+        last_error = (result.stderr or result.stdout or "").strip()
+        temp_output.unlink(missing_ok=True)
+
+    if last_error:
+        raise VideoMuxError(last_error)
+    raise VideoMuxError("FFmpeg muxing failed")

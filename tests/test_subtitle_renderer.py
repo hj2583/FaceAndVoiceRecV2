@@ -1,5 +1,14 @@
-from subtitle_renderer import SubtitleCue, SubtitleWord, build_subtitle_cues, write_ass_subtitles
+from subtitle_renderer import (
+    SubtitleCue,
+    SubtitleWord,
+    VideoMuxError,
+    build_subtitle_cues,
+    mux_tracked_video,
+    write_ass_subtitles,
+)
 from pathlib import Path
+from types import SimpleNamespace
+import pytest
 import config
 
 
@@ -178,4 +187,133 @@ def test_max_lines_one_with_oversized_first_word():
     # Should create a cue with the first word, even if oversized
     assert len(cues) >= 1
     assert "Supercalifragilisticexpialidocious" in cues[0].lines[0]
+
+
+def test_mux_tracked_video_retries_copy_to_aac_and_replaces_output(tmp_path, monkeypatch):
+    annotated_video = tmp_path / "annotated.mp4"
+    source_video = tmp_path / "source.mp4"
+    subtitle_path = tmp_path / "subs" / "subtitles.ass"
+    output_path = tmp_path / "final.mp4"
+    subtitle_path.parent.mkdir(parents=True, exist_ok=True)
+    annotated_video.write_bytes(b"annotated")
+    source_video.write_bytes(b"source")
+    subtitle_path.write_text("dummy", encoding="utf-8")
+
+    calls = []
+
+    def fake_run(args, **kwargs):
+        calls.append({
+            "args": list(args),
+            "cwd": kwargs.get("cwd"),
+            "shell": kwargs.get("shell"),
+            "output_exists_before": output_path.exists(),
+        })
+        if len(calls) == 1:
+            return SimpleNamespace(returncode=1, stderr="copy codec unsupported")
+        Path(args[-1]).write_bytes(b"muxed")
+        return SimpleNamespace(returncode=0, stderr="")
+
+    monkeypatch.setattr("subtitle_renderer.subprocess.run", fake_run)
+
+    result = mux_tracked_video(
+        annotated_video=annotated_video,
+        source_video=source_video,
+        output_path=output_path,
+        subtitle_path=subtitle_path,
+        ffmpeg="ffmpeg",
+    )
+
+    assert result == output_path
+    assert output_path.read_bytes() == b"muxed"
+    assert len(calls) == 2
+    assert all(not call["output_exists_before"] for call in calls)
+
+    first_args = calls[0]["args"]
+    second_args = calls[1]["args"]
+
+    assert first_args[:2] == ["ffmpeg", "-y"]
+    assert first_args[2:6] == ["-i", str(annotated_video), "-i", str(source_video)]
+    assert second_args[2:6] == ["-i", str(annotated_video), "-i", str(source_video)]
+
+    assert "-map" in first_args
+    first_map_positions = [i for i, token in enumerate(first_args) if token == "-map"]
+    assert first_args[first_map_positions[0] + 1] == "0:v:0"
+    assert first_args[first_map_positions[1] + 1] == "1:a:0?"
+
+    assert first_args[first_args.index("-vf") + 1] == "subtitles=filename=subtitles.ass"
+    assert Path(calls[0]["cwd"]) == subtitle_path.parent
+    assert Path(calls[1]["cwd"]) == subtitle_path.parent
+    assert calls[0]["shell"] in (None, False)
+    assert calls[1]["shell"] in (None, False)
+
+    assert first_args[first_args.index("-c:a") + 1] == "copy"
+    assert second_args[second_args.index("-c:a") + 1] == "aac"
+    assert "-b:a" in second_args
+    assert second_args[second_args.index("-b:a") + 1] == "192k"
+
+    assert Path(first_args[-1]) != output_path
+    assert Path(second_args[-1]) != output_path
+
+
+def test_mux_tracked_video_raises_and_preserves_existing_output_on_double_failure(tmp_path, monkeypatch):
+    annotated_video = tmp_path / "annotated.mp4"
+    source_video = tmp_path / "source.mp4"
+    output_path = tmp_path / "final.mp4"
+    annotated_video.write_bytes(b"annotated")
+    source_video.write_bytes(b"source")
+    output_path.write_bytes(b"original")
+
+    calls = []
+
+    def fake_run(args, **kwargs):
+        calls.append(list(args))
+        temp_path = Path(args[-1])
+        temp_path.write_bytes(b"partial")
+        return SimpleNamespace(returncode=1, stderr="mux failed")
+
+    monkeypatch.setattr("subtitle_renderer.subprocess.run", fake_run)
+
+    with pytest.raises(VideoMuxError):
+        mux_tracked_video(
+            annotated_video=annotated_video,
+            source_video=source_video,
+            output_path=output_path,
+            subtitle_path=None,
+            ffmpeg="ffmpeg",
+        )
+
+    assert len(calls) == 2
+    assert output_path.read_bytes() == b"original"
+    temp_candidates = list(tmp_path.glob(f".{output_path.stem}.*.tmp{output_path.suffix}"))
+    assert temp_candidates == []
+
+
+def test_mux_tracked_video_without_subtitles_omits_vf_and_maps_optional_audio(tmp_path, monkeypatch):
+    annotated_video = tmp_path / "annotated.mp4"
+    source_video = tmp_path / "source.mp4"
+    output_path = tmp_path / "final.mp4"
+    annotated_video.write_bytes(b"annotated")
+    source_video.write_bytes(b"source")
+
+    captured_args = []
+
+    def fake_run(args, **kwargs):
+        captured_args.extend(args)
+        Path(args[-1]).write_bytes(b"muxed")
+        return SimpleNamespace(returncode=0, stderr="")
+
+    monkeypatch.setattr("subtitle_renderer.subprocess.run", fake_run)
+
+    mux_tracked_video(
+        annotated_video=annotated_video,
+        source_video=source_video,
+        output_path=output_path,
+        subtitle_path=None,
+        ffmpeg="ffmpeg",
+    )
+
+    assert "-vf" not in captured_args
+    map_positions = [i for i, token in enumerate(captured_args) if token == "-map"]
+    assert captured_args[map_positions[0] + 1] == "0:v:0"
+    assert captured_args[map_positions[1] + 1] == "1:a:0?"
 
