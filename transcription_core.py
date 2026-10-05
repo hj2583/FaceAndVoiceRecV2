@@ -15,6 +15,7 @@ from typing import Callable, Iterable, Optional
 import re
 
 import config
+from subtitle_renderer import SubtitleWord
 import voice_core
 from audio_core import detect_speech_segments
 
@@ -477,6 +478,7 @@ def transcribe_with_diarization(
     diarize: Optional[Callable[[Path, list[tuple[float, float]]], Iterable[tuple[str, float, float]]]] = None,
     task: Optional[str] = None,
     minimum_speaker_overlap: float = 0.0,
+    subtitle_word_callback: Optional[Callable[[SubtitleWord], None]] = None,
 ) -> list[TranscriptionSegment]:
     """Transcribe audio and assign speakers from an optional diarizer.
 
@@ -559,6 +561,25 @@ def transcribe_with_diarization(
         end_ms = int(end_seconds * 1000)
 
         confidence = _segment_confidence(raw)
+        timed_words = _timed_words_if_reliable(raw)
+        if subtitle_word_callback and timed_words:
+            for word in timed_words:
+                word_start = float(word["start"])
+                word_end = float(word["end"])
+                word_text = str(word["word"]).strip()
+                if not word_text:
+                    continue
+                subtitle_word_callback(SubtitleWord(
+                    _speaker_for_interval(
+                        word_start,
+                        word_end,
+                        diarization,
+                        minimum_speaker_overlap,
+                    ),
+                    int(word_start * 1000),
+                    int(word_end * 1000),
+                    word_text,
+                ))
         word_pieces = _split_segment_by_words(raw, diarization, minimum_speaker_overlap) if diarization else None
         if word_pieces:
             segments.extend(
@@ -584,6 +605,13 @@ def transcribe_with_diarization(
                 diarization,
                 minimum_speaker_overlap,
             )
+        if subtitle_word_callback and not timed_words:
+            subtitle_word_callback(SubtitleWord(
+                label,
+                start_ms,
+                end_ms,
+                text,
+            ))
         segments.append(TranscriptionSegment(label, start_ms, end_ms, text, confidence))
     return segments
 
@@ -710,6 +738,7 @@ def process_meeting_transcription(
     video_path: str | Path,
     diarize: Optional[Callable[[Path, list[tuple[float, float]]], Iterable[tuple[str, float, float]]]] = None,
     minimum_speaker_overlap: float = 0.0,
+    subtitle_word_callback: Optional[Callable[[SubtitleWord], None]] = None,
 ) -> int:
     """Run the offline transcription pipeline for one meeting video."""
     if not config.ENABLE_TRANSCRIPTION:
@@ -745,6 +774,7 @@ def process_meeting_transcription(
             model_size=config.WHISPER_MODEL,
             diarize=diarize,
             minimum_speaker_overlap=minimum_speaker_overlap,
+            subtitle_word_callback=subtitle_word_callback,
         )
         cleaned_segments = [
             TranscriptionSegment(

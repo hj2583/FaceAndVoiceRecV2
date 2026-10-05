@@ -594,3 +594,70 @@ def test_process_meeting_transcription_populates_person_id_for_known_speaker(tmp
         ).fetchone()
 
     assert row == ("Henry", person_id)
+
+
+def test_subtitle_word_callback_receives_face_attributed_word_timestamps(tmp_path, monkeypatch):
+    from transcription_core import SubtitleWord, transcribe_with_diarization
+
+    wav_path = tmp_path / "audio.wav"
+    wav_path.write_bytes(b"fake wav")
+    monkeypatch.setattr("transcription_core.detect_speech_segments", lambda *_a: [(0.0, 1.0)])
+
+    class FakeModel:
+        def transcribe(self, _path, **_kwargs):
+            return {"segments": [{
+                "start": 0.0, "end": 1.0, "text": " hello there", "avg_logprob": -0.1,
+                "words": [
+                    {"word": " hello", "start": 0.1, "end": 0.4},
+                    {"word": " there", "start": 0.5, "end": 0.8},
+                ],
+            }]}
+
+    fake_whisper = type("FakeWhisperModule", (), {
+        "load_model": staticmethod(lambda *_a, **_k: FakeModel())
+    })
+    monkeypatch.setitem(__import__("sys").modules, "whisper", fake_whisper)
+    observed = []
+
+    segments = transcribe_with_diarization(
+        wav_path,
+        diarize=lambda *_a: [("Alice", 0.0, 0.45), ("Bob", 0.45, 1.0)],
+        minimum_speaker_overlap=0.8,
+        subtitle_word_callback=observed.append,
+    )
+
+    assert observed == [
+        SubtitleWord("Alice", 100, 400, "hello"),
+        SubtitleWord("Bob", 500, 800, "there"),
+    ]
+    assert [(segment.speaker_label, segment.text) for segment in segments] == [
+        ("Alice", "hello"), ("Bob", "there"),
+    ]
+
+
+def test_subtitle_callback_uses_whole_segment_when_word_timings_are_missing(tmp_path, monkeypatch):
+    from transcription_core import SubtitleWord, transcribe_with_diarization
+
+    wav_path = tmp_path / "audio.wav"
+    wav_path.write_bytes(b"fake wav")
+    monkeypatch.setattr("transcription_core.detect_speech_segments", lambda *_a: [(0.0, 1.0)])
+
+    class FakeModel:
+        def transcribe(self, _path, **_kwargs):
+            return {"segments": [{
+                "start": 0.0, "end": 1.0, "text": " hello world", "avg_logprob": -0.1,
+            }]}
+
+    fake_whisper = type("FakeWhisperModule", (), {
+        "load_model": staticmethod(lambda *_a, **_k: FakeModel())
+    })
+    monkeypatch.setitem(__import__("sys").modules, "whisper", fake_whisper)
+    observed = []
+
+    transcribe_with_diarization(
+        wav_path,
+        diarize=lambda *_a: [("Alice", 0.0, 1.0)],
+        subtitle_word_callback=observed.append,
+    )
+
+    assert observed == [SubtitleWord("Alice", 0, 1000, "hello world")]
