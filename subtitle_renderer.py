@@ -1,6 +1,7 @@
 from dataclasses import dataclass
-from typing import List, Tuple
+from typing import List, Tuple, Optional
 from pathlib import Path
+import config
 
 
 @dataclass
@@ -21,78 +22,164 @@ class SubtitleCue:
     lines: Tuple[str, ...]
 
 
-def build_subtitle_cues(words: List[SubtitleWord], max_gap_ms: int, max_chars_per_line: int, max_lines: int) -> List[SubtitleCue]:
+def build_subtitle_cues(
+    words: List[SubtitleWord],
+    max_gap_ms: Optional[int] = None,
+    max_chars_per_line: Optional[int] = None,
+    max_lines: Optional[int] = None,
+) -> List[SubtitleCue]:
     """Build subtitle cues from words, splitting on speaker changes and long gaps."""
+    # Use config defaults if None provided
+    if max_gap_ms is None:
+        max_gap_ms = config.SUBTITLE_MAX_GAP_MS
+    if max_chars_per_line is None:
+        max_chars_per_line = config.SUBTITLE_MAX_CHARS_PER_LINE
+    if max_lines is None:
+        max_lines = config.SUBTITLE_MAX_LINES
+    
     if not words:
         return []
     
-    # Filter out invalid words (start_ms >= end_ms)
-    valid_words = [w for w in words if w.start_ms < w.end_ms]
+    # Sort by start_ms
+    sorted_words = sorted(words, key=lambda w: w.start_ms)
+    
+    # Filter out invalid words: start_ms >= end_ms or empty text
+    valid_words = [w for w in sorted_words if w.start_ms < w.end_ms and w.text.strip()]
     if not valid_words:
         return []
     
     cues = []
-    current_cue_words = []
-    current_speaker = valid_words[0].speaker_label
-    current_start = valid_words[0].start_ms
+    i = 0
     
-    for word in valid_words:
-        # Check for speaker change or gap
-        if word.speaker_label != current_speaker:
-            # Finalize current cue and start new one
-            if current_cue_words:
-                cue = _create_cue(current_cue_words, current_speaker, current_start, max_chars_per_line, max_lines)
+    while i < len(valid_words):
+        # Start a new cue with the current word
+        current_speaker = valid_words[i].speaker_label
+        current_start = valid_words[i].start_ms
+        current_group = []
+        
+        # Gather words for this cue: same speaker, no long gaps
+        while i < len(valid_words):
+            word = valid_words[i]
+            
+            # Check speaker change
+            if word.speaker_label != current_speaker:
+                break
+            
+            # Check gap
+            if current_group and word.start_ms - current_group[-1].end_ms > max_gap_ms:
+                break
+            
+            current_group.append(word)
+            i += 1
+        
+        # Now split current_group if it exceeds max_lines
+        j = 0
+        while j < len(current_group):
+            # Get as many words as fit in max_lines
+            group_for_cue, words_consumed = _get_cue_words(
+                current_group[j:], current_speaker, max_chars_per_line, max_lines
+            )
+            
+            if group_for_cue:
+                cue_start = group_for_cue[0].start_ms
+                cue_end = group_for_cue[-1].end_ms
+                cue = _create_cue(group_for_cue, current_speaker, cue_start, max_chars_per_line, max_lines)
                 if cue:
                     cues.append(cue)
-            current_cue_words = [word]
-            current_speaker = word.speaker_label
-            current_start = word.start_ms
-        elif current_cue_words and word.start_ms - current_cue_words[-1].end_ms > max_gap_ms:
-            # Gap too large, finalize cue
-            if current_cue_words:
-                cue = _create_cue(current_cue_words, current_speaker, current_start, max_chars_per_line, max_lines)
-                if cue:
-                    cues.append(cue)
-            current_cue_words = [word]
-            current_start = word.start_ms
-        else:
-            current_cue_words.append(word)
-    
-    # Finalize last cue
-    if current_cue_words:
-        cue = _create_cue(current_cue_words, current_speaker, current_start, max_chars_per_line, max_lines)
-        if cue:
-            cues.append(cue)
+            
+            j += words_consumed
+            if words_consumed == 0:
+                # Safety: if we can't consume any words, break to avoid infinite loop
+                break
     
     return cues
 
 
+def _get_cue_words(
+    words: List[SubtitleWord], speaker: str, max_chars_per_line: int, max_lines: int
+) -> tuple:
+    """Determine how many words fit within max_lines and return them.
+    
+    Returns (words_list, count_consumed).
+    """
+    if not words:
+        return [], 0
+    
+    lines = []
+    current_line = f"{speaker}: "
+    words_used = 0
+    
+    for i, word in enumerate(words):
+        test_line = current_line + word.text if current_line.endswith(": ") else current_line + " " + word.text
+        
+        # Check if adding this word would exceed max_chars_per_line
+        if len(test_line) <= max_chars_per_line:
+            current_line = test_line
+            words_used = i + 1
+        else:
+            # Word doesn't fit on current line
+            if len(lines) < max_lines - 1:
+                # Can start a new line
+                lines.append(current_line)
+                current_line = word.text
+                words_used = i + 1
+            else:
+                # Can't add more lines - return words up to this point
+                break
+    
+    # Return the words that fit
+    return words[:words_used], words_used
+
+
 def _create_cue(words: List[SubtitleWord], speaker: str, start_ms: int, max_chars_per_line: int, max_lines: int) -> SubtitleCue:
     """Create a single subtitle cue from a list of words."""
+    if not words:
+        return None
+    
     end_ms = words[-1].end_ms
     
     # Build lines with speaker prefix on first line
     lines = []
-    current_line = f"{speaker}: " if speaker != "UNKNOWN" else f"{speaker}: "
+    current_line = f"{speaker}: "
     
     for word in words:
         test_line = current_line + word.text if current_line.endswith(": ") else current_line + " " + word.text
         
+        # Check if adding this word would exceed max_chars_per_line
         if len(test_line) <= max_chars_per_line:
             current_line = test_line
         else:
-            # Start new line
-            if len(lines) < max_lines - 1 or (len(lines) == max_lines - 1 and len(current_line) > len(f"{speaker}: ")):
+            # Word doesn't fit on current line
+            if len(lines) < max_lines - 1:
+                # Start new line
                 lines.append(current_line)
                 current_line = word.text
             else:
-                # Max lines reached, append to last line
-                current_line = current_line + " " + word.text
+                # Can't fit more lines (shouldn't reach here due to _get_cue_words)
+                break
     
-    if current_line:
+    # Add the last line if it has content
+    if current_line and current_line != f"{speaker}: ":
         lines.append(current_line)
     
+    if not lines:
+        return None
+    
     return SubtitleCue(speaker, start_ms, end_ms, tuple(lines))
+
+
+def _escape_ass_text(text: str) -> str:
+    """Escape ASS control characters to prevent text from injecting formatting.
+    
+    ASS format uses backslash as a control character. We escape it by doubling.
+    Also escape braces which can contain override codes.
+    """
+    # Escape backslash first (must be done before escaping other chars)
+    text = text.replace("\\", "\\\\")
+    # Escape braces which can contain ASS override codes
+    text = text.replace("{", "\\{")
+    text = text.replace("}", "\\}")
+    return text
 
 
 def write_ass_subtitles(cues: List[SubtitleCue], path) -> Path:
@@ -121,7 +208,9 @@ Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
     for cue in cues:
         start_time = _ms_to_ass_time(cue.start_ms)
         end_time = _ms_to_ass_time(cue.end_ms)
-        text = "\\N".join(cue.lines)
+        # Escape each line and join with ASS line break, then escape the final text
+        escaped_lines = [_escape_ass_text(line) for line in cue.lines]
+        text = "\\N".join(escaped_lines)
         
         event = f"Dialogue: 0,{start_time},{end_time},Default,,0,0,0,,{text}"
         lines.append(event)
