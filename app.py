@@ -23,6 +23,7 @@ if not hasattr(np, "complex"):
 import pandas as pd
 import streamlit as st
 
+from audio_log_utils import build_audio_log_frame
 from audio_core import read_wav_pcm
 from config import (
     DB_PATH,
@@ -135,12 +136,12 @@ def render_realtime():
                 "Start": fmt_time(start),
                 "End": fmt_time(end),
                 "Person": name or "Unknown",
-                "Track": track_id if track_id is not None else "",
+                "Track": track_id,
                 "Confidence": round(confidence, 3),
                 "Transcript": transcript or "",
             })
 
-        st.dataframe(pd.DataFrame(data), width="stretch")
+        st.dataframe(build_audio_log_frame(data), width="stretch")
     else:
         st.info("No realtime speaking logs yet.")
 
@@ -880,14 +881,14 @@ def render_audio_logs():
             "End": fmt_time(end),
             "Duration": round(float(end) - float(start), 2),
             "Person": name or "Unknown",
-            "Track": track_id if track_id is not None else "",
+            "Track": track_id,
             "Confidence": round(float(confidence), 3),
             "Source": source,
             "Transcript": transcript or "",
         })
 
     st.dataframe(
-        pd.DataFrame(data),
+        build_audio_log_frame(data),
         width="stretch",
     )
 
