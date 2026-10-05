@@ -24,6 +24,7 @@ import pandas as pd
 import streamlit as st
 
 from audio_log_utils import build_audio_log_frame
+from attendance_view import attendance_frame_to_csv, build_attendance_frame
 from audio_core import read_wav_pcm
 from config import (
     DB_PATH,
@@ -47,6 +48,7 @@ from database import (
     list_unknown_voices,
     delete_low_quality_unknowns,
     delete_unknown,
+    fetch_attendance,
     resolve_unknown,
     resolve_unknown_voice,
     update_transcription_segments,
@@ -893,6 +895,49 @@ def render_audio_logs():
     )
 
 
+def render_attendance():
+    st.header("✅ Attendance")
+
+    source_label = st.selectbox(
+        "Source",
+        ["All", "realtime", "video"],
+    )
+    source_filter = None if source_label == "All" else source_label
+
+    persons = list_persons()
+    person_options = {"All persons": None}
+    for person_id, person_name, _created_at in persons:
+        person_options[f"{person_name} (#{person_id})"] = person_id
+
+    person_label = st.selectbox("Person", list(person_options.keys()))
+    person_id_filter = person_options[person_label]
+
+    rows = fetch_attendance(source=source_filter, person_id=person_id_filter)
+    visible_rows = []
+    for row in rows:
+        person_name = (row["person_name"] or "").strip()
+        confidence = row["confidence"]
+        if not person_name or person_name.lower() == "unknown":
+            continue
+        if confidence is None or float(confidence) < LOW_CONFIDENCE_WARN:
+            continue
+        visible_rows.append(row)
+
+    frame = build_attendance_frame(visible_rows)
+
+    if frame.empty:
+        st.info("No attendance observations match the current filters.")
+        return
+
+    st.dataframe(frame, width="stretch")
+    st.download_button(
+        "⬇️ Export CSV",
+        data=attendance_frame_to_csv(frame),
+        file_name="attendance.csv",
+        mime="text/csv",
+    )
+
+
 def render_transcripts():
     st.header("📝 Meeting Transcripts")
     with sqlite3.connect(DB_PATH) as connection:
@@ -1204,6 +1249,7 @@ def main():
             "🎬 Video",
             "👤 Face Database",
             "🔊 Audio Logs",
+            "✅ Attendance",
             "📝 Transcripts",
             "🎙️ Voice Enrollment",
         ]
@@ -1222,9 +1268,12 @@ def main():
         render_audio_logs()
 
     with tabs[4]:
-        render_transcripts()
+        render_attendance()
 
     with tabs[5]:
+        render_transcripts()
+
+    with tabs[6]:
         render_voice_enrollment()
 
 
