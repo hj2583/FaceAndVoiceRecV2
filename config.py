@@ -351,3 +351,12 @@ TRANSCRIPTS_DIR.mkdir(parents=True, exist_ok=True)
 # Minimum fraction of a speech segment covered by one face track before
 # assigning that face as the speaker.
 SPEAKER_FACE_OVERLAP_THRESHOLD = 0.8
+
+
+# ============================================================
+# Subtitle rendering
+# ============================================================
+
+SUBTITLE_MAX_GAP_MS = 800
+SUBTITLE_MAX_CHARS_PER_LINE = 42
+SUBTITLE_MAX_LINES = 2
