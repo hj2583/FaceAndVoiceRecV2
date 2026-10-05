@@ -5,6 +5,7 @@ from pathlib import Path
 from contextlib import contextmanager
 from datetime import datetime, timezone
 from pathlib import Path
+from typing import Mapping, Sequence
 
 import config
 from config import DB_PATH
@@ -95,6 +96,28 @@ def init_db():
                 source TEXT NOT NULL,
                 transcript TEXT,
                 FOREIGN KEY(person_id) REFERENCES persons(person_id)
+            )
+        """)
+
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS attendance_events (
+                event_id INTEGER PRIMARY KEY AUTOINCREMENT,
+                person_id INTEGER NOT NULL,
+                person_name TEXT NOT NULL,
+                source TEXT NOT NULL CHECK(source IN ('realtime', 'video')),
+                source_ref TEXT NOT NULL,
+                track_id INTEGER NOT NULL,
+                confidence REAL NOT NULL,
+                observed_at_utc TEXT,
+                media_offset_ms INTEGER,
+                created_at TEXT NOT NULL,
+                FOREIGN KEY(person_id) REFERENCES persons(person_id),
+                UNIQUE(source, source_ref, track_id, person_id),
+                CHECK (
+                    (source = 'realtime' AND observed_at_utc IS NOT NULL AND media_offset_ms IS NULL)
+                    OR
+                    (source = 'video' AND observed_at_utc IS NULL AND media_offset_ms IS NOT NULL)
+                )
             )
         """)
 
@@ -780,3 +803,167 @@ def fetch_audio_logs(source=None):
             ORDER BY start_time DESC
             """
         ).fetchall()
+
+
+def _normalize_source_ref(source, source_ref):
+    normalized = str(source_ref).strip()
+    if not normalized:
+        raise ValueError("source_ref cannot be empty")
+    if source == "video":
+        return Path(normalized).expanduser().resolve(strict=False).as_posix()
+    return normalized
+
+
+def _validate_attendance_times(source, observed_at_utc, media_offset_ms):
+    if source not in {"realtime", "video"}:
+        raise ValueError("source must be one of {'realtime', 'video'}")
+
+    if source == "realtime":
+        if not isinstance(observed_at_utc, str) or not observed_at_utc.strip():
+            raise ValueError("realtime attendance requires observed_at_utc")
+        if media_offset_ms is not None:
+            raise ValueError("realtime attendance does not allow media_offset_ms")
+        return observed_at_utc, None
+
+    if observed_at_utc is not None:
+        raise ValueError("video attendance does not allow observed_at_utc")
+    if media_offset_ms is None:
+        raise ValueError("video attendance requires media_offset_ms")
+
+    normalized_offset = int(media_offset_ms)
+    if normalized_offset < 0:
+        raise ValueError("media_offset_ms must be non-negative")
+    return None, normalized_offset
+
+
+def _insert_attendance_event(
+    conn,
+    *,
+    person_id,
+    person_name,
+    source,
+    source_ref,
+    track_id,
+    confidence,
+    observed_at_utc,
+    media_offset_ms,
+):
+    normalized_source_ref = _normalize_source_ref(source, source_ref)
+    normalized_observed_at_utc, normalized_media_offset_ms = _validate_attendance_times(
+        source,
+        observed_at_utc,
+        media_offset_ms,
+    )
+
+    cur = conn.execute(
+        """
+        INSERT OR IGNORE INTO attendance_events(
+            person_id,
+            person_name,
+            source,
+            source_ref,
+            track_id,
+            confidence,
+            observed_at_utc,
+            media_offset_ms,
+            created_at
+        )
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """,
+        (
+            int(person_id),
+            str(person_name),
+            source,
+            normalized_source_ref,
+            int(track_id),
+            float(confidence),
+            normalized_observed_at_utc,
+            normalized_media_offset_ms,
+            utc_now(),
+        ),
+    )
+    return cur.rowcount == 1
+
+
+def record_attendance_event(
+    person_id,
+    person_name,
+    source,
+    source_ref,
+    track_id,
+    confidence,
+    observed_at_utc=None,
+    media_offset_ms=None,
+):
+    with get_conn() as conn:
+        return _insert_attendance_event(
+            conn,
+            person_id=person_id,
+            person_name=person_name,
+            source=source,
+            source_ref=source_ref,
+            track_id=track_id,
+            confidence=confidence,
+            observed_at_utc=observed_at_utc,
+            media_offset_ms=media_offset_ms,
+        )
+
+
+def replace_video_attendance(source_ref: str, events: Sequence[Mapping[str, object]]) -> int:
+    normalized_source_ref = _normalize_source_ref("video", source_ref)
+    inserted = 0
+    with get_conn() as conn:
+        conn.execute(
+            "DELETE FROM attendance_events WHERE source='video' AND source_ref=?",
+            (normalized_source_ref,),
+        )
+        for event in events:
+            inserted += int(
+                _insert_attendance_event(
+                    conn,
+                    person_id=event["person_id"],
+                    person_name=event["person_name"],
+                    source="video",
+                    source_ref=normalized_source_ref,
+                    track_id=event["track_id"],
+                    confidence=event["confidence"],
+                    observed_at_utc=event.get("observed_at_utc"),
+                    media_offset_ms=event.get("media_offset_ms"),
+                )
+            )
+    return inserted
+
+
+def fetch_attendance(source=None, person_id=None):
+    query = """
+        SELECT
+            event_id,
+            person_id,
+            person_name,
+            source,
+            source_ref,
+            track_id,
+            confidence,
+            observed_at_utc,
+            media_offset_ms,
+            created_at
+        FROM attendance_events
+    """
+    where_clauses = []
+    params = []
+
+    if source is not None:
+        where_clauses.append("source=?")
+        params.append(source)
+    if person_id is not None:
+        where_clauses.append("person_id=?")
+        params.append(int(person_id))
+
+    if where_clauses:
+        query += " WHERE " + " AND ".join(where_clauses)
+
+    query += " ORDER BY created_at DESC, event_id DESC"
+
+    with get_conn() as conn:
+        conn.row_factory = sqlite3.Row
+        return conn.execute(query, tuple(params)).fetchall()
