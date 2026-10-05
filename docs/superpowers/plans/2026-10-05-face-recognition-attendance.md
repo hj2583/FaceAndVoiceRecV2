@@ -28,7 +28,7 @@
 **Interface:**
 
 ```python
-record_attendance_event(
+def record_attendance_event(
     person_id: int,
     person_name: str,
     source: str,
@@ -37,19 +37,35 @@ record_attendance_event(
     confidence: float,
     observed_at_utc: str | None = None,
     media_offset_ms: int | None = None,
-) -> bool
+) -> bool: ...
 
-replace_video_attendance(source_ref: str, events: Sequence[Mapping[str, object]]) -> int
-fetch_attendance(source: str | None = None, person_id: int | None = None) -> list[sqlite3.Row]
+
+def replace_video_attendance(source_ref: str, events: Sequence[Mapping[str, object]]) -> int: ...
+
+
+def fetch_attendance(source: str | None = None, person_id: int | None = None) -> list[sqlite3.Row]: ...
 ```
 
-`record_attendance_event` returns true only when a new row was inserted; an identical source/run/track/person tuple is ignored. `replace_video_attendance` transactionally deletes prior `source='video'` rows for the exact normalized source path and inserts the supplied candidate set. Its caller invokes it only after successful video workflow completion. `fetch_attendance` returns newest observations first and optionally filters by source/person.
+`record_attendance_event` returns true only when a new row was inserted; an identical source/run/track/person tuple is ignored. It normalizes aware realtime ISO-8601 input to UTC and rejects naive or malformed datetimes, confidence outside `[0, 1]`, and invalid offsets/track IDs. `replace_video_attendance` transactionally deletes prior `source='video'` rows for the exact normalized source path and inserts the supplied candidate set. Its caller invokes it only after successful video workflow completion. `fetch_attendance` orders realtime rows by normalized observation timestamp and video rows by import/creation time, newest first, and optionally filters by source/person.
 
 - [ ] **Step 1: Write migration and persistence tests**
 
-Add tests in `tests/test_database_attendance.py` using the existing `_setup_database(tmp_path, monkeypatch)` pattern. Cover idempotent `init_db`, source/timestamp constraints, one-time insert behavior, realtime/video timestamp fields, filtered reads, and transactional replacement.
+Add tests in `tests/test_database_attendance.py`; define a local `_setup_database(tmp_path, monkeypatch)` helper that patches `database.DB_PATH` and calls `database.init_db()`. Cover idempotent `init_db`, source/timestamp constraints, UTC normalization/rejection, confidence/offset validation, one-time insert behavior, realtime/video timestamp fields, filtered reads, observation ordering, and transactional replacement. Build video paths under `tmp_path` and pass `Path.resolve()` rather than hard-coded Windows paths so tests are portable.
 
 ```python
+import sqlite3
+from pathlib import Path
+
+import pytest
+
+import database
+
+
+def _setup_database(tmp_path, monkeypatch):
+    monkeypatch.setattr(database, "DB_PATH", tmp_path / "faces.db")
+    database.init_db()
+
+
 def test_attendance_event_is_idempotent_per_track(tmp_path, monkeypatch):
     _setup_database(tmp_path, monkeypatch)
     person_id = database.create_person("Alice")
@@ -75,6 +91,8 @@ def test_attendance_event_is_idempotent_per_track(tmp_path, monkeypatch):
 def test_replace_video_attendance_replaces_only_matching_video(tmp_path, monkeypatch):
     _setup_database(tmp_path, monkeypatch)
     person_id = database.create_person("Alice")
+    video_a = (tmp_path / "videos" / "a.mp4").resolve()
+    video_b = (tmp_path / "videos" / "b.mp4").resolve()
     first = [{
         "person_id": person_id, "person_name": "Alice", "track_id": 1,
         "confidence": 0.9, "media_offset_ms": 1200,
@@ -84,25 +102,19 @@ def test_replace_video_attendance_replaces_only_matching_video(tmp_path, monkeyp
         "confidence": 0.95, "media_offset_ms": 2400,
     }]
 
-    database.replace_video_attendance("C:/videos/a.mp4", first)
-    database.replace_video_attendance("C:/videos/b.mp4", first)
-    assert database.replace_video_attendance("C:/videos/a.mp4", second) == 1
+    database.replace_video_attendance(str(video_a), first)
+    database.replace_video_attendance(str(video_b), first)
+    assert database.replace_video_attendance(str(video_a), second) == 1
 
     rows = database.fetch_attendance(source="video")
     assert [(row["source_ref"], row["track_id"], row["media_offset_ms"]) for row in rows] == [
-        ("C:/videos/a.mp4", 2, 2400), ("C:/videos/b.mp4", 1, 1200),
+        (video_a.as_posix(), 2, 2400), (video_b.as_posix(), 1, 1200),
     ]
 ```
 
 Add this rollback test: the invalid foreign key fails after the prior source rows have been deleted and a new row has been inserted inside the transaction, proving the whole replacement rolls back.
 
 ```python
-import sqlite3
-
-import pytest
-import database
-
-
 def test_replace_video_attendance_rolls_back_on_invalid_candidate(tmp_path, monkeypatch):
     _setup_database(tmp_path, monkeypatch)
     person_id = database.create_person("Alice")
@@ -110,7 +122,8 @@ def test_replace_video_attendance_rolls_back_on_invalid_candidate(tmp_path, monk
         "person_id": person_id, "person_name": "Alice", "track_id": 1,
         "confidence": 0.9, "media_offset_ms": 1000,
     }]
-    database.replace_video_attendance("C:/videos/a.mp4", old)
+    video_a = (tmp_path / "videos" / "a.mp4").resolve()
+    database.replace_video_attendance(str(video_a), old)
 
     candidates = [
         {"person_id": person_id, "person_name": "Alice", "track_id": 2,
@@ -119,11 +132,67 @@ def test_replace_video_attendance_rolls_back_on_invalid_candidate(tmp_path, monk
          "confidence": 0.9, "media_offset_ms": 3000},
     ]
     with pytest.raises(sqlite3.IntegrityError):
-        database.replace_video_attendance("C:/videos/a.mp4", candidates)
+        database.replace_video_attendance(str(video_a), candidates)
 
     rows = database.fetch_attendance(source="video")
     assert [(row["track_id"], row["media_offset_ms"]) for row in rows] == [(1, 1000)]
 ```
+
+Add tests for observation-time ordering and reprocessing edge cases:
+
+```python
+def test_fetch_attendance_orders_realtime_by_observed_time(tmp_path, monkeypatch):
+    _setup_database(tmp_path, monkeypatch)
+    first = database.create_person("First")
+    second = database.create_person("Second")
+    database.record_attendance_event(
+        person_id=second, person_name="Second", source="realtime",
+        source_ref="run", track_id=2, confidence=0.9,
+        observed_at_utc="2026-10-05T12:31:00+00:00",
+    )
+    database.record_attendance_event(
+        person_id=first, person_name="First", source="realtime",
+        source_ref="run", track_id=1, confidence=0.9,
+        observed_at_utc="2026-10-05T12:30:00+00:00",
+    )
+
+    assert [row["person_name"] for row in database.fetch_attendance()] == [
+        "Second", "First",
+    ]
+
+
+def test_empty_video_replacement_clears_only_that_video(tmp_path, monkeypatch):
+    _setup_database(tmp_path, monkeypatch)
+    person_id = database.create_person("Alice")
+    video_a = str((tmp_path / "videos" / "a.mp4").resolve())
+    video_b = str((tmp_path / "videos" / "b.mp4").resolve())
+    event = {
+        "person_id": person_id, "person_name": "Alice", "track_id": 1,
+        "confidence": 0.9, "media_offset_ms": 1000,
+    }
+    database.replace_video_attendance(video_a, [event])
+    database.replace_video_attendance(video_b, [event])
+
+    assert database.replace_video_attendance(video_a, []) == 0
+    assert [row["source_ref"] for row in database.fetch_attendance(source="video")] == [
+        Path(video_b).as_posix(),
+    ]
+
+
+def test_duplicate_candidates_in_one_video_replacement_are_inserted_once(tmp_path, monkeypatch):
+    _setup_database(tmp_path, monkeypatch)
+    person_id = database.create_person("Alice")
+    video_path = str((tmp_path / "videos" / "a.mp4").resolve())
+    event = {
+        "person_id": person_id, "person_name": "Alice", "track_id": 1,
+        "confidence": 0.9, "media_offset_ms": 1000,
+    }
+
+    assert database.replace_video_attendance(video_path, [event, event]) == 1
+    assert len(database.fetch_attendance(source="video")) == 1
+```
+
+Add parametrized validation cases asserting an offset-aware non-UTC realtime timestamp is stored normalized to `+00:00`, a naive timestamp raises `ValueError`, confidence rejects NaN and values outside `[0, 1]`, and fractional/negative/bool track IDs and fractional/negative offsets raise `ValueError`.
 
 - [ ] **Step 2: Run tests and verify RED**
 
@@ -133,7 +202,7 @@ Expected: collection or assertions fail because the attendance table/APIs do not
 
 - [ ] **Step 3: Add the schema and database APIs**
 
-Add `attendance_events` in `init_db()` using the existing foreign-key/SQLite conventions. Include source `CHECK`, non-null person/source/source_ref/track/confidence/created time, nullable source-specific time fields, and a unique constraint on `(source, source_ref, track_id, person_id)`. Use `get_conn()` so an exception rolls back the replacement delete and inserts. Reject malformed source/time combinations with `ValueError` before insert. Do not modify `recognition_logs` or `audio_logs` schemas.
+Add `attendance_events` in `init_db()` using the existing foreign-key/SQLite conventions. Include source `CHECK`, non-null person/source/source_ref/track/confidence/created time, nullable source-specific time fields, and a unique constraint on `(source, source_ref, track_id, person_id)`. Use `get_conn()` so an exception rolls back the replacement delete and inserts. Reject malformed source/time combinations with `ValueError` before insert. Validate confidence as a finite numeric value in `[0, 1]` and `media_offset_ms` as a non-negative integer (reject bools/fractional values). Parse realtime timestamps with `datetime.fromisoformat`, require timezone awareness, normalize to UTC, and store a canonical `+00:00` ISO value. Use `ON CONFLICT(source, source_ref, track_id, person_id) DO NOTHING` instead of broad `INSERT OR IGNORE`, so unrelated CHECK/FK/NOT NULL errors are not silently hidden. Do not modify `recognition_logs` or `audio_logs` schemas.
 
 - [ ] **Step 4: Run database attendance tests**
 
