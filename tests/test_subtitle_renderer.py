@@ -8,6 +8,7 @@ from subtitle_renderer import (
 )
 from pathlib import Path
 from types import SimpleNamespace
+import subprocess
 import pytest
 import config
 
@@ -189,91 +190,102 @@ def test_max_lines_one_with_oversized_first_word():
     assert "Supercalifragilisticexpialidocious" in cues[0].lines[0]
 
 
-def test_mux_tracked_video_retries_copy_to_aac_and_replaces_output(tmp_path, monkeypatch):
-    annotated_video = tmp_path / "annotated.mp4"
-    source_video = tmp_path / "source.mp4"
-    subtitle_path = tmp_path / "subs" / "subtitles.ass"
-    output_path = tmp_path / "final.mp4"
-    subtitle_path.parent.mkdir(parents=True, exist_ok=True)
+def test_mux_tracked_video_resolves_relative_paths_and_retries_only_for_codec_container_failure(tmp_path, monkeypatch):
+    media_dir = tmp_path / "media"
+    output_dir = tmp_path / "tracked"
+    subtitle_dir = tmp_path / "subs"
+    media_dir.mkdir()
+    output_dir.mkdir()
+    subtitle_dir.mkdir()
+
+    annotated_video = media_dir / "annotated.mp4"
+    source_video = media_dir / "source.mp4"
+    subtitle_path = subtitle_dir / "subtitles.ass"
+    output_path = output_dir / "final.mp4"
     annotated_video.write_bytes(b"annotated")
     source_video.write_bytes(b"source")
     subtitle_path.write_text("dummy", encoding="utf-8")
 
+    monkeypatch.chdir(tmp_path)
+    rel_annotated = Path("media") / "annotated.mp4"
+    rel_source = Path("media") / "source.mp4"
+    rel_subtitle = Path("subs") / "subtitles.ass"
+    rel_output = Path("tracked") / "final.mp4"
+
     calls = []
 
     def fake_run(args, **kwargs):
-        calls.append({
-            "args": list(args),
-            "cwd": kwargs.get("cwd"),
-            "shell": kwargs.get("shell"),
-            "output_exists_before": output_path.exists(),
-        })
+        calls.append({"args": list(args), "kwargs": dict(kwargs)})
         if len(calls) == 1:
-            return SimpleNamespace(returncode=1, stderr="copy codec unsupported")
+            return SimpleNamespace(
+                returncode=1,
+                stdout=b"",
+                stderr=b"Could not find tag for codec pcm_s16le in stream #1, codec not currently supported in container",
+            )
         Path(args[-1]).write_bytes(b"muxed")
-        return SimpleNamespace(returncode=0, stderr="")
+        return SimpleNamespace(returncode=0, stdout=b"", stderr=b"")
 
     monkeypatch.setattr("subtitle_renderer.subprocess.run", fake_run)
 
     result = mux_tracked_video(
-        annotated_video=annotated_video,
-        source_video=source_video,
-        output_path=output_path,
-        subtitle_path=subtitle_path,
+        annotated_video=rel_annotated,
+        source_video=rel_source,
+        output_path=rel_output,
+        subtitle_path=rel_subtitle,
         ffmpeg="ffmpeg",
     )
 
-    assert result == output_path
-    assert output_path.read_bytes() == b"muxed"
+    assert result == rel_output.resolve()
+    assert rel_output.read_bytes() == b"muxed"
     assert len(calls) == 2
-    assert all(not call["output_exists_before"] for call in calls)
 
     first_args = calls[0]["args"]
     second_args = calls[1]["args"]
+    first_kwargs = calls[0]["kwargs"]
+    second_kwargs = calls[1]["kwargs"]
 
     assert first_args[:2] == ["ffmpeg", "-y"]
-    assert first_args[2:6] == ["-i", str(annotated_video), "-i", str(source_video)]
-    assert second_args[2:6] == ["-i", str(annotated_video), "-i", str(source_video)]
-
-    assert "-map" in first_args
-    first_map_positions = [i for i, token in enumerate(first_args) if token == "-map"]
-    assert first_args[first_map_positions[0] + 1] == "0:v:0"
-    assert first_args[first_map_positions[1] + 1] == "1:a:0?"
+    assert first_args[2:6] == ["-i", str(rel_annotated.resolve()), "-i", str(rel_source.resolve())]
+    assert second_args[2:6] == ["-i", str(rel_annotated.resolve()), "-i", str(rel_source.resolve())]
 
     assert first_args[first_args.index("-vf") + 1] == "subtitles=filename=subtitles.ass"
-    assert Path(calls[0]["cwd"]) == subtitle_path.parent
-    assert Path(calls[1]["cwd"]) == subtitle_path.parent
-    assert calls[0]["shell"] in (None, False)
-    assert calls[1]["shell"] in (None, False)
+    assert Path(first_kwargs["cwd"]) == rel_subtitle.resolve().parent
+    assert Path(second_kwargs["cwd"]) == rel_subtitle.resolve().parent
+
+    map_positions = [i for i, token in enumerate(first_args) if token == "-map"]
+    assert first_args[map_positions[0] + 1] == "0:v:0"
+    assert first_args[map_positions[1] + 1] == "1:a:0?"
 
     assert first_args[first_args.index("-c:a") + 1] == "copy"
     assert second_args[second_args.index("-c:a") + 1] == "aac"
-    assert "-b:a" in second_args
     assert second_args[second_args.index("-b:a") + 1] == "192k"
 
-    assert Path(first_args[-1]) != output_path
-    assert Path(second_args[-1]) != output_path
+    first_temp = Path(first_args[-1])
+    second_temp = Path(second_args[-1])
+    assert first_temp.parent != rel_output.resolve().parent
+    assert second_temp.parent != rel_output.resolve().parent
+    assert first_temp.parent.parent == rel_output.resolve().parent.parent
+    assert second_temp.parent.parent == rel_output.resolve().parent.parent
+    assert not first_temp.parent.exists()
+    assert not second_temp.parent.exists()
 
 
-def test_mux_tracked_video_raises_and_preserves_existing_output_on_double_failure(tmp_path, monkeypatch):
+def test_mux_tracked_video_does_not_retry_aac_for_non_codec_failures(tmp_path, monkeypatch):
     annotated_video = tmp_path / "annotated.mp4"
     source_video = tmp_path / "source.mp4"
     output_path = tmp_path / "final.mp4"
     annotated_video.write_bytes(b"annotated")
     source_video.write_bytes(b"source")
-    output_path.write_bytes(b"original")
 
     calls = []
 
     def fake_run(args, **kwargs):
         calls.append(list(args))
-        temp_path = Path(args[-1])
-        temp_path.write_bytes(b"partial")
-        return SimpleNamespace(returncode=1, stderr="mux failed")
+        return SimpleNamespace(returncode=1, stdout=b"", stderr=b"No such file or directory")
 
     monkeypatch.setattr("subtitle_renderer.subprocess.run", fake_run)
 
-    with pytest.raises(VideoMuxError):
+    with pytest.raises(VideoMuxError, match="No such file or directory"):
         mux_tracked_video(
             annotated_video=annotated_video,
             source_video=source_video,
@@ -282,10 +294,117 @@ def test_mux_tracked_video_raises_and_preserves_existing_output_on_double_failur
             ffmpeg="ffmpeg",
         )
 
-    assert len(calls) == 2
+    assert len(calls) == 1
+
+
+def test_mux_tracked_video_wraps_subprocess_oserror_and_cleans_temp_dir(tmp_path, monkeypatch):
+    output_path = tmp_path / "tracked" / "final.mp4"
+    annotated_video = tmp_path / "annotated.mp4"
+    source_video = tmp_path / "source.mp4"
+    annotated_video.write_bytes(b"annotated")
+    source_video.write_bytes(b"source")
+
+    temp_dirs = []
+
+    def fake_run(args, **kwargs):
+        temp_path = Path(args[-1])
+        temp_dirs.append(temp_path.parent)
+        temp_path.write_bytes(b"partial")
+        raise FileNotFoundError("ffmpeg executable missing")
+
+    monkeypatch.setattr("subtitle_renderer.subprocess.run", fake_run)
+
+    with pytest.raises(VideoMuxError, match="ffmpeg executable missing"):
+        mux_tracked_video(annotated_video, source_video, output_path, ffmpeg="ffmpeg")
+
+    assert temp_dirs
+    assert all(not temp_dir.exists() for temp_dir in temp_dirs)
+
+
+def test_mux_tracked_video_wraps_replace_oserror_and_preserves_existing_output(tmp_path, monkeypatch):
+    output_path = tmp_path / "tracked" / "final.mp4"
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    output_path.write_bytes(b"original")
+    annotated_video = tmp_path / "annotated.mp4"
+    source_video = tmp_path / "source.mp4"
+    annotated_video.write_bytes(b"annotated")
+    source_video.write_bytes(b"source")
+
+    temp_dirs = []
+
+    def fake_run(args, **kwargs):
+        temp_path = Path(args[-1])
+        temp_dirs.append(temp_path.parent)
+        temp_path.write_bytes(b"muxed")
+        return SimpleNamespace(returncode=0, stdout=b"", stderr=b"")
+
+    def fake_replace(_src, _dst):
+        raise PermissionError("destination file is in use")
+
+    monkeypatch.setattr("subtitle_renderer.subprocess.run", fake_run)
+    monkeypatch.setattr("subtitle_renderer.os.replace", fake_replace)
+
+    with pytest.raises(VideoMuxError, match="destination file is in use"):
+        mux_tracked_video(annotated_video, source_video, output_path, ffmpeg="ffmpeg")
+
     assert output_path.read_bytes() == b"original"
-    temp_candidates = list(tmp_path.glob(f".{output_path.stem}.*.tmp{output_path.suffix}"))
-    assert temp_candidates == []
+    assert temp_dirs
+    assert all(not temp_dir.exists() for temp_dir in temp_dirs)
+
+
+def test_mux_tracked_video_configures_binary_stderr_capture_and_decodes_utf8_replacement(tmp_path, monkeypatch):
+    annotated_video = tmp_path / "annotated.mp4"
+    source_video = tmp_path / "source.mp4"
+    output_path = tmp_path / "final.mp4"
+    annotated_video.write_bytes(b"annotated")
+    source_video.write_bytes(b"source")
+
+    kwargs_seen = {}
+
+    def fake_run(args, **kwargs):
+        kwargs_seen.update(kwargs)
+        return SimpleNamespace(returncode=1, stdout=b"", stderr=b"invalid:\xff")
+
+    monkeypatch.setattr("subtitle_renderer.subprocess.run", fake_run)
+
+    with pytest.raises(VideoMuxError, match="invalid") as excinfo:
+        mux_tracked_video(annotated_video, source_video, output_path, ffmpeg="ffmpeg")
+
+    assert "\ufffd" in str(excinfo.value)
+    assert kwargs_seen["check"] is False
+    assert kwargs_seen["stdout"] == subprocess.PIPE
+    assert kwargs_seen["stderr"] == subprocess.PIPE
+    assert "text" not in kwargs_seen
+    assert "encoding" not in kwargs_seen
+
+
+def test_mux_tracked_video_missing_ffmpeg_raises(tmp_path, monkeypatch):
+    annotated_video = tmp_path / "annotated.mp4"
+    source_video = tmp_path / "source.mp4"
+    output_path = tmp_path / "final.mp4"
+    annotated_video.write_bytes(b"annotated")
+    source_video.write_bytes(b"source")
+
+    monkeypatch.setattr("subtitle_renderer.shutil.which", lambda _bin: None)
+
+    with pytest.raises(VideoMuxError, match="FFmpeg was not found in PATH"):
+        mux_tracked_video(annotated_video, source_video, output_path)
+
+
+def test_mux_tracked_video_success_without_output_file_raises(tmp_path, monkeypatch):
+    annotated_video = tmp_path / "annotated.mp4"
+    source_video = tmp_path / "source.mp4"
+    output_path = tmp_path / "final.mp4"
+    annotated_video.write_bytes(b"annotated")
+    source_video.write_bytes(b"source")
+
+    def fake_run(args, **kwargs):
+        return SimpleNamespace(returncode=0, stdout=b"", stderr=b"")
+
+    monkeypatch.setattr("subtitle_renderer.subprocess.run", fake_run)
+
+    with pytest.raises(VideoMuxError, match="did not create a valid output file"):
+        mux_tracked_video(annotated_video, source_video, output_path, ffmpeg="ffmpeg")
 
 
 def test_mux_tracked_video_without_subtitles_omits_vf_and_maps_optional_audio(tmp_path, monkeypatch):
@@ -300,7 +419,7 @@ def test_mux_tracked_video_without_subtitles_omits_vf_and_maps_optional_audio(tm
     def fake_run(args, **kwargs):
         captured_args.extend(args)
         Path(args[-1]).write_bytes(b"muxed")
-        return SimpleNamespace(returncode=0, stderr="")
+        return SimpleNamespace(returncode=0, stdout=b"", stderr=b"")
 
     monkeypatch.setattr("subtitle_renderer.subprocess.run", fake_run)
 

@@ -4,6 +4,7 @@ from pathlib import Path
 import os
 import shutil
 import subprocess
+import tempfile
 import uuid
 import config
 
@@ -261,12 +262,39 @@ def _ms_to_ass_time(ms: int) -> str:
     return f"{hours}:{minutes:02d}:{seconds:02d}.{centiseconds:02d}"
 
 
-def unique_temp_sibling(output_path) -> Path:
-    """Create a collision-free temp file path beside output_path."""
-    output_path = Path(output_path)
-    return output_path.with_name(
-        f".{output_path.stem}.{uuid.uuid4().hex}.tmp{output_path.suffix}"
+def unique_temp_sibling(output_path) -> tuple[Path, Path]:
+    """Create a unique temp directory beside output folder and return (dir, temp_file)."""
+    output_path = Path(output_path).resolve()
+    tracked_output_dir = output_path.parent
+    sibling_root = tracked_output_dir.parent if tracked_output_dir.parent != tracked_output_dir else tracked_output_dir
+    temp_dir = Path(
+        tempfile.mkdtemp(
+            prefix=f".{tracked_output_dir.name}-subtitle-",
+            dir=str(sibling_root),
+        )
     )
+    temp_output = temp_dir / f"{output_path.stem}.{uuid.uuid4().hex}.tmp{output_path.suffix}"
+    return temp_dir, temp_output
+
+
+def _decode_process_output(value) -> str:
+    """Decode subprocess outputs consistently as UTF-8 with replacement."""
+    if value is None:
+        return ""
+    if isinstance(value, bytes):
+        return value.decode("utf-8", errors="replace")
+    return str(value)
+
+
+def _is_codec_container_failure(stderr_text: str) -> bool:
+    """Return True only for codec/container copy incompatibility diagnostics."""
+    message = stderr_text.lower()
+    markers = (
+        "could not find tag for codec",
+        "codec not currently supported in container",
+        "not currently supported in container",
+    )
+    return any(marker in message for marker in markers)
 
 
 def _mux_args(ffmpeg, annotated_video, source_video, temp_output, subtitle_path, audio_codec) -> List[str]:
@@ -288,40 +316,72 @@ def _mux_args(ffmpeg, annotated_video, source_video, temp_output, subtitle_path,
 
 def mux_tracked_video(annotated_video, source_video, output_path, subtitle_path=None, ffmpeg=None) -> Path:
     """Burn ASS subtitles into an annotated video and mux audio from source video."""
-    output_path = Path(output_path)
+    output_path = Path(output_path).resolve()
     output_path.parent.mkdir(parents=True, exist_ok=True)
+    annotated_video = Path(annotated_video).resolve()
+    source_video = Path(source_video).resolve()
+    subtitle_file = Path(subtitle_path).resolve() if subtitle_path is not None else None
+
     ffmpeg_bin = ffmpeg or shutil.which("ffmpeg")
     if ffmpeg_bin is None:
         raise VideoMuxError("FFmpeg was not found in PATH")
 
-    subtitle_file = Path(subtitle_path) if subtitle_path is not None else None
     subtitle_cwd = str(subtitle_file.parent) if subtitle_file is not None else None
 
     last_error = ""
-    for audio_codec in ("copy", "aac"):
-        temp_output = unique_temp_sibling(output_path)
-        args = _mux_args(
-            ffmpeg_bin,
-            annotated_video,
-            source_video,
-            temp_output,
-            subtitle_file,
-            audio_codec,
-        )
-        result = subprocess.run(
-            args,
-            cwd=subtitle_cwd,
-            capture_output=True,
-            text=True,
-            check=False,
-        )
-        if result.returncode == 0 and temp_output.is_file():
-            os.replace(temp_output, output_path)
-            return output_path
+    attempts = ["copy"]
+    while attempts:
+        audio_codec = attempts.pop(0)
+        temp_dir = None
+        temp_output = None
 
-        last_error = (result.stderr or result.stdout or "").strip()
-        temp_output.unlink(missing_ok=True)
+        try:
+            temp_dir, temp_output = unique_temp_sibling(output_path)
+            args = _mux_args(
+                ffmpeg_bin,
+                annotated_video,
+                source_video,
+                temp_output,
+                subtitle_file,
+                audio_codec,
+            )
+            result = subprocess.run(
+                args,
+                cwd=subtitle_cwd,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                check=False,
+            )
 
-    if last_error:
-        raise VideoMuxError(last_error)
-    raise VideoMuxError("FFmpeg muxing failed")
+            stderr_text = _decode_process_output(result.stderr)
+            stdout_text = _decode_process_output(result.stdout)
+            if result.returncode == 0 and temp_output.is_file():
+                try:
+                    os.replace(temp_output, output_path)
+                except OSError as error:
+                    raise VideoMuxError(str(error)) from error
+                return output_path
+
+            if result.returncode == 0 and not temp_output.is_file():
+                last_error = "FFmpeg did not create a valid output file"
+            else:
+                last_error = (stderr_text or stdout_text or "FFmpeg muxing failed").strip()
+
+            if audio_codec == "copy" and _is_codec_container_failure(stderr_text):
+                attempts.append("aac")
+
+        except OSError as error:
+            raise VideoMuxError(str(error)) from error
+
+        finally:
+            if temp_output is not None:
+                try:
+                    temp_output.unlink(missing_ok=True)
+                except OSError:
+                    pass
+            if temp_dir is not None:
+                shutil.rmtree(temp_dir, ignore_errors=True)
+
+    if not last_error:
+        last_error = "FFmpeg muxing failed"
+    raise VideoMuxError(last_error)
