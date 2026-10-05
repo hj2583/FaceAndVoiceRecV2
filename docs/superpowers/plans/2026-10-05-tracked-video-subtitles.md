@@ -32,7 +32,7 @@
 - `build_subtitle_cues(words, max_gap_ms=None, max_chars_per_line=None, max_lines=None) -> list[SubtitleCue]`
 - `write_ass_subtitles(cues, output_path) -> Path`
 
-- [ ] **Step 1: Write cue-builder and ASS tests**
+- [x] **Step 1: Write cue-builder and ASS tests**
 
 Add to `tests/test_subtitle_renderer.py`:
 
@@ -76,13 +76,13 @@ def test_ass_writer_formats_unknown_caption_times(tmp_path):
     assert "UNKNOWN: Hello there." in contents
 ```
 
-- [ ] **Step 2: Verify RED**
+- [x] **Step 2: Verify RED**
 
 Run: `.\directmlvenv\Scripts\python.exe -m pytest tests/test_subtitle_renderer.py -q`
 
 Expected: collection fails because `subtitle_renderer` does not exist.
 
-- [ ] **Step 3: Implement cue builder and ASS writer**
+- [x] **Step 3: Implement cue builder and ASS writer**
 
 Add to `config.py`:
 
@@ -98,13 +98,13 @@ SUBTITLE_MAX_LINES = 2
 
 Extend ASS tests to assert the fixed play resolution, wrap style, CR/LF normalization, full-width brace output, and backslash-plus-word-joiner output. Keep a bounded manual FFmpeg/libass rendering check for a cue containing `\N` and `\{\\an8\}` to ensure they render literally, not as control instructions.
 
-- [ ] **Step 4: Verify GREEN**
+- [x] **Step 4: Verify GREEN**
 
 Run: `.\directmlvenv\Scripts\python.exe -m pytest tests/test_subtitle_renderer.py -q`
 
 Expected: all cue and ASS tests pass.
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```powershell
 git add subtitle_renderer.py tests/test_subtitle_renderer.py config.py
@@ -119,7 +119,7 @@ git commit -m "feat(subtitles): build speaker-labeled short caption cues"
 
 **Interface:** Add optional `subtitle_word_callback: Optional[Callable[[SubtitleWord], None]] = None` to `transcribe_with_diarization()` and `process_meeting_transcription()`. Existing return values, database turns, and audio-only callers remain unchanged when it is omitted.
 
-- [ ] **Step 1: Write failing tests**
+- [x] **Step 1: Write failing tests**
 
 Add this first test in `tests/test_transcription_core.py`; import `SubtitleWord` from `subtitle_renderer` and use the existing pytest `tmp_path`/`monkeypatch` pattern:
 
@@ -198,23 +198,23 @@ def test_subtitle_callback_estimates_word_timings_when_word_timings_are_missing(
 
 Add a `process_meeting_transcription()` forwarding test: monkeypatch `transcribe_with_diarization`, pass a callback, assert the identical callback object and diarizer/overlap options are forwarded, and preserve the returned segment list/meeting ID.
 
-- [ ] **Step 2: Verify RED**
+- [x] **Step 2: Verify RED**
 
 Run: `.\directmlvenv\Scripts\python.exe -m pytest tests/test_transcription_core.py -k subtitle_word_callback -q`
 
 Expected: fails because the callback argument is not accepted or no records are emitted.
 
-- [ ] **Step 3: Thread the optional callback through one ASR pass**
+- [x] **Step 3: Thread the optional callback through one ASR pass**
 
 Import `SubtitleWord` from `subtitle_renderer`. Add the callback to both functions and forward it from `process_meeting_transcription()` to `transcribe_with_diarization()`. When `_timed_words_if_reliable(raw)` succeeds, invoke the callback once per valid timed word using `_speaker_for_interval(word_start, word_end, diarization, minimum_speaker_overlap)`. When timings are missing/unreliable, split the raw text into non-empty whitespace-delimited words and distribute the segment interval by cumulative character-count weights; assign each word the segment-level speaker. These are explicitly estimated times; do not run another ASR pass. Preserve exact segment start/end boundaries and discard any zero-duration estimates. Do not change the returned `TranscriptionSegment` list or `save_transcripts()` schema. MP3 uses no callback by default.
 
-- [ ] **Step 4: Verify transcription tests**
+- [x] **Step 4: Verify transcription tests**
 
 Run: `.\directmlvenv\Scripts\python.exe -m pytest tests/test_transcription_core.py -q`
 
 Expected: existing tests and new callback tests pass.
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```powershell
 git add transcription_core.py tests/test_transcription_core.py
@@ -229,7 +229,7 @@ git commit -m "feat(transcription): expose attributed word timings for subtitles
 
 **Interface:** `mux_tracked_video(annotated_video, source_video, output_path, subtitle_path=None, ffmpeg=None) -> Path`; raise `VideoMuxError` if safe finalization fails.
 
-- [ ] **Step 1: Write failing mux tests**
+- [x] **Step 1: Write failing mux tests**
 
 Use `monkeypatch` on `subtitle_renderer.subprocess.run`. Have the fake runner record `args`/`cwd`, return an unsupported codec/container diagnostic on the first invocation, then create `Path(args[-1])` and return code 0 on the AAC invocation. Assert:
 - Inputs are annotated video first, source video second.
@@ -244,13 +244,13 @@ Use `monkeypatch` on `subtitle_renderer.subprocess.run`. Have the fake runner re
 
 Add tests that `subprocess.run` and `os.replace` OS errors become `VideoMuxError` and clean temp directories; missing FFmpeg and return-code-zero-without-output also raise. Keep the existing-output preservation test. Add a no-subtitle test: `subtitle_path=None` omits `-vf`, maps optional source audio, and uses `-c:v copy`. A success test must verify an existing output is replaced only after the temp file is complete.
 
-- [ ] **Step 2: Verify RED**
+- [x] **Step 2: Verify RED**
 
 Run: `.\directmlvenv\Scripts\python.exe -m pytest tests/test_subtitle_renderer.py -k mux -q`
 
 Expected: `mux_tracked_video`/`VideoMuxError` do not exist.
 
-- [ ] **Step 3: Implement muxing**
+- [x] **Step 3: Implement muxing**
 
 Use `shutil.which("ffmpeg")` when `ffmpeg` is not injected. Create a unique temporary directory beside the tracked-video output folder, on the same filesystem, and place the temp MP4 there; do not put intermediate files inside the tracked-video folder. Build an argument list (never `shell=True`) with input 0 = annotated intermediate, input 1 = original, `-map 0:v:0`, optional `-map 1:a:0?`, H.264 video, and `-c:a copy`. Resolve the media paths before setting `cwd` to the ASS directory, then use its simple generated basename (`subtitles.ass`) in `-vf subtitles=filename=subtitles.ass`, avoiding Windows drive-letter escaping. Retry with AAC only when FFmpeg's copy failure indicates an unsupported codec/container combination; unrelated input, filter, or filesystem failures must raise immediately. Decode FFmpeg diagnostics as UTF-8 with replacement for invalid bytes. On successful FFmpeg exit and a created temp output, atomically replace the final path. Convert OS-level execution/replacement failures to `VideoMuxError`; remove temp files/directories in all outcomes.
 
@@ -345,13 +345,13 @@ def mux_tracked_video(annotated_video, source_video, output_path, subtitle_path=
 
 `unique_temp_sibling(output_path)` creates a collision-free temp directory beside `output_path.parent` (not inside it), on the same filesystem for atomic replacement. `is_codec_container_failure(stderr)` recognizes FFmpeg's unsupported codec/container diagnostics. If `ffmpeg` is missing or any non-retryable output attempt fails, raise `VideoMuxError`; the workflow handles the audio-only or silent-video fallback.
 
-- [ ] **Step 4: Verify renderer tests**
+- [x] **Step 4: Verify renderer tests**
 
 Run: `.\directmlvenv\Scripts\python.exe -m pytest tests/test_subtitle_renderer.py -q`
 
 Expected: cue generation, ASS output, audio mapping, codec retry, and failed-output preservation all pass.
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```powershell
 git add subtitle_renderer.py tests/test_subtitle_renderer.py
@@ -366,7 +366,7 @@ git commit -m "feat(video): burn subtitles and mux source audio"
 
 **Interfaces:** Add `stage: str`, optional `meeting_id: int | None = None`, and `output_updated: bool = True` to `TranscriptStageError`, preserving `.video_output_path` and `.cause`. Set `meeting_id` when transcription has completed before a later subtitle/mux failure; leave it `None` when transcription itself failed. Set `output_updated=False` only if both audio mux and annotated fallback replacement fail. Keep `process_video_and_transcribe()` positional arguments compatible; append optional `stage_callback: Callable[[str], None] = None`.
 
-- [ ] **Step 1: Write failing workflow tests**
+- [x] **Step 1: Write failing workflow tests**
 
 Add three tests to `tests/test_video_workflow.py`. Use the existing module imports and add `json`, `Path`, `config`, `video_workflow`, and `SubtitleWord` if not already imported. The success path test should follow this contract:
 
@@ -417,13 +417,13 @@ def test_workflow_runs_one_transcription_then_burns_cues(tmp_path, monkeypatch):
 
 Also add one transcription-failure test: fake the video stage to create its annotated output/log, make transcription raise, make the no-subtitle mux write an audio-bearing output, then assert `TranscriptStageError.stage == "transcription"`, `meeting_id is None`, `output_updated is True`, and the final file exists. Add one transcription+audio-mux double-failure test for silent fallback (`output_updated=True`). Add one subtitle-failure test: transcription emits a word, ASS writing succeeds, the subtitle mux raises `VideoMuxError`, the `subtitle_path=None` retry writes an audio-bearing output, and `TranscriptStageError.stage == "subtitle"` includes the saved meeting ID and `output_updated is True`. Add a post-ASR cue/ASS failure test retaining the meeting ID on the transcription-stage error. Add subtitle+audio-mux double-failure tests for both successful silent fallback (`output_updated=True`) and fallback-copy failure (`output_updated=False` while preserving any previous output). All workflow tests must assert only one transcription call. Keep the existing MP3 test unchanged.
 
-- [ ] **Step 2: Verify RED**
+- [x] **Step 2: Verify RED**
 
 Run: `.\directmlvenv\Scripts\python.exe -m pytest tests/test_video_workflow.py -q`
 
 Expected: callback capture, subtitle mux, staged errors, and/or fallback expectations fail against current workflow.
 
-- [ ] **Step 3: Implement workflow finalization**
+- [x] **Step 3: Implement workflow finalization**
 
 Use a unique temporary directory beside the tracked-video output folder (on the same filesystem, but outside that folder) for `annotated.mp4` and `subtitles.ass`. Run face processing to the annotated path, load speaker events, create the face-event diarizer, then call `process_meeting_transcription()` once with the overlap threshold and `subtitle_words.append` callback. Build cues, write ASS, and call `mux_tracked_video(annotated, source, final, ass_path)`.
 
@@ -431,13 +431,13 @@ Report stages through `stage_callback`: `Processing faces and speaker events`, `
 
 If transcription or cue generation fails, call `mux_tracked_video(annotated, source, final, subtitle_path=None)` before raising a transcription-stage error. If subtitle mux fails, attempt the same audio-only mux before raising a subtitle-stage error and include the saved meeting ID. If audio-only mux also fails, copy the annotated silent video to `final` and report `stage="audio_mux"` with both failure causes and the meeting ID if transcription had completed. If that fallback replacement also fails, set `output_updated=False`; otherwise it remains true. Clean all temporary files in `finally`; do not delete a successfully produced final output before replacement succeeds. Resolve `output_path` before choosing the sibling temp root so relative paths still put intermediates outside the tracked-output folder.
 
-- [ ] **Step 4: Verify workflow, transcription, and mux tests**
+- [x] **Step 4: Verify workflow, transcription, and mux tests**
 
 Run: `.\directmlvenv\Scripts\python.exe -m pytest tests/test_video_workflow.py tests/test_transcription_core.py tests/test_subtitle_renderer.py -q`
 
 Expected: all focused tests pass.
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```powershell
 git add video_workflow.py tests/test_video_workflow.py
@@ -466,10 +466,10 @@ meeting_id = process_video_and_transcribe(
 
 **Worktree constraint:** `app.py` currently has an unrelated uncommitted Arrow fix; keep its changes out of this commit. Stage only the new `render_video` hunk with `git add -p app.py`. Do not stage `audio_log_utils.py` or `tests/test_audio_log_utils.py`.
 
-- [ ] **Step 1: Update the existing combined action**
+- [x] **Step 1: Update the existing combined action**
 
 
-- [ ] **Step 2: Compile and run focused tests**
+- [x] **Step 2: Compile and run focused tests**
 
 Run: `.\directmlvenv\Scripts\python.exe -m py_compile app.py video_workflow.py subtitle_renderer.py`
 
@@ -477,7 +477,7 @@ Run: `.\directmlvenv\Scripts\python.exe -m pytest tests/test_video_workflow.py t
 
 Expected: compile and focused tests pass.
 
-- [ ] **Step 3: Commit only the video-action hunk**
+- [x] **Step 3: Commit only the video-action hunk**
 
 ```powershell
 git add -p app.py
@@ -491,7 +491,7 @@ git commit -m "feat(app): show subtitle and audio finalization status"
 
 ### Task 6: Full regression and real-media smoke validation
 
-- [ ] **Step 1: Compile and run the full suite**
+- [x] **Step 1: Compile and run the full suite**
 
 Run: `.\directmlvenv\Scripts\python.exe -m py_compile app.py subtitle_renderer.py video_workflow.py transcription_core.py video_processor.py`
 
@@ -499,16 +499,16 @@ Run: `.\directmlvenv\Scripts\python.exe -m pytest tests -q`
 
 Expected: zero failures; record the actual count.
 
-- [ ] **Step 2: Run a bounded real-media smoke test**
+- [x] **Step 2: Run a bounded real-media smoke test**
 
 Use an existing short speech clip and temporary DB/output/log folders. Verify final tracked MP4 exists, contains video and source audio streams, and has visible burned captions. Compare one cue’s start/end and speaker label to the saved face-event JSON. If the clip yields only `UNKNOWN`, state that; this is a functional smoke test, not a recognition-accuracy claim.
 
 Use `ffprobe -v error -show_entries stream=codec_type -of csv=p=0 <tracked.mp4>` to verify the final container has both `video` and `audio` streams for an audio-bearing source.
 
-- [ ] **Step 3: Verify MP3 regression**
+- [x] **Step 3: Verify MP3 regression**
 
 Run the existing audio-only MP3 action/test and confirm no video or subtitle mux is attempted.
 
-- [ ] **Step 4: Record limitations**
+- [x] **Step 4: Record limitations**
 
 Record the clip tested, input audio presence, output streams, caption visibility, and speaker labels. State that subtitle correctness and identity accuracy are not measured without labelled references.
