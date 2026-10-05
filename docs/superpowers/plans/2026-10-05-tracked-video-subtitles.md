@@ -224,14 +224,18 @@ git commit -m "feat(transcription): expose attributed word timings for subtitles
 
 - [ ] **Step 1: Write failing mux tests**
 
-Use `monkeypatch` on `subtitle_renderer.subprocess.run`. Have the fake runner record `args`/`cwd`, return code 1 on the first invocation (audio copy unsupported), then create `Path(args[-1])` and return code 0 on the AAC invocation. Assert:
+Use `monkeypatch` on `subtitle_renderer.subprocess.run`. Have the fake runner record `args`/`cwd`, return an unsupported codec/container diagnostic on the first invocation, then create `Path(args[-1])` and return code 0 on the AAC invocation. Assert:
 - Inputs are annotated video first, source video second.
 - Video map is `0:v:0`; audio map is optional `1:a:0?`.
 - Subtitle run uses `-vf` with `subtitles=filename=subtitles.ass`, with `cwd=subtitle_path.parent` and no shell.
-- First audio codec is `copy`; retry codec is `aac`.
+- First audio codec is `copy`; AAC retry occurs only for the codec/container diagnostic.
+- A generic input/filter failure does not retry with AAC.
+- Relative annotated/source/output paths are resolved before setting subtitle `cwd`.
+- Temp MP4 lives in a unique directory outside `output_path.parent` but on the same filesystem; it is removed after success/failure.
+- FFmpeg stderr uses UTF-8 with replacement handling.
 - Final output is atomically created only after success.
 
-Add a second fake-runner test where both runs fail: assert `VideoMuxError` and that a pre-existing output file remains unchanged. Add a no-subtitle test: `subtitle_path=None` omits `-vf` but still maps optional source audio.
+Add tests that `subprocess.run` and `os.replace` OS errors become `VideoMuxError` and clean temp directories; missing FFmpeg and return-code-zero-without-output also raise. Keep the existing-output preservation test. Add a no-subtitle test: `subtitle_path=None` omits `-vf` but still maps optional source audio. A success test must verify an existing output is replaced only after the temp file is complete.
 
 - [ ] **Step 2: Verify RED**
 
@@ -241,7 +245,7 @@ Expected: `mux_tracked_video`/`VideoMuxError` do not exist.
 
 - [ ] **Step 3: Implement muxing**
 
-Use `shutil.which("ffmpeg")` when `ffmpeg` is not injected. Create a unique temporary sibling output. Build an argument list (never `shell=True`) with input 0 = annotated intermediate, input 1 = original, `-map 0:v:0`, optional `-map 1:a:0?`, H.264 video, and `-c:a copy`. When subtitles are enabled, set `cwd` to the ASS directory and use its simple generated basename (`subtitles.ass`) in `-vf subtitles=filename=subtitles.ass`, avoiding Windows drive-letter escaping. If copy fails, retry with AAC. On successful FFmpeg exit and a created temp output, atomically replace the final path. On failure, delete only the temp output and raise `VideoMuxError` with stderr.
+Use `shutil.which("ffmpeg")` when `ffmpeg` is not injected. Create a unique temporary directory beside the tracked-video output folder, on the same filesystem, and place the temp MP4 there; do not put intermediate files inside the tracked-video folder. Build an argument list (never `shell=True`) with input 0 = annotated intermediate, input 1 = original, `-map 0:v:0`, optional `-map 1:a:0?`, H.264 video, and `-c:a copy`. Resolve the media paths before setting `cwd` to the ASS directory, then use its simple generated basename (`subtitles.ass`) in `-vf subtitles=filename=subtitles.ass`, avoiding Windows drive-letter escaping. Retry with AAC only when FFmpeg's copy failure indicates an unsupported codec/container combination; unrelated input, filter, or filesystem failures must raise immediately. Decode FFmpeg diagnostics as UTF-8 with replacement for invalid bytes. On successful FFmpeg exit and a created temp output, atomically replace the final path. Convert OS-level execution/replacement failures to `VideoMuxError`; remove temp files/directories in all outcomes.
 
 Build each command through one helper so the copy/AAC retry cannot drift:
 
@@ -249,19 +253,23 @@ Build each command through one helper so the copy/AAC retry cannot drift:
 import os
 import shutil
 import subprocess
+import tempfile
 import uuid
 from pathlib import Path
 
 
 def unique_temp_sibling(output_path):
     output_path = Path(output_path)
-    return output_path.with_name(
-        f".{output_path.stem}.{uuid.uuid4().hex}.tmp{output_path.suffix}"
-    )
+    temp_dir = Path(tempfile.mkdtemp(
+        prefix=f".{output_path.parent.name}-subtitle-",
+        dir=output_path.parent.parent,
+    ))
+    temp_output = temp_dir / f"{output_path.stem}.{uuid.uuid4().hex}.tmp{output_path.suffix}"
+    return temp_dir, temp_output
 
 
 def _mux_args(ffmpeg, annotated_video, source_video, temp_output, subtitle_path, audio_codec):
-    args = [ffmpeg, "-y", "-i", str(annotated_video), "-i", str(source_video)]
+    args = [ffmpeg, "-y", "-i", str(Path(annotated_video).resolve()), "-i", str(Path(source_video).resolve())]
     if subtitle_path is not None:
         args.extend(["-vf", f"subtitles=filename={Path(subtitle_path).name}"])
     args.extend([
@@ -276,32 +284,59 @@ def _mux_args(ffmpeg, annotated_video, source_video, temp_output, subtitle_path,
     return args
 
 
+def is_codec_container_failure(stderr):
+    message = stderr.lower()
+    return any(marker in message for marker in (
+        "could not find tag for codec",
+        "codec not currently supported in container",
+        "not currently supported in container",
+    ))
+
+
 def mux_tracked_video(annotated_video, source_video, output_path, subtitle_path=None, ffmpeg=None):
-    output_path = Path(output_path)
+    output_path = Path(output_path).resolve()
     output_path.parent.mkdir(parents=True, exist_ok=True)
+    annotated_video = Path(annotated_video).resolve()
+    source_video = Path(source_video).resolve()
+    subtitle_path = Path(subtitle_path).resolve() if subtitle_path is not None else None
     ffmpeg = ffmpeg or shutil.which("ffmpeg")
     if ffmpeg is None:
         raise VideoMuxError("FFmpeg was not found in PATH")
-    codecs = ("copy", "aac")
+    attempts = ["copy"]
     last_error = ""
-    for codec in codecs:
-        temp_output = unique_temp_sibling(output_path)
-        result = subprocess.run(
-            _mux_args(ffmpeg, annotated_video, source_video, temp_output, subtitle_path, codec),
-            cwd=str(Path(subtitle_path).parent) if subtitle_path is not None else None,
-            capture_output=True,
-            text=True,
-            check=False,
-        )
-        if result.returncode == 0 and Path(temp_output).is_file():
-            os.replace(temp_output, output_path)
-            return output_path
-        last_error = result.stderr
-        Path(temp_output).unlink(missing_ok=True)
+    while attempts:
+        codec = attempts.pop(0)
+        try:
+            temp_dir, temp_output = unique_temp_sibling(output_path)
+        except OSError as error:
+            raise VideoMuxError(str(error)) from error
+        try:
+            result = subprocess.run(
+                _mux_args(ffmpeg, annotated_video, source_video, temp_output, subtitle_path, codec),
+                cwd=str(subtitle_path.parent) if subtitle_path is not None else None,
+                capture_output=True,
+                encoding="utf-8",
+                errors="replace",
+                check=False,
+            )
+            if result.returncode == 0 and Path(temp_output).is_file():
+                try:
+                    os.replace(temp_output, output_path)
+                except OSError as error:
+                    raise VideoMuxError(str(error)) from error
+                return output_path
+            last_error = result.stderr or "FFmpeg did not create a valid output file"
+            if codec == "copy" and is_codec_container_failure(last_error):
+                attempts.append("aac")
+        except OSError as error:
+            last_error = str(error)
+            break
+        finally:
+            shutil.rmtree(temp_dir, ignore_errors=True)
     raise VideoMuxError(last_error)
 ```
 
-`unique_temp_sibling(output_path)` creates a collision-free temporary MP4 in `output_path.parent`. If `ffmpeg` is missing or an output attempt fails, raise `VideoMuxError`; the workflow handles the audio-only or silent-video fallback.
+`unique_temp_sibling(output_path)` creates a collision-free temp directory beside `output_path.parent` (not inside it), on the same filesystem for atomic replacement. `is_codec_container_failure(stderr)` recognizes FFmpeg's unsupported codec/container diagnostics. If `ffmpeg` is missing or any non-retryable output attempt fails, raise `VideoMuxError`; the workflow handles the audio-only or silent-video fallback.
 
 - [ ] **Step 4: Verify renderer tests**
 
@@ -383,7 +418,7 @@ Expected: callback capture, subtitle mux, staged errors, and/or fallback expecta
 
 - [ ] **Step 3: Implement workflow finalization**
 
-Use a temporary directory adjacent to `output_path` for `annotated.mp4` and `subtitles.ass`. Run face processing to the annotated path, load speaker events, create the face-event diarizer, then call `process_meeting_transcription()` once with the overlap threshold and `subtitle_words.append` callback. Build cues, write ASS, and call `mux_tracked_video(annotated, source, final, ass_path)`.
+Use a unique temporary directory beside the tracked-video output folder (on the same filesystem, but outside that folder) for `annotated.mp4` and `subtitles.ass`. Run face processing to the annotated path, load speaker events, create the face-event diarizer, then call `process_meeting_transcription()` once with the overlap threshold and `subtitle_words.append` callback. Build cues, write ASS, and call `mux_tracked_video(annotated, source, final, ass_path)`.
 
 Report stages through `stage_callback`: `Processing faces and speaker events`, `Transcribing and timing subtitles`, `Burning subtitles and restoring audio`.
 
