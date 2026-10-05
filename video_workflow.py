@@ -6,6 +6,7 @@ from pathlib import Path
 from typing import Callable
 
 import config
+import database
 from subtitle_renderer import (
     SubtitleWord,
     VideoMuxError,
@@ -42,6 +43,27 @@ def _load_speech_events(log_path: Path) -> list[dict]:
     if isinstance(speech_events, list):
         return speech_events
     return []
+
+
+def _load_attendance_events(log_path: Path) -> list[dict]:
+    payload = json.loads(log_path.read_text(encoding="utf-8"))
+    attendance_events = payload.get("attendance", [])
+    if not isinstance(attendance_events, list):
+        return []
+    normalized_events = []
+    for event in attendance_events:
+        if not isinstance(event, dict):
+            continue
+        normalized_events.append(
+            {
+                "person_id": event.get("person_id"),
+                "person_name": event.get("person_name"),
+                "track_id": event.get("track_id"),
+                "confidence": event.get("confidence"),
+                "media_offset_ms": event.get("media_offset_ms"),
+            }
+        )
+    return normalized_events
 
 
 def _sibling_root(path: Path) -> Path:
@@ -204,6 +226,9 @@ def process_video_and_transcribe(
                 meeting_id=meeting_id,
                 output_updated=True,
             )
+
+        attendance_events = _load_attendance_events(log_path)
+        database.replace_video_attendance(video_path.resolve().as_posix(), attendance_events)
 
         return meeting_id
     finally:

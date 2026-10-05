@@ -494,3 +494,180 @@ def test_relative_output_path_uses_temp_outside_output_folder(tmp_path, monkeypa
     assert seen["output"] == expected_output
     assert seen["annotated"].parent.parent == tmp_path.resolve()
     assert tracked_dir not in seen["annotated"].parents
+
+
+def test_workflow_success_replaces_uploaded_video_attendance_once(tmp_path, monkeypatch):
+    source = tmp_path / "source.mp4"
+    source.write_bytes(b"source")
+    final = tmp_path / "tracked.mp4"
+    log = tmp_path / "events.json"
+
+    def fake_video(_source, annotated, log_path, **_kwargs):
+        Path(annotated).write_bytes(b"annotated")
+        Path(log_path).write_text(
+            json.dumps(
+                {
+                    "recognition": [],
+                    "speech": [],
+                    "attendance": [
+                        {
+                            "person_id": 7,
+                            "person_name": "Alice",
+                            "track_id": 1,
+                            "confidence": 0.94,
+                            "media_offset_ms": 700,
+                        },
+                        {
+                            "person_id": 8,
+                            "person_name": "Bob",
+                            "track_id": 2,
+                            "confidence": 0.81,
+                            "media_offset_ms": 1300,
+                        },
+                    ],
+                }
+            ),
+            encoding="utf-8",
+        )
+        return True
+
+    def fake_transcribe(*_args, subtitle_word_callback=None, **_kwargs):
+        if subtitle_word_callback is not None:
+            subtitle_word_callback(SubtitleWord("Alice", 50, 150, "hi"))
+        return 12
+
+    def fake_write(_cues, path):
+        Path(path).write_text("ASS", encoding="utf-8")
+        return Path(path)
+
+    def fake_mux(_annotated, _source, output, subtitle_path=None, **_kwargs):
+        assert subtitle_path is not None
+        Path(output).write_bytes(b"final")
+        return Path(output)
+
+    replacement_calls = []
+
+    def fake_replace(source_ref, events):
+        replacement_calls.append((source_ref, events))
+        return len(events)
+
+    monkeypatch.setattr(video_workflow, "process_video_pipeline", fake_video)
+    monkeypatch.setattr(video_workflow, "process_meeting_transcription", fake_transcribe)
+    monkeypatch.setattr(video_workflow, "write_ass_subtitles", fake_write)
+    monkeypatch.setattr(video_workflow, "mux_tracked_video", fake_mux)
+    monkeypatch.setattr(video_workflow.database, "replace_video_attendance", fake_replace)
+
+    assert video_workflow.process_video_and_transcribe(source, final, log) == 12
+    assert len(replacement_calls) == 1
+    assert replacement_calls[0][0] == source.resolve().as_posix()
+    assert replacement_calls[0][1] == [
+        {
+            "person_id": 7,
+            "person_name": "Alice",
+            "track_id": 1,
+            "confidence": 0.94,
+            "media_offset_ms": 700,
+        },
+        {
+            "person_id": 8,
+            "person_name": "Bob",
+            "track_id": 2,
+            "confidence": 0.81,
+            "media_offset_ms": 1300,
+        },
+    ]
+
+
+def test_workflow_success_with_no_candidates_clears_uploaded_video_attendance(tmp_path, monkeypatch):
+    source = tmp_path / "source.mp4"
+    source.write_bytes(b"source")
+    final = tmp_path / "tracked.mp4"
+    log = tmp_path / "events.json"
+
+    def fake_video(_source, annotated, log_path, **_kwargs):
+        Path(annotated).write_bytes(b"annotated")
+        Path(log_path).write_text(
+            json.dumps({"recognition": [], "speech": []}),
+            encoding="utf-8",
+        )
+        return True
+
+    def fake_transcribe(*_args, subtitle_word_callback=None, **_kwargs):
+        if subtitle_word_callback is not None:
+            subtitle_word_callback(SubtitleWord("Alice", 10, 20, "ok"))
+        return 13
+
+    def fake_write(_cues, path):
+        Path(path).write_text("ASS", encoding="utf-8")
+        return Path(path)
+
+    def fake_mux(_annotated, _source, output, subtitle_path=None, **_kwargs):
+        assert subtitle_path is not None
+        Path(output).write_bytes(b"final")
+        return Path(output)
+
+    replacement_calls = []
+
+    def fake_replace(source_ref, events):
+        replacement_calls.append((source_ref, events))
+        return 0
+
+    monkeypatch.setattr(video_workflow, "process_video_pipeline", fake_video)
+    monkeypatch.setattr(video_workflow, "process_meeting_transcription", fake_transcribe)
+    monkeypatch.setattr(video_workflow, "write_ass_subtitles", fake_write)
+    monkeypatch.setattr(video_workflow, "mux_tracked_video", fake_mux)
+    monkeypatch.setattr(video_workflow.database, "replace_video_attendance", fake_replace)
+
+    assert video_workflow.process_video_and_transcribe(source, final, log) == 13
+    assert replacement_calls == [(source.resolve().as_posix(), [])]
+
+
+def test_workflow_failure_does_not_replace_uploaded_video_attendance(tmp_path, monkeypatch):
+    source = tmp_path / "source.mp4"
+    source.write_bytes(b"source")
+    final = tmp_path / "tracked.mp4"
+    log = tmp_path / "events.json"
+
+    def fake_video(_source, annotated, log_path, **_kwargs):
+        Path(annotated).write_bytes(b"annotated")
+        Path(log_path).write_text(
+            json.dumps(
+                {
+                    "recognition": [],
+                    "speech": [],
+                    "attendance": [
+                        {
+                            "person_id": 7,
+                            "person_name": "Alice",
+                            "track_id": 1,
+                            "confidence": 0.95,
+                            "media_offset_ms": 800,
+                        }
+                    ],
+                }
+            ),
+            encoding="utf-8",
+        )
+        return True
+
+    monkeypatch.setattr(video_workflow, "process_video_pipeline", fake_video)
+    monkeypatch.setattr(
+        video_workflow,
+        "process_meeting_transcription",
+        lambda *_a, **_k: (_ for _ in ()).throw(RuntimeError("transcription failed")),
+    )
+
+    def fake_mux(_annotated, _source, output, subtitle_path=None, **_kwargs):
+        assert subtitle_path is None
+        Path(output).write_bytes(b"audio-fallback")
+        return Path(output)
+
+    replacement_calls = []
+    monkeypatch.setattr(video_workflow, "mux_tracked_video", fake_mux)
+    monkeypatch.setattr(video_workflow.database, "replace_video_attendance", lambda *args, **kwargs: replacement_calls.append((args, kwargs)))
+
+    with pytest.raises(video_workflow.TranscriptStageError) as excinfo:
+        video_workflow.process_video_and_transcribe(source, final, log)
+
+    assert excinfo.value.stage == "transcription"
+    assert replacement_calls == []

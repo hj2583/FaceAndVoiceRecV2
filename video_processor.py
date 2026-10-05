@@ -475,6 +475,8 @@ def process_video_pipeline(
     frame_no = 0
 
     recognition_logs = []
+    attendance_candidates = []
+    attendance_pairs = set()
 
     active_speech_logs = []
     last_tiled_detections = []
@@ -969,6 +971,36 @@ def process_video_pipeline(
                 )
 
             # =================================================
+            # Attendance candidates for uploaded-video replacement
+            # =================================================
+
+            confidence_value = None
+            if getattr(track, "confidence", None) is not None:
+                try:
+                    confidence_value = float(track.confidence)
+                except (TypeError, ValueError):
+                    confidence_value = None
+
+            pair = (track.track_id, track.person_id)
+            if (
+                track.person_id is not None
+                and confidence_value is not None
+                and confidence_value >= RECOGNITION_THRESHOLD
+                and pair not in attendance_pairs
+            ):
+                clamped_confidence = max(0.0, min(1.0, confidence_value))
+                attendance_pairs.add(pair)
+                attendance_candidates.append(
+                    {
+                        "person_id": int(track.person_id),
+                        "person_name": track.person_name,
+                        "track_id": int(track.track_id),
+                        "confidence": round(clamped_confidence, 4),
+                        "media_offset_ms": int(round(timestamp * 1000)),
+                    }
+                )
+
+            # =================================================
             # Lip movement
             # =================================================
 
@@ -1132,6 +1164,9 @@ def process_video_pipeline(
                 ),
                 "speech": (
                     active_speech_logs
+                ),
+                "attendance": (
+                    attendance_candidates
                 ),
             },
             f,
