@@ -317,7 +317,10 @@ def _mux_args(ffmpeg, annotated_video, source_video, temp_output, subtitle_path,
 def mux_tracked_video(annotated_video, source_video, output_path, subtitle_path=None, ffmpeg=None) -> Path:
     """Burn ASS subtitles into an annotated video and mux audio from source video."""
     output_path = Path(output_path).resolve()
-    output_path.parent.mkdir(parents=True, exist_ok=True)
+    try:
+        output_path.parent.mkdir(parents=True, exist_ok=True)
+    except OSError as error:
+        raise VideoMuxError(str(error)) from error
     annotated_video = Path(annotated_video).resolve()
     source_video = Path(source_video).resolve()
     subtitle_file = Path(subtitle_path).resolve() if subtitle_path is not None else None

@@ -436,3 +436,87 @@ def test_mux_tracked_video_without_subtitles_omits_vf_and_maps_optional_audio(tm
     assert captured_args[map_positions[0] + 1] == "0:v:0"
     assert captured_args[map_positions[1] + 1] == "1:a:0?"
 
+
+def test_mux_tracked_video_double_failure_preserves_existing_output_and_cleans_temp_artifacts(tmp_path, monkeypatch):
+    output_path = tmp_path / "tracked" / "final.mp4"
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    output_path.write_bytes(b"original")
+    annotated_video = tmp_path / "annotated.mp4"
+    source_video = tmp_path / "source.mp4"
+    annotated_video.write_bytes(b"annotated")
+    source_video.write_bytes(b"source")
+
+    calls = []
+    temp_dirs = []
+
+    def fake_run(args, **kwargs):
+        calls.append(list(args))
+        temp_path = Path(args[-1])
+        temp_dirs.append(temp_path.parent)
+        temp_path.write_bytes(b"attempt")
+        if len(calls) == 1:
+            return SimpleNamespace(
+                returncode=1,
+                stdout=b"",
+                stderr=b"codec not currently supported in container",
+            )
+        return SimpleNamespace(returncode=1, stdout=b"", stderr=b"aac encode failed")
+
+    monkeypatch.setattr("subtitle_renderer.subprocess.run", fake_run)
+
+    with pytest.raises(VideoMuxError, match="aac encode failed"):
+        mux_tracked_video(annotated_video, source_video, output_path, ffmpeg="ffmpeg")
+
+    assert len(calls) == 2
+    assert calls[0][calls[0].index("-c:a") + 1] == "copy"
+    assert calls[1][calls[1].index("-c:a") + 1] == "aac"
+    assert output_path.read_bytes() == b"original"
+    assert temp_dirs
+    assert all(not temp_dir.exists() for temp_dir in temp_dirs)
+
+
+def test_mux_tracked_video_replaces_existing_output_only_after_successful_temp_render(tmp_path, monkeypatch):
+    output_path = tmp_path / "tracked" / "final.mp4"
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    output_path.write_bytes(b"original")
+    annotated_video = tmp_path / "annotated.mp4"
+    source_video = tmp_path / "source.mp4"
+    annotated_video.write_bytes(b"annotated")
+    source_video.write_bytes(b"source")
+
+    bytes_seen_during_ffmpeg = []
+
+    def fake_run(args, **kwargs):
+        bytes_seen_during_ffmpeg.append(output_path.read_bytes())
+        temp_path = Path(args[-1])
+        temp_path.write_bytes(b"complete-new-output")
+        return SimpleNamespace(returncode=0, stdout=b"", stderr=b"")
+
+    monkeypatch.setattr("subtitle_renderer.subprocess.run", fake_run)
+
+    result = mux_tracked_video(annotated_video, source_video, output_path, ffmpeg="ffmpeg")
+
+    assert result == output_path.resolve()
+    assert bytes_seen_during_ffmpeg == [b"original"]
+    assert output_path.read_bytes() == b"complete-new-output"
+
+
+def test_mux_tracked_video_wraps_output_directory_creation_oserror(tmp_path, monkeypatch):
+    output_path = tmp_path / "tracked" / "final.mp4"
+    annotated_video = tmp_path / "annotated.mp4"
+    source_video = tmp_path / "source.mp4"
+    annotated_video.write_bytes(b"annotated")
+    source_video.write_bytes(b"source")
+
+    real_mkdir = Path.mkdir
+
+    def fake_mkdir(self, *args, **kwargs):
+        if self == output_path.parent:
+            raise PermissionError("cannot create output directory")
+        return real_mkdir(self, *args, **kwargs)
+
+    monkeypatch.setattr("subtitle_renderer.Path.mkdir", fake_mkdir)
+
+    with pytest.raises(VideoMuxError, match="cannot create output directory"):
+        mux_tracked_video(annotated_video, source_video, output_path, ffmpeg="ffmpeg")
+
