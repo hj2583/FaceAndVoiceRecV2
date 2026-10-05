@@ -196,6 +196,8 @@ def test_subtitle_callback_estimates_word_timings_when_word_timings_are_missing(
     ]
 ```
 
+Add a `process_meeting_transcription()` forwarding test: monkeypatch `transcribe_with_diarization`, pass a callback, assert the identical callback object and diarizer/overlap options are forwarded, and preserve the returned segment list/meeting ID.
+
 - [ ] **Step 2: Verify RED**
 
 Run: `.\directmlvenv\Scripts\python.exe -m pytest tests/test_transcription_core.py -k subtitle_word_callback -q`
@@ -240,7 +242,7 @@ Use `monkeypatch` on `subtitle_renderer.subprocess.run`. Have the fake runner re
 - FFmpeg stderr uses UTF-8 with replacement handling.
 - Final output is atomically created only after success.
 
-Add tests that `subprocess.run` and `os.replace` OS errors become `VideoMuxError` and clean temp directories; missing FFmpeg and return-code-zero-without-output also raise. Keep the existing-output preservation test. Add a no-subtitle test: `subtitle_path=None` omits `-vf` but still maps optional source audio. A success test must verify an existing output is replaced only after the temp file is complete.
+Add tests that `subprocess.run` and `os.replace` OS errors become `VideoMuxError` and clean temp directories; missing FFmpeg and return-code-zero-without-output also raise. Keep the existing-output preservation test. Add a no-subtitle test: `subtitle_path=None` omits `-vf`, maps optional source audio, and uses `-c:v copy`. A success test must verify an existing output is replaced only after the temp file is complete.
 
 - [ ] **Step 2: Verify RED**
 
@@ -413,7 +415,7 @@ def test_workflow_runs_one_transcription_then_burns_cues(tmp_path, monkeypatch):
     assert final.read_bytes() == b"final"
 ```
 
-Also add one transcription-failure test: fake the video stage to create its annotated output/log, make transcription raise, make the no-subtitle mux write an audio-bearing output, then assert `TranscriptStageError.stage == "transcription"`, `meeting_id is None`, `output_updated is True`, and the final file exists. Add one subtitle-failure test: transcription emits a word, ASS writing succeeds, the subtitle mux raises `VideoMuxError`, the `subtitle_path=None` retry writes an audio-bearing output, and `TranscriptStageError.stage == "subtitle"` includes the saved meeting ID and `output_updated is True`. Add a post-ASR cue/ASS failure test retaining the meeting ID on the transcription-stage error. Add subtitle+audio-mux double-failure tests for both successful silent fallback (`output_updated=True`) and fallback-copy failure (`output_updated=False` while preserving any previous output). All workflow tests must assert only one transcription call. Keep the existing MP3 test unchanged.
+Also add one transcription-failure test: fake the video stage to create its annotated output/log, make transcription raise, make the no-subtitle mux write an audio-bearing output, then assert `TranscriptStageError.stage == "transcription"`, `meeting_id is None`, `output_updated is True`, and the final file exists. Add one transcription+audio-mux double-failure test for silent fallback (`output_updated=True`). Add one subtitle-failure test: transcription emits a word, ASS writing succeeds, the subtitle mux raises `VideoMuxError`, the `subtitle_path=None` retry writes an audio-bearing output, and `TranscriptStageError.stage == "subtitle"` includes the saved meeting ID and `output_updated is True`. Add a post-ASR cue/ASS failure test retaining the meeting ID on the transcription-stage error. Add subtitle+audio-mux double-failure tests for both successful silent fallback (`output_updated=True`) and fallback-copy failure (`output_updated=False` while preserving any previous output). All workflow tests must assert only one transcription call. Keep the existing MP3 test unchanged.
 
 - [ ] **Step 2: Verify RED**
 
