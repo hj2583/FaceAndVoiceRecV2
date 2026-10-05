@@ -3,7 +3,8 @@ from collections import deque
 import logging
 import threading
 import time
-from datetime import datetime
+from datetime import datetime, timezone
+import uuid
 
 import cv2
 import numpy as np
@@ -44,6 +45,7 @@ from database import (
     update_unknown_image,
     log_audio,
     log_recognition,
+    record_attendance_event,
 )
 
 from face_core import (
@@ -320,6 +322,7 @@ def run(
 
     attributor = SpeakerAttributor()
     voice_identity_by_run = {}
+    realtime_run_id = str(uuid.uuid4())
     wall_clock_offset_s = time.time() - time.monotonic()
 
     def _mono_to_wall_clock(monotonic_ts):
@@ -408,6 +411,7 @@ def run(
         frame_no = 0
 
         last_recognition_log = {}
+        attendance_logged_pairs = set()
 
         face_detections = []
         last_landmark_timestamp_ms = -1
@@ -1059,6 +1063,36 @@ def run(
                         lip_open_ratio=track.lip_open,
                         face_visible=True,
                     ))
+
+                # =================================================
+                # Attendance logging
+                # =================================================
+
+                if (
+                    track.person_id is not None
+                    and track.confidence >= RECOGNITION_THRESHOLD
+                ):
+                    attendance_pair = (track.track_id, track.person_id)
+                    if attendance_pair not in attendance_logged_pairs:
+                        try:
+                            record_attendance_event(
+                                source="realtime",
+                                source_ref=realtime_run_id,
+                                track_id=track.track_id,
+                                person_id=track.person_id,
+                                person_name=track.person_name,
+                                confidence=float(track.confidence),
+                                observed_at_utc=datetime.fromtimestamp(
+                                    _mono_to_wall_clock(timestamp),
+                                    timezone.utc,
+                                ).isoformat(),
+                            )
+                        except Exception:
+                            logging.exception(
+                                "Failed to record realtime attendance event"
+                            )
+                        finally:
+                            attendance_logged_pairs.add(attendance_pair)
 
                 # =================================================
                 # Recognition logging

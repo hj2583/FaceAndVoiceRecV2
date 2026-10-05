@@ -1,5 +1,7 @@
 import threading
 import time
+import uuid
+from datetime import datetime, timezone
 from types import ModuleType, SimpleNamespace
 from unittest.mock import Mock
 
@@ -1298,3 +1300,159 @@ def test_run_logs_unknown_speaking_track(monkeypatch):
     assert args[3] == "UNKNOWN"
     assert args[5] == "realtime"
     assert kwargs["track_id"] == 9
+
+
+def test_run_records_realtime_attendance_once_per_track_person_pair(monkeypatch):
+    import realtime
+
+    frame = np.zeros((120, 160, 3), dtype=np.uint8)
+
+    class _Cap:
+        def __init__(self):
+            self.calls = 0
+
+        def isOpened(self):
+            return True
+
+        def set(self, *_args, **_kwargs):
+            return True
+
+        def get(self, prop):
+            if prop == cv2.CAP_PROP_FPS:
+                return 30.0
+            if prop == cv2.CAP_PROP_FRAME_WIDTH:
+                return 160.0
+            if prop == cv2.CAP_PROP_FRAME_HEIGHT:
+                return 120.0
+            return 0.0
+
+        def read(self):
+            self.calls += 1
+            if self.calls <= 3:
+                return True, frame.copy()
+            return False, None
+
+        def release(self):
+            return None
+
+    class _Mesh:
+        def detect_for_video(self, *_args, **_kwargs):
+            return SimpleNamespace(face_landmarks=[])
+
+        def close(self):
+            return None
+
+    class _Track:
+        def __init__(self, track_id, person_id, person_name, confidence):
+            self.track_id = track_id
+            self.person_id = person_id
+            self.person_name = person_name
+            self.confidence = confidence
+            self.embedding = None
+            self.center_x = 80
+            self.center_y = 60
+            self.lip_open = None
+
+    def _det(track_width):
+        return {"bbox": (10, 10, 10 + track_width, 70), "lip_open": None}
+
+    track_high = _Track(1, 11, "Alice", 0.95)
+    track_low = _Track(2, 12, "Bob", 0.20)
+    track_unknown = _Track(3, None, "Unknown", 0.0)
+    track_new = _Track(4, 11, "Alice", 0.99)
+
+    class _Tracker:
+        def __init__(self):
+            self.tracks = {
+                1: track_high,
+                2: track_low,
+                3: track_unknown,
+                4: track_new,
+            }
+            self._frame_no = 0
+
+        def update(self, _detections, _frame_no):
+            self._frame_no += 1
+            if self._frame_no == 1:
+                return [
+                    (_det(80), track_high),
+                    (_det(80), track_low),
+                    (_det(10), track_unknown),
+                ]
+            if self._frame_no == 2:
+                return [(_det(80), track_high)]
+            if self._frame_no == 3:
+                return [(_det(80), track_new)]
+            return []
+
+    class _MonoClock:
+        def __init__(self):
+            self.value = 100.0
+
+        def __call__(self):
+            current = self.value
+            self.value += 1.0
+            return current
+
+    attendance_calls = []
+    recognition_calls = []
+
+    monkeypatch.setattr(realtime.time, "monotonic", _MonoClock())
+    monkeypatch.setattr(realtime.time, "time", lambda: 1000.0)
+    monkeypatch.setattr(realtime.cv2, "VideoCapture", lambda *_args, **_kwargs: _Cap())
+    monkeypatch.setattr(realtime, "FaceIndex", lambda: SimpleNamespace(search=lambda *_args, **_kwargs: None))
+    monkeypatch.setattr(realtime, "CentroidTracker", lambda: _Tracker())
+    monkeypatch.setattr(realtime, "start_realtime_vad", lambda callback: (None, False))
+    monkeypatch.setattr(realtime, "create_face_landmarker", lambda: _Mesh())
+    monkeypatch.setattr(realtime, "detect_faces_realtime", lambda *_args, **_kwargs: [])
+    monkeypatch.setattr(realtime, "extract_embedding", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(realtime, "log_audio", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(
+        realtime,
+        "log_recognition",
+        lambda *args, **kwargs: recognition_calls.append((args, kwargs)),
+    )
+    monkeypatch.setattr(
+        realtime,
+        "record_attendance_event",
+        lambda **kwargs: attendance_calls.append(kwargs),
+        raising=False,
+    )
+    monkeypatch.setattr(realtime.cv2, "cvtColor", lambda image, _code: image)
+    monkeypatch.setattr(realtime.cv2, "imshow", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(realtime.cv2, "waitKey", lambda *_args, **_kwargs: 0)
+    monkeypatch.setattr(realtime.cv2, "getWindowProperty", lambda *_args, **_kwargs: 1)
+    monkeypatch.setattr(realtime.cv2, "rectangle", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(realtime.cv2, "putText", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(realtime.cv2, "destroyAllWindows", lambda: None)
+
+    dummy_mp = SimpleNamespace(
+        ImageFormat=SimpleNamespace(SRGB=1),
+        Image=lambda image_format, data: data,
+    )
+    import sys
+    fake_video_processor = ModuleType("video_processor")
+    fake_video_processor.lip_open_ratio = lambda _landmarks: 0.0
+    monkeypatch.setitem(sys.modules, "video_processor", fake_video_processor)
+    monkeypatch.setitem(sys.modules, "mediapipe", dummy_mp)
+
+    realtime.run(camera=0, width=160, height=120)
+
+    assert len(attendance_calls) == 2
+    assert {(c["track_id"], c["person_id"]) for c in attendance_calls} == {(1, 11), (4, 11)}
+
+    for call in attendance_calls:
+        assert call["source"] == "realtime"
+        assert call["person_name"] == "Alice"
+        assert call["confidence"] >= realtime.RECOGNITION_THRESHOLD
+        assert uuid.UUID(call["source_ref"])  # raises if not UUID
+        observed = datetime.fromisoformat(call["observed_at_utc"])
+        assert observed.tzinfo == timezone.utc
+
+    assert attendance_calls[0]["source_ref"] == attendance_calls[1]["source_ref"]
+
+    expected_first = datetime.fromtimestamp(1001.0, timezone.utc).isoformat()
+    assert attendance_calls[0]["observed_at_utc"] == expected_first
+
+    # Recognition logging cadence remains active while attendance is deduped.
+    assert recognition_calls
