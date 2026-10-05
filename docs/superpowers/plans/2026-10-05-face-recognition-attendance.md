@@ -305,7 +305,7 @@ git commit -m "feat(attendance): record uploaded video appearances"
 
 **Consumes:** `database.fetch_attendance(source=None, person_id=None)`.
 
-**Produces:** `build_attendance_frame(rows) -> pandas.DataFrame` and `attendance_frame_to_csv(frame) -> bytes` in `attendance_view.py`.
+**Produces:** `filter_visible_attendance(rows, threshold) -> list`, `build_attendance_frame(rows) -> pandas.DataFrame`, and `attendance_frame_to_csv(frame) -> bytes` in `attendance_view.py`.
 
 **Behavior:** Add an `Attendance` tab to `main()`. The view shows source and person filters, then a dense table with Person, Source, Observed (UTC), Video, Clip Time, Confidence, and Track ID. Realtime entries populate Observed (UTC); video entries populate Video and clip-relative `mm:ss` without a calendar date. The download button exports the currently filtered rows as UTF-8 CSV. Empty results show an empty state; do not show unknown or low-confidence observations.
 
@@ -314,7 +314,12 @@ git commit -m "feat(attendance): record uploaded video appearances"
 Add `tests/test_attendance_view.py`:
 
 ```python
-from attendance_view import attendance_frame_to_csv, build_attendance_frame, format_clip_offset
+from attendance_view import (
+    attendance_frame_to_csv,
+    build_attendance_frame,
+    filter_visible_attendance,
+    format_clip_offset,
+)
 
 
 def test_attendance_frame_keeps_realtime_dates_separate_from_video_offsets():
@@ -351,6 +356,17 @@ def test_clip_offset_formatting_handles_minute_and_hour_boundaries():
     assert format_clip_offset(3600000) == "1:00:00"
 
 
+def test_attendance_filter_uses_recognition_threshold_and_excludes_unknown():
+    rows = [
+        {"person_name": "Alice", "confidence": 0.70},
+        {"person_name": "Bob", "confidence": 0.699},
+        {"person_name": "UNKNOWN", "confidence": 0.95},
+        {"person_name": "Missing", "confidence": None},
+    ]
+
+    assert filter_visible_attendance(rows, threshold=0.70) == [rows[0]]
+
+
 def test_attendance_csv_exports_exact_frame_columns():
     frame = build_attendance_frame([{
         "person_name": "Alice", "source": "video", "observed_at_utc": None,
@@ -373,7 +389,7 @@ Expected: module collection fails because `attendance_view` and its formatters d
 
 - [ ] **Step 3: Add the tab and view**
 
-Add `format_clip_offset`, `build_attendance_frame`, and `attendance_frame_to_csv` in `attendance_view.py`. Format offsets as `MM:SS`, switching to `H:MM:SS` at one hour; preserve UTC values in realtime rows and keep video date fields empty. In `app.py`, add `render_attendance()` and register an `Attendance` tab. Provide source and person filters, fetch the matching events from the database, render the returned frame, and wire a CSV download button to `attendance_frame_to_csv(frame)`. Include an empty state.
+Add `filter_visible_attendance`, `format_clip_offset`, `build_attendance_frame`, and `attendance_frame_to_csv` in `attendance_view.py`. Filter with `config.RECOGNITION_THRESHOLD`, excluding unknown labels and missing confidence. Format offsets as `MM:SS`, switching to `H:MM:SS` at one hour; preserve UTC values in realtime rows and keep video date fields empty. In `app.py`, import and pass `RECOGNITION_THRESHOLD`, add `render_attendance()`, and register an `Attendance` tab. Unpack all four values returned by `list_persons()`. Provide source and person filters, fetch matching DB events, apply `filter_visible_attendance`, render the returned frame, and wire CSV download to exactly `attendance_frame_to_csv(frame)`. Include an empty state.
 
 - [ ] **Step 4: Run attendance/database UI-preparation tests**
 
