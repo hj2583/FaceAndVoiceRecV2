@@ -7,6 +7,7 @@ from unittest.mock import Mock
 
 import cv2
 import numpy as np
+import pytest
 
 from realtime import start_realtime_vad
 
@@ -1456,3 +1457,345 @@ def test_run_records_realtime_attendance_once_per_track_person_pair(monkeypatch)
 
     # Recognition logging cadence remains active while attendance is deduped.
     assert recognition_calls
+
+
+def test_run_retries_transient_attendance_failure_with_throttle(monkeypatch):
+    import realtime
+
+    frame = np.zeros((120, 160, 3), dtype=np.uint8)
+
+    class _Cap:
+        def __init__(self):
+            self.calls = 0
+
+        def isOpened(self):
+            return True
+
+        def set(self, *_args, **_kwargs):
+            return True
+
+        def get(self, prop):
+            if prop == cv2.CAP_PROP_FPS:
+                return 30.0
+            if prop == cv2.CAP_PROP_FRAME_WIDTH:
+                return 160.0
+            if prop == cv2.CAP_PROP_FRAME_HEIGHT:
+                return 120.0
+            return 0.0
+
+        def read(self):
+            self.calls += 1
+            if self.calls <= 4:
+                return True, frame.copy()
+            return False, None
+
+        def release(self):
+            return None
+
+    class _Mesh:
+        def detect_for_video(self, *_args, **_kwargs):
+            return SimpleNamespace(face_landmarks=[])
+
+        def close(self):
+            return None
+
+    class _Track:
+        def __init__(self):
+            self.track_id = 7
+            self.person_id = 77
+            self.person_name = "Alice"
+            self.confidence = 0.95
+            self.embedding = None
+            self.center_x = 80
+            self.center_y = 60
+            self.lip_open = None
+
+    track = _Track()
+
+    class _Tracker:
+        def __init__(self):
+            self.tracks = {7: track}
+
+        def update(self, _detections, _frame_no):
+            return [({"bbox": (10, 10, 90, 90), "lip_open": None}, track)]
+
+    class _MonoClock:
+        def __init__(self):
+            self.values = [200.0, 200.4, 200.8, 201.2, 201.6]
+            self.index = 0
+
+        def __call__(self):
+            if self.index < len(self.values):
+                value = self.values[self.index]
+                self.index += 1
+                return value
+            self.values.append(self.values[-1] + 0.4)
+            self.index += 1
+            return self.values[-1]
+
+    attendance_attempts = []
+    successful_events = []
+
+    def _record_attendance_event(**kwargs):
+        attendance_attempts.append(kwargs)
+        if len(attendance_attempts) == 1:
+            raise RuntimeError("transient write failure")
+        successful_events.append(kwargs)
+        return True
+
+    monkeypatch.setattr(realtime.time, "monotonic", _MonoClock())
+    monkeypatch.setattr(realtime.time, "time", lambda: 1200.0)
+    monkeypatch.setattr(realtime.cv2, "VideoCapture", lambda *_args, **_kwargs: _Cap())
+    monkeypatch.setattr(realtime, "FaceIndex", lambda: SimpleNamespace(search=lambda *_args, **_kwargs: None))
+    monkeypatch.setattr(realtime, "CentroidTracker", lambda: _Tracker())
+    monkeypatch.setattr(realtime, "start_realtime_vad", lambda callback: (None, False))
+    monkeypatch.setattr(realtime, "create_face_landmarker", lambda: _Mesh())
+    monkeypatch.setattr(realtime, "detect_faces_realtime", lambda *_args, **_kwargs: [])
+    monkeypatch.setattr(realtime, "extract_embedding", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(realtime, "log_audio", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(realtime, "log_recognition", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(realtime, "record_attendance_event", _record_attendance_event, raising=False)
+    monkeypatch.setattr(realtime.cv2, "cvtColor", lambda image, _code: image)
+    monkeypatch.setattr(realtime.cv2, "imshow", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(realtime.cv2, "waitKey", lambda *_args, **_kwargs: 0)
+    monkeypatch.setattr(realtime.cv2, "getWindowProperty", lambda *_args, **_kwargs: 1)
+    monkeypatch.setattr(realtime.cv2, "rectangle", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(realtime.cv2, "putText", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(realtime.cv2, "destroyAllWindows", lambda: None)
+
+    dummy_mp = SimpleNamespace(
+        ImageFormat=SimpleNamespace(SRGB=1),
+        Image=lambda image_format, data: data,
+    )
+    import sys
+    fake_video_processor = ModuleType("video_processor")
+    fake_video_processor.lip_open_ratio = lambda _landmarks: 0.0
+    monkeypatch.setitem(sys.modules, "video_processor", fake_video_processor)
+    monkeypatch.setitem(sys.modules, "mediapipe", dummy_mp)
+
+    realtime.run(camera=0, width=160, height=120)
+
+    assert len(attendance_attempts) == 2
+    assert len(successful_events) == 1
+    assert successful_events[0]["track_id"] == 7
+    assert successful_events[0]["person_id"] == 77
+
+
+def test_run_clamps_attendance_confidence_to_one(monkeypatch):
+    import realtime
+
+    frame = np.zeros((120, 160, 3), dtype=np.uint8)
+
+    class _Cap:
+        def __init__(self):
+            self.calls = 0
+
+        def isOpened(self):
+            return True
+
+        def set(self, *_args, **_kwargs):
+            return True
+
+        def get(self, prop):
+            if prop == cv2.CAP_PROP_FPS:
+                return 30.0
+            if prop == cv2.CAP_PROP_FRAME_WIDTH:
+                return 160.0
+            if prop == cv2.CAP_PROP_FRAME_HEIGHT:
+                return 120.0
+            return 0.0
+
+        def read(self):
+            self.calls += 1
+            if self.calls <= 1:
+                return True, frame.copy()
+            return False, None
+
+        def release(self):
+            return None
+
+    class _Mesh:
+        def detect_for_video(self, *_args, **_kwargs):
+            return SimpleNamespace(face_landmarks=[])
+
+        def close(self):
+            return None
+
+    class _Track:
+        def __init__(self):
+            self.track_id = 2
+            self.person_id = 21
+            self.person_name = "Alice"
+            self.confidence = 1.0000001
+            self.embedding = None
+            self.center_x = 80
+            self.center_y = 60
+            self.lip_open = None
+
+    track = _Track()
+
+    class _Tracker:
+        def __init__(self):
+            self.tracks = {2: track}
+
+        def update(self, _detections, _frame_no):
+            return [({"bbox": (10, 10, 90, 90), "lip_open": None}, track)]
+
+    attendance_calls = []
+
+    monkeypatch.setattr(realtime.cv2, "VideoCapture", lambda *_args, **_kwargs: _Cap())
+    monkeypatch.setattr(realtime, "FaceIndex", lambda: SimpleNamespace(search=lambda *_args, **_kwargs: None))
+    monkeypatch.setattr(realtime, "CentroidTracker", lambda: _Tracker())
+    monkeypatch.setattr(realtime, "start_realtime_vad", lambda callback: (None, False))
+    monkeypatch.setattr(realtime, "create_face_landmarker", lambda: _Mesh())
+    monkeypatch.setattr(realtime, "detect_faces_realtime", lambda *_args, **_kwargs: [])
+    monkeypatch.setattr(realtime, "extract_embedding", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(realtime, "log_audio", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(realtime, "log_recognition", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(
+        realtime,
+        "record_attendance_event",
+        lambda **kwargs: attendance_calls.append(kwargs),
+        raising=False,
+    )
+    monkeypatch.setattr(realtime.cv2, "cvtColor", lambda image, _code: image)
+    monkeypatch.setattr(realtime.cv2, "imshow", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(realtime.cv2, "waitKey", lambda *_args, **_kwargs: 0)
+    monkeypatch.setattr(realtime.cv2, "getWindowProperty", lambda *_args, **_kwargs: 1)
+    monkeypatch.setattr(realtime.cv2, "rectangle", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(realtime.cv2, "putText", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(realtime.cv2, "destroyAllWindows", lambda: None)
+
+    dummy_mp = SimpleNamespace(
+        ImageFormat=SimpleNamespace(SRGB=1),
+        Image=lambda image_format, data: data,
+    )
+    import sys
+    fake_video_processor = ModuleType("video_processor")
+    fake_video_processor.lip_open_ratio = lambda _landmarks: 0.0
+    monkeypatch.setitem(sys.modules, "video_processor", fake_video_processor)
+    monkeypatch.setitem(sys.modules, "mediapipe", dummy_mp)
+
+    realtime.run(camera=0, width=160, height=120)
+
+    assert len(attendance_calls) == 1
+    assert attendance_calls[0]["confidence"] == 1.0
+
+
+def test_run_initializes_database_before_processing(monkeypatch):
+    import realtime
+
+    frame = np.zeros((120, 160, 3), dtype=np.uint8)
+
+    class _Cap:
+        def __init__(self):
+            self.calls = 0
+
+        def isOpened(self):
+            return True
+
+        def set(self, *_args, **_kwargs):
+            return True
+
+        def get(self, prop):
+            if prop == cv2.CAP_PROP_FPS:
+                return 30.0
+            if prop == cv2.CAP_PROP_FRAME_WIDTH:
+                return 160.0
+            if prop == cv2.CAP_PROP_FRAME_HEIGHT:
+                return 120.0
+            return 0.0
+
+        def read(self):
+            self.calls += 1
+            if self.calls <= 1:
+                return True, frame.copy()
+            return False, None
+
+        def release(self):
+            return None
+
+    class _Mesh:
+        def detect_for_video(self, *_args, **_kwargs):
+            return SimpleNamespace(face_landmarks=[])
+
+        def close(self):
+            return None
+
+    class _Tracker:
+        def __init__(self):
+            self.tracks = {}
+
+        def update(self, _detections, _frame_no):
+            return []
+
+    init_calls = []
+
+    monkeypatch.setattr(realtime.cv2, "VideoCapture", lambda *_args, **_kwargs: _Cap())
+    monkeypatch.setattr(realtime, "FaceIndex", lambda: SimpleNamespace(search=lambda *_args, **_kwargs: None))
+    monkeypatch.setattr(realtime, "CentroidTracker", lambda: _Tracker())
+    monkeypatch.setattr(realtime, "start_realtime_vad", lambda callback: (None, False))
+    monkeypatch.setattr(realtime, "create_face_landmarker", lambda: _Mesh())
+    monkeypatch.setattr(realtime, "detect_faces_realtime", lambda *_args, **_kwargs: [])
+    monkeypatch.setattr(realtime, "log_audio", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(realtime, "log_recognition", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(realtime, "init_db", lambda: init_calls.append(True), raising=False)
+    monkeypatch.setattr(realtime.cv2, "cvtColor", lambda image, _code: image)
+    monkeypatch.setattr(realtime.cv2, "imshow", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(realtime.cv2, "waitKey", lambda *_args, **_kwargs: 0)
+    monkeypatch.setattr(realtime.cv2, "getWindowProperty", lambda *_args, **_kwargs: 1)
+    monkeypatch.setattr(realtime.cv2, "rectangle", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(realtime.cv2, "putText", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(realtime.cv2, "destroyAllWindows", lambda: None)
+
+    dummy_mp = SimpleNamespace(
+        ImageFormat=SimpleNamespace(SRGB=1),
+        Image=lambda image_format, data: data,
+    )
+    import sys
+    fake_video_processor = ModuleType("video_processor")
+    fake_video_processor.lip_open_ratio = lambda _landmarks: 0.0
+    monkeypatch.setitem(sys.modules, "video_processor", fake_video_processor)
+    monkeypatch.setitem(sys.modules, "mediapipe", dummy_mp)
+
+    realtime.run(camera=0, width=160, height=120)
+
+    assert init_calls == [True]
+
+
+def test_run_raises_when_database_initialization_fails(monkeypatch):
+    import realtime
+
+    class _Cap:
+        def isOpened(self):
+            return True
+
+        def set(self, *_args, **_kwargs):
+            return True
+
+        def get(self, prop):
+            if prop == cv2.CAP_PROP_FPS:
+                return 30.0
+            if prop == cv2.CAP_PROP_FRAME_WIDTH:
+                return 160.0
+            if prop == cv2.CAP_PROP_FRAME_HEIGHT:
+                return 120.0
+            return 0.0
+
+        def read(self):
+            return False, None
+
+        def release(self):
+            return None
+
+    monkeypatch.setattr(realtime.cv2, "VideoCapture", lambda *_args, **_kwargs: _Cap())
+    monkeypatch.setattr(
+        realtime,
+        "init_db",
+        Mock(side_effect=RuntimeError("init failed")),
+        raising=False,
+    )
+    monkeypatch.setattr(realtime.cv2, "destroyAllWindows", lambda: None)
+
+    with pytest.raises(RuntimeError, match="init failed"):
+        realtime.run(camera=0, width=160, height=120)

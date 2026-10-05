@@ -1,6 +1,7 @@
 import argparse
 from collections import deque
 import logging
+import sqlite3
 import threading
 import time
 from datetime import datetime, timezone
@@ -42,6 +43,7 @@ from config import (
 
 from database import (
     add_unknown_sample,
+    init_db,
     update_unknown_image,
     log_audio,
     log_recognition,
@@ -226,6 +228,8 @@ def run(
     logging.info(
         "Starting realtime recognition."
     )
+
+    init_db()
 
     # ========================================================
     # Open camera
@@ -412,6 +416,7 @@ def run(
 
         last_recognition_log = {}
         attendance_logged_pairs = set()
+        attendance_retry_after = {}
 
         face_detections = []
         last_landmark_timestamp_ms = -1
@@ -1074,25 +1079,48 @@ def run(
                 ):
                     attendance_pair = (track.track_id, track.person_id)
                     if attendance_pair not in attendance_logged_pairs:
-                        try:
-                            record_attendance_event(
-                                source="realtime",
-                                source_ref=realtime_run_id,
-                                track_id=track.track_id,
-                                person_id=track.person_id,
-                                person_name=track.person_name,
-                                confidence=float(track.confidence),
-                                observed_at_utc=datetime.fromtimestamp(
-                                    _mono_to_wall_clock(timestamp),
-                                    timezone.utc,
-                                ).isoformat(),
-                            )
-                        except Exception:
-                            logging.exception(
-                                "Failed to record realtime attendance event"
-                            )
-                        finally:
-                            attendance_logged_pairs.add(attendance_pair)
+                        retry_after_ts = attendance_retry_after.get(
+                            attendance_pair,
+                            0.0,
+                        )
+                        if timestamp >= retry_after_ts:
+                            try:
+                                record_attendance_event(
+                                    source="realtime",
+                                    source_ref=realtime_run_id,
+                                    track_id=track.track_id,
+                                    person_id=track.person_id,
+                                    person_name=track.person_name,
+                                    confidence=min(1.0, max(0.0, float(track.confidence))),
+                                    observed_at_utc=datetime.fromtimestamp(
+                                        _mono_to_wall_clock(timestamp),
+                                        timezone.utc,
+                                    ).isoformat(),
+                                )
+                            except ValueError:
+                                logging.exception(
+                                    "Permanent attendance validation error"
+                                )
+                                attendance_logged_pairs.add(attendance_pair)
+                            except sqlite3.IntegrityError as exc:
+                                if "FOREIGN KEY" in str(exc).upper():
+                                    logging.exception(
+                                        "Permanent attendance foreign key error"
+                                    )
+                                    attendance_logged_pairs.add(attendance_pair)
+                                else:
+                                    logging.exception(
+                                        "Failed to record realtime attendance event"
+                                    )
+                                    attendance_retry_after[attendance_pair] = timestamp + 1.0
+                            except Exception:
+                                logging.exception(
+                                    "Failed to record realtime attendance event"
+                                )
+                                attendance_retry_after[attendance_pair] = timestamp + 1.0
+                            else:
+                                attendance_logged_pairs.add(attendance_pair)
+                                attendance_retry_after.pop(attendance_pair, None)
 
                 # =================================================
                 # Recognition logging
