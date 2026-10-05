@@ -136,7 +136,7 @@ def process_video_and_transcribe(
                     output_path,
                     transcription_error,
                     stage="transcription",
-                    meeting_id=None,
+                    meeting_id=meeting_id,
                 ) from transcription_error
             try:
                 _replace_output_with_annotated(annotated_video_path, output_path)

@@ -200,7 +200,7 @@ def test_transcription_failure_preserves_audio_output_and_marks_stage(tmp_path, 
     assert not seen["annotated"].parent.exists()
 
 
-def test_subtitle_failure_falls_back_to_audio_output_and_marks_stage(tmp_path, monkeypatch):
+def test_cue_generation_failure_preserves_audio_output_and_meeting_id(tmp_path, monkeypatch):
     source = tmp_path / "source.mp4"
     source.write_bytes(b"source")
     final = tmp_path / "tracked.mp4"
@@ -209,6 +209,53 @@ def test_subtitle_failure_falls_back_to_audio_output_and_marks_stage(tmp_path, m
     calls = {"transcribe": 0, "mux": []}
 
     def fake_video(_source, annotated, log_path, **_kwargs):
+        Path(annotated).write_bytes(b"annotated")
+        Path(log_path).write_text(json.dumps({"speech": []}), encoding="utf-8")
+        return True
+
+    def fake_transcribe(*_args, subtitle_word_callback=None, **_kwargs):
+        calls["transcribe"] += 1
+        if subtitle_word_callback is not None:
+            subtitle_word_callback(SubtitleWord("Alice", 10, 30, "hello"))
+        return 52
+
+    def fake_build(_words):
+        raise RuntimeError("cue generation failed")
+
+    def fake_mux(_annotated, _source, output, subtitle_path=None, **_kwargs):
+        calls["mux"].append(subtitle_path)
+        assert subtitle_path is None
+        Path(output).write_bytes(b"audio-bearing")
+        return Path(output)
+
+    monkeypatch.setattr(video_workflow, "process_video_pipeline", fake_video)
+    monkeypatch.setattr(video_workflow, "process_meeting_transcription", fake_transcribe)
+    monkeypatch.setattr(video_workflow, "build_subtitle_cues", fake_build)
+    monkeypatch.setattr(video_workflow, "mux_tracked_video", fake_mux)
+
+    with pytest.raises(video_workflow.TranscriptStageError) as excinfo:
+        video_workflow.process_video_and_transcribe(source, final, log)
+
+    assert excinfo.value.stage == "transcription"
+    assert excinfo.value.meeting_id == 52
+    assert isinstance(excinfo.value.cause, RuntimeError)
+    assert "cue generation failed" in str(excinfo.value.cause)
+    assert calls["transcribe"] == 1
+    assert calls["mux"] == [None]
+    assert final.read_bytes() == b"audio-bearing"
+
+
+def test_subtitle_failure_falls_back_to_audio_output_and_marks_stage(tmp_path, monkeypatch):
+    source = tmp_path / "source.mp4"
+    source.write_bytes(b"source")
+    final = tmp_path / "tracked.mp4"
+    log = tmp_path / "events.json"
+
+    calls = {"transcribe": 0, "mux": []}
+    seen = {"annotated": None}
+
+    def fake_video(_source, annotated, log_path, **_kwargs):
+        seen["annotated"] = Path(annotated)
         Path(annotated).write_bytes(b"annotated")
         Path(log_path).write_text(json.dumps({"speech": [{
             "speaker": "Alice", "start_time": 0.0, "end_time": 1.0,
@@ -250,6 +297,8 @@ def test_subtitle_failure_falls_back_to_audio_output_and_marks_stage(tmp_path, m
     assert calls["mux"][0] is not None
     assert calls["mux"][1] is None
     assert final.read_bytes() == b"audio-fallback"
+    assert seen["annotated"] is not None
+    assert not seen["annotated"].parent.exists()
 
 
 def test_subtitle_and_audio_mux_failure_copies_annotated_and_reports_audio_mux(tmp_path, monkeypatch):
@@ -304,12 +353,66 @@ def test_subtitle_and_audio_mux_failure_copies_annotated_and_reports_audio_mux(t
     assert final.read_bytes() == b"annotated-silent"
 
 
+def test_subtitle_audio_and_copy_failure_preserves_output_and_reports_all_errors(tmp_path, monkeypatch):
+    source = tmp_path / "source.mp4"
+    source.write_bytes(b"source")
+    final = tmp_path / "tracked.mp4"
+    final.write_bytes(b"existing-good-output")
+    log = tmp_path / "events.json"
+
+    calls = {"transcribe": 0, "mux": []}
+
+    def fake_video(_source, annotated, log_path, **_kwargs):
+        Path(annotated).write_bytes(b"annotated-silent")
+        Path(log_path).write_text(json.dumps({"speech": [{
+            "speaker": "Alice", "start_time": 0.0, "end_time": 1.0,
+        }]}), encoding="utf-8")
+        return True
+
+    def fake_transcribe(_source, diarize, minimum_speaker_overlap, subtitle_word_callback, **_kwargs):
+        calls["transcribe"] += 1
+        assert minimum_speaker_overlap == config.SPEAKER_FACE_OVERLAP_THRESHOLD
+        assert diarize(source, [(0.0, 1.0)]) == [("Alice", 0.0, 1.0)]
+        subtitle_word_callback(SubtitleWord("Alice", 0, 1000, "Hello"))
+        return 71
+
+    def fake_write(_cues, path):
+        Path(path).write_text("ASS", encoding="utf-8")
+        return Path(path)
+
+    def fake_mux(_annotated, _source, _output, subtitle_path=None, **_kwargs):
+        calls["mux"].append(subtitle_path)
+        if subtitle_path is not None:
+            raise VideoMuxError("subtitle burn failed")
+        raise RuntimeError("audio mux fallback failed")
+
+    monkeypatch.setattr(video_workflow, "process_video_pipeline", fake_video)
+    monkeypatch.setattr(video_workflow, "process_meeting_transcription", fake_transcribe)
+    monkeypatch.setattr(video_workflow, "write_ass_subtitles", fake_write)
+    monkeypatch.setattr(video_workflow, "mux_tracked_video", fake_mux)
+    monkeypatch.setattr(video_workflow.shutil, "copy2", lambda *_a, **_k: (_ for _ in ()).throw(RuntimeError("copy fallback failed")))
+
+    with pytest.raises(video_workflow.TranscriptStageError) as excinfo:
+        video_workflow.process_video_and_transcribe(source, final, log)
+
+    assert calls["transcribe"] == 1
+    assert len(calls["mux"]) == 2
+    assert calls["mux"][0] is not None
+    assert calls["mux"][1] is None
+    assert excinfo.value.stage == "audio_mux"
+    assert excinfo.value.meeting_id == 71
+    assert "subtitle burn failed" in str(excinfo.value.cause)
+    assert "audio mux fallback failed" in str(excinfo.value.cause)
+    assert "copy fallback failed" in str(excinfo.value.cause)
+    assert final.read_bytes() == b"existing-good-output"
+
+
 def test_relative_output_path_uses_temp_outside_output_folder(tmp_path, monkeypatch):
     source = tmp_path / "source.mp4"
     source.write_bytes(b"source")
     log = tmp_path / "events.json"
     output_path = Path("tracked") / "result.mp4"
-    seen = {"annotated": None}
+    seen = {"annotated": None, "output": None}
 
     def fake_video(_source, annotated, log_path, **_kwargs):
         seen["annotated"] = Path(annotated)
@@ -325,6 +428,7 @@ def test_relative_output_path_uses_temp_outside_output_folder(tmp_path, monkeypa
         return Path(path)
 
     def fake_mux(_annotated, _source, output, subtitle_path=None, **_kwargs):
+        seen["output"] = Path(output)
         Path(output).write_bytes(b"ok")
         return Path(output)
 
@@ -337,6 +441,9 @@ def test_relative_output_path_uses_temp_outside_output_folder(tmp_path, monkeypa
     assert video_workflow.process_video_and_transcribe(source, output_path, log) == 99
 
     tracked_dir = (tmp_path / "tracked").resolve()
+    expected_output = (tmp_path / output_path).resolve()
     assert seen["annotated"] is not None
     assert seen["annotated"].is_absolute()
+    assert seen["output"] == expected_output
+    assert seen["annotated"].parent.parent == tmp_path.resolve()
     assert tracked_dir not in seen["annotated"].parents
