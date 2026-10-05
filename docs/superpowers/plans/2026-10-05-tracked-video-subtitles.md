@@ -94,7 +94,9 @@ SUBTITLE_MAX_LINES = 2
 
 `build_subtitle_cues` sorts by start time; discards empty text and `end_ms <= start_ms`; groups only same-speaker words whose gap is within `max_gap_ms`; and starts a new cue before a word would exceed the configured line count. Prefix line 1 with `speaker_label + ": "`. Wrap only at word boundaries; never split long words. Cue times are the first word start and last word end. A single unusually long word may exceed the character target but must not create a third line.
 
-`write_ass_subtitles` writes a UTF-8 ASS file with a two-line-safe, bottom-aligned white-on-dark outlined style, one Dialogue row per cue, and millisecond times formatted `H:MM:SS.cc`. Escape ASS control characters in speaker/text values so transcript text cannot inject formatting. `UNKNOWN` stays literal.
+`write_ass_subtitles` writes a UTF-8 ASS file with a two-line-safe, bottom-aligned white-on-dark outlined style, fixed `PlayResX: 1920`/`PlayResY: 1080`, explicit line breaks (`WrapStyle: 2`), one Dialogue row per cue, and millisecond times formatted `H:MM:SS.cc`. Render transcript backslashes literally by separating them from ASS control letters with an invisible word-joiner; render braces with full-width brace characters and normalize CR/LF to spaces. `UNKNOWN` stays literal. Verify escaping with a real libass render, not only serialized-text assertions.
+
+Extend ASS tests to assert the fixed play resolution, wrap style, CR/LF normalization, full-width brace output, and backslash-plus-word-joiner output. Keep a bounded manual FFmpeg/libass rendering check for a cue containing `\N` and `\{\\an8\}` to ensure they render literally, not as control instructions.
 
 - [ ] **Step 4: Verify GREEN**
 
@@ -163,7 +165,7 @@ def test_subtitle_word_callback_receives_face_attributed_word_timestamps(tmp_pat
 Add this missing-timing fallback test too:
 
 ```python
-def test_subtitle_callback_uses_whole_segment_when_word_timings_are_missing(tmp_path, monkeypatch):
+def test_subtitle_callback_estimates_word_timings_when_word_timings_are_missing(tmp_path, monkeypatch):
     from transcription_core import SubtitleWord, transcribe_with_diarization
 
     wav_path = tmp_path / "audio.wav"
@@ -188,7 +190,10 @@ def test_subtitle_callback_uses_whole_segment_when_word_timings_are_missing(tmp_
         subtitle_word_callback=observed.append,
     )
 
-    assert observed == [SubtitleWord("Alice", 0, 1000, "hello world")]
+    assert observed == [
+        SubtitleWord("Alice", 0, 500, "hello"),
+        SubtitleWord("Alice", 500, 1000, "world"),
+    ]
 ```
 
 - [ ] **Step 2: Verify RED**
@@ -199,7 +204,7 @@ Expected: fails because the callback argument is not accepted or no records are 
 
 - [ ] **Step 3: Thread the optional callback through one ASR pass**
 
-Import `SubtitleWord` from `subtitle_renderer`. Add the callback to both functions and forward it from `process_meeting_transcription()` to `transcribe_with_diarization()`. When `_timed_words_if_reliable(raw)` succeeds, invoke the callback once per valid timed word using `_speaker_for_interval(word_start, word_end, diarization, minimum_speaker_overlap)`. When timings are missing/unreliable, invoke once for the full raw segment interval and its segment-level speaker. Do not change the returned `TranscriptionSegment` list or `save_transcripts()` schema. MP3 uses no callback by default.
+Import `SubtitleWord` from `subtitle_renderer`. Add the callback to both functions and forward it from `process_meeting_transcription()` to `transcribe_with_diarization()`. When `_timed_words_if_reliable(raw)` succeeds, invoke the callback once per valid timed word using `_speaker_for_interval(word_start, word_end, diarization, minimum_speaker_overlap)`. When timings are missing/unreliable, split the raw text into non-empty whitespace-delimited words and distribute the segment interval by cumulative character-count weights; assign each word the segment-level speaker. These are explicitly estimated times; do not run another ASR pass. Preserve exact segment start/end boundaries and discard any zero-duration estimates. Do not change the returned `TranscriptionSegment` list or `save_transcripts()` schema. MP3 uses no callback by default.
 
 - [ ] **Step 4: Verify transcription tests**
 
@@ -275,7 +280,7 @@ def _mux_args(ffmpeg, annotated_video, source_video, temp_output, subtitle_path,
     args.extend([
         "-map", "0:v:0",
         "-map", "1:a:0?",
-        "-c:v", "libx264",
+        "-c:v", "libx264" if subtitle_path is not None else "copy",
         "-c:a", audio_codec,
     ])
     if audio_codec == "aac":
@@ -357,7 +362,7 @@ git commit -m "feat(video): burn subtitles and mux source audio"
 
 **Files:** Modify `video_workflow.py`, test `tests/test_video_workflow.py`.
 
-**Interfaces:** Add `stage: str` and optional `meeting_id: int | None = None` to `TranscriptStageError`, preserving `.video_output_path` and `.cause`. Set `meeting_id` when transcription has completed before a later subtitle/mux failure; leave it `None` when transcription itself failed. Keep `process_video_and_transcribe()` positional arguments compatible; append optional `stage_callback: Callable[[str], None] = None`.
+**Interfaces:** Add `stage: str`, optional `meeting_id: int | None = None`, and `output_updated: bool = True` to `TranscriptStageError`, preserving `.video_output_path` and `.cause`. Set `meeting_id` when transcription has completed before a later subtitle/mux failure; leave it `None` when transcription itself failed. Set `output_updated=False` only if both audio mux and annotated fallback replacement fail. Keep `process_video_and_transcribe()` positional arguments compatible; append optional `stage_callback: Callable[[str], None] = None`.
 
 - [ ] **Step 1: Write failing workflow tests**
 
@@ -408,7 +413,7 @@ def test_workflow_runs_one_transcription_then_burns_cues(tmp_path, monkeypatch):
     assert final.read_bytes() == b"final"
 ```
 
-Also add one transcription-failure test: fake the video stage to create its annotated output/log, make transcription raise, make the no-subtitle mux write an audio-bearing output, then assert `TranscriptStageError.stage == "transcription"` and the final file exists. Add one subtitle-failure test: transcription emits a word, ASS writing succeeds, the subtitle mux raises `VideoMuxError`, the `subtitle_path=None` retry writes an audio-bearing output, and `TranscriptStageError.stage == "subtitle"` is raised. All three tests must assert only one transcription call. Keep the existing MP3 test unchanged.
+Also add one transcription-failure test: fake the video stage to create its annotated output/log, make transcription raise, make the no-subtitle mux write an audio-bearing output, then assert `TranscriptStageError.stage == "transcription"`, `meeting_id is None`, `output_updated is True`, and the final file exists. Add one subtitle-failure test: transcription emits a word, ASS writing succeeds, the subtitle mux raises `VideoMuxError`, the `subtitle_path=None` retry writes an audio-bearing output, and `TranscriptStageError.stage == "subtitle"` includes the saved meeting ID and `output_updated is True`. Add a post-ASR cue/ASS failure test retaining the meeting ID on the transcription-stage error. Add subtitle+audio-mux double-failure tests for both successful silent fallback (`output_updated=True`) and fallback-copy failure (`output_updated=False` while preserving any previous output). All workflow tests must assert only one transcription call. Keep the existing MP3 test unchanged.
 
 - [ ] **Step 2: Verify RED**
 
@@ -422,7 +427,7 @@ Use a unique temporary directory beside the tracked-video output folder (on the 
 
 Report stages through `stage_callback`: `Processing faces and speaker events`, `Transcribing and timing subtitles`, `Burning subtitles and restoring audio`.
 
-If transcription or cue generation fails, call `mux_tracked_video(annotated, source, final, subtitle_path=None)` before raising a transcription-stage error. If subtitle mux fails, attempt the same audio-only mux before raising a subtitle-stage error and include the saved meeting ID. If audio-only mux also fails, copy the annotated silent video to `final` and report `stage="audio_mux"` with both failure causes and the meeting ID if transcription had completed. Clean all temporary files in `finally`; do not delete a successfully produced final output before replacement succeeds. Resolve `output_path` before choosing the sibling temp root so relative paths still put intermediates outside the tracked-output folder.
+If transcription or cue generation fails, call `mux_tracked_video(annotated, source, final, subtitle_path=None)` before raising a transcription-stage error. If subtitle mux fails, attempt the same audio-only mux before raising a subtitle-stage error and include the saved meeting ID. If audio-only mux also fails, copy the annotated silent video to `final` and report `stage="audio_mux"` with both failure causes and the meeting ID if transcription had completed. If that fallback replacement also fails, set `output_updated=False`; otherwise it remains true. Clean all temporary files in `finally`; do not delete a successfully produced final output before replacement succeeds. Resolve `output_path` before choosing the sibling temp root so relative paths still put intermediates outside the tracked-output folder.
 
 - [ ] **Step 4: Verify workflow, transcription, and mux tests**
 
@@ -461,7 +466,6 @@ meeting_id = process_video_and_transcribe(
 
 - [ ] **Step 1: Update the existing combined action**
 
-Keep the `Process Video + Transcript` button and MP3 branch. Pass `stage_callback` to update the existing status area and retain the face-processing progress callback. On success show the meeting ID and final path, noting the MP4 has original audio and burned-in subtitles. In the `TranscriptStageError` handler include `exc.stage`, `exc.video_output_path`, and the exception message; include `exc.meeting_id` when present. Do not change the unrelated Arrow helper import, `Track` nullable dtype, or audio-log tables; leave the MP3 transcription call unchanged.
 
 - [ ] **Step 2: Compile and run focused tests**
 
