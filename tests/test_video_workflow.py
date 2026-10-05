@@ -189,6 +189,7 @@ def test_transcription_failure_preserves_audio_output_and_marks_stage(tmp_path, 
 
     assert excinfo.value.stage == "transcription"
     assert excinfo.value.meeting_id is None
+    assert excinfo.value.output_updated is True
     assert calls["transcribe"] == 1
     assert calls["mux"] == [None]
     assert final.read_bytes() == b"audio-bearing"
@@ -238,6 +239,7 @@ def test_cue_generation_failure_preserves_audio_output_and_meeting_id(tmp_path, 
 
     assert excinfo.value.stage == "transcription"
     assert excinfo.value.meeting_id == 52
+    assert excinfo.value.output_updated is True
     assert isinstance(excinfo.value.cause, RuntimeError)
     assert "cue generation failed" in str(excinfo.value.cause)
     assert calls["transcribe"] == 1
@@ -291,6 +293,7 @@ def test_subtitle_failure_falls_back_to_audio_output_and_marks_stage(tmp_path, m
 
     assert excinfo.value.stage == "subtitle"
     assert excinfo.value.meeting_id == 8
+    assert excinfo.value.output_updated is True
     assert isinstance(excinfo.value.cause, VideoMuxError)
     assert calls["transcribe"] == 1
     assert len(calls["mux"]) == 2
@@ -348,6 +351,7 @@ def test_subtitle_and_audio_mux_failure_copies_annotated_and_reports_audio_mux(t
     assert calls["mux"][1] is None
     assert excinfo.value.stage == "audio_mux"
     assert excinfo.value.meeting_id == 33
+    assert excinfo.value.output_updated is True
     assert "subtitle burn failed" in str(excinfo.value.cause)
     assert "audio mux fallback failed" in str(excinfo.value.cause)
     assert final.read_bytes() == b"annotated-silent"
@@ -401,7 +405,50 @@ def test_subtitle_audio_and_copy_failure_preserves_output_and_reports_all_errors
     assert calls["mux"][1] is None
     assert excinfo.value.stage == "audio_mux"
     assert excinfo.value.meeting_id == 71
+    assert excinfo.value.output_updated is False
     assert "subtitle burn failed" in str(excinfo.value.cause)
+    assert "audio mux fallback failed" in str(excinfo.value.cause)
+    assert "copy fallback failed" in str(excinfo.value.cause)
+    assert final.read_bytes() == b"existing-good-output"
+
+
+def test_transcription_audio_and_copy_failure_preserves_output_and_reports_all_errors(tmp_path, monkeypatch):
+    source = tmp_path / "source.mp4"
+    source.write_bytes(b"source")
+    final = tmp_path / "tracked.mp4"
+    final.write_bytes(b"existing-good-output")
+    log = tmp_path / "events.json"
+
+    calls = {"transcribe": 0, "mux": []}
+
+    def fake_video(_source, annotated, log_path, **_kwargs):
+        Path(annotated).write_bytes(b"annotated-silent")
+        Path(log_path).write_text(json.dumps({"speech": []}), encoding="utf-8")
+        return True
+
+    def fake_transcribe(*_args, **_kwargs):
+        calls["transcribe"] += 1
+        raise RuntimeError("transcription failed")
+
+    def fake_mux(_annotated, _source, _output, subtitle_path=None, **_kwargs):
+        calls["mux"].append(subtitle_path)
+        assert subtitle_path is None
+        raise RuntimeError("audio mux fallback failed")
+
+    monkeypatch.setattr(video_workflow, "process_video_pipeline", fake_video)
+    monkeypatch.setattr(video_workflow, "process_meeting_transcription", fake_transcribe)
+    monkeypatch.setattr(video_workflow, "mux_tracked_video", fake_mux)
+    monkeypatch.setattr(video_workflow.shutil, "copy2", lambda *_a, **_k: (_ for _ in ()).throw(RuntimeError("copy fallback failed")))
+
+    with pytest.raises(video_workflow.TranscriptStageError) as excinfo:
+        video_workflow.process_video_and_transcribe(source, final, log)
+
+    assert calls["transcribe"] == 1
+    assert calls["mux"] == [None]
+    assert excinfo.value.stage == "audio_mux"
+    assert excinfo.value.meeting_id is None
+    assert excinfo.value.output_updated is False
+    assert "transcription failed" in str(excinfo.value.cause)
     assert "audio mux fallback failed" in str(excinfo.value.cause)
     assert "copy fallback failed" in str(excinfo.value.cause)
     assert final.read_bytes() == b"existing-good-output"

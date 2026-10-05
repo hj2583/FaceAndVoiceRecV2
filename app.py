@@ -221,27 +221,39 @@ def render_video():
             st.success(
                 f"✅ Meeting {meeting_id} processed successfully.\n"
                 f"Tracked video: {output_path}\n"
-                f"Includes original audio and burned-in subtitles."
+                f"Includes source audio when present and burned-in subtitles."
             )
         except TranscriptStageError as exc:
             progress.progress(1.0)
-            audio_note = ""
-            if exc.stage == "transcription":
-                audio_note = "Transcription failed; video has original audio (no subtitles)."
+            if exc.stage == "transcription" and exc.meeting_id is not None:
+                stage_note = "Transcript saved, but subtitle preparation failed before final subtitle burn-in."
+            elif exc.stage == "transcription":
+                stage_note = "Transcription failed before transcript persistence."
             elif exc.stage == "subtitle":
-                audio_note = "Subtitle burning failed; video has original audio (no subtitles)."
+                stage_note = "Subtitle burn-in failed after transcription completed."
+            elif exc.stage == "audio_mux" and exc.output_updated:
+                stage_note = "Fallback output is a silent annotated video with no subtitles."
             elif exc.stage == "audio_mux":
-                audio_note = "Audio restoration failed; video contains captions only (silent)."
+                stage_note = "Fallback replacement failed; output path may be stale or absent."
+            else:
+                stage_note = "Finalization failed."
+
+            if exc.output_updated:
+                freshness_note = "Output path was updated in this run."
+            else:
+                freshness_note = "Output path may be stale or absent."
+
             meeting_note = f" (Meeting ID: {exc.meeting_id})" if exc.meeting_id else ""
             status.warning(
-                f"Stage '{exc.stage}' failed{meeting_note}. {audio_note}"
+                f"Stage '{exc.stage}' failed{meeting_note}. {stage_note} {freshness_note}"
             )
             st.warning(
-                f"**Stage:** {exc.stage}\n"
-                f"**Output path:** {exc.video_output_path}\n"
-                f"**Partial result:** {audio_note}\n"
-                f"**Error:** {exc.cause}\n"
-                + (f"**Meeting ID:** {exc.meeting_id}\n" if exc.meeting_id else "")
+                f"**Stage:** {exc.stage}  \n"
+                f"**Output path:** {exc.video_output_path}  \n"
+                f"**Partial result:** {stage_note}  \n"
+                f"**Output freshness:** {freshness_note}  \n"
+                f"**Error:** {exc.cause}"
+                + (f"  \n**Meeting ID:** {exc.meeting_id}" if exc.meeting_id else "")
             )
         except Exception as exc:
             st.exception(exc)

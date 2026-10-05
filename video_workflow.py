@@ -20,11 +20,19 @@ from video_processor import process_video_pipeline
 class TranscriptStageError(RuntimeError):
     """Raised when transcription fails after video processing succeeded."""
 
-    def __init__(self, video_output_path, cause, stage: str, meeting_id: int | None = None):
+    def __init__(
+        self,
+        video_output_path,
+        cause,
+        stage: str,
+        meeting_id: int | None = None,
+        output_updated: bool = False,
+    ):
         self.video_output_path = Path(video_output_path)
         self.cause = cause
         self.stage = stage
         self.meeting_id = meeting_id
+        self.output_updated = output_updated
         super().__init__(str(cause))
 
 
@@ -77,6 +85,7 @@ def _raise_audio_mux_error(
     audio_mux_error: Exception,
     meeting_id: int | None = None,
     copy_error: Exception | None = None,
+    output_updated: bool = False,
 ) -> None:
     message = f"{primary_error} | audio-only mux failed: {audio_mux_error}"
     if copy_error is not None:
@@ -87,6 +96,7 @@ def _raise_audio_mux_error(
         combined_error,
         stage="audio_mux",
         meeting_id=meeting_id,
+        output_updated=output_updated,
     ) from (copy_error if copy_error is not None else audio_mux_error)
 
 
@@ -137,6 +147,7 @@ def process_video_and_transcribe(
                     transcription_error,
                     stage="transcription",
                     meeting_id=meeting_id,
+                    output_updated=True,
                 ) from transcription_error
             try:
                 _replace_output_with_annotated(annotated_video_path, output_path)
@@ -147,12 +158,14 @@ def process_video_and_transcribe(
                     audio_mux_error,
                     meeting_id=meeting_id,
                     copy_error=copy_error,
+                    output_updated=False,
                 )
             _raise_audio_mux_error(
                 output_path,
                 transcription_error,
                 audio_mux_error,
                 meeting_id=meeting_id,
+                output_updated=True,
             )
 
         _report_stage(stage_callback, "Burning subtitles and restoring audio")
@@ -171,6 +184,7 @@ def process_video_and_transcribe(
                     subtitle_error,
                     stage="subtitle",
                     meeting_id=meeting_id,
+                    output_updated=True,
                 ) from subtitle_error
             try:
                 _replace_output_with_annotated(annotated_video_path, output_path)
@@ -181,12 +195,14 @@ def process_video_and_transcribe(
                     audio_mux_error,
                     meeting_id=meeting_id,
                     copy_error=copy_error,
+                    output_updated=False,
                 )
             _raise_audio_mux_error(
                 output_path,
                 subtitle_error,
                 audio_mux_error,
                 meeting_id=meeting_id,
+                output_updated=True,
             )
 
         return meeting_id

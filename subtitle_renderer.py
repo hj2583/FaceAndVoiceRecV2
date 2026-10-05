@@ -9,6 +9,11 @@ import uuid
 import config
 
 
+_WORD_JOINER = chr(0x2060)
+_FULLWIDTH_LEFT_BRACE = chr(0xFF5B)
+_FULLWIDTH_RIGHT_BRACE = chr(0xFF5D)
+
+
 class VideoMuxError(RuntimeError):
     """Raised when FFmpeg subtitle burn-in and muxing cannot be safely finalized."""
 
@@ -201,17 +206,12 @@ def _create_cue(words: List[SubtitleWord], speaker: str, start_ms: int, max_char
 
 
 def _escape_ass_text(text: str) -> str:
-    """Escape ASS control characters to prevent text from injecting formatting.
-    
-    ASS format uses backslash as a control character. We escape it by doubling.
-    Also escape braces which can contain override codes.
-    """
-    # Escape backslash first (must be done before escaping other chars)
-    text = text.replace("\\", "\\\\")
-    # Escape braces which can contain ASS override codes
-    text = text.replace("{", "\\{")
-    text = text.replace("}", "\\}")
-    return text
+    """Render transcript text literally and block ASS control-sequence injection."""
+    normalized = str(text).replace("\r\n", "\n").replace("\r", "\n").replace("\n", " ")
+    normalized = normalized.replace("\\", "\\" + _WORD_JOINER)
+    normalized = normalized.replace("{", _FULLWIDTH_LEFT_BRACE)
+    normalized = normalized.replace("}", _FULLWIDTH_RIGHT_BRACE)
+    return normalized
 
 
 def write_ass_subtitles(cues: List[SubtitleCue], path) -> Path:
@@ -222,14 +222,14 @@ def write_ass_subtitles(cues: List[SubtitleCue], path) -> Path:
     header = """[Script Info]
 Title: Subtitles
 ScriptType: v4.00+
-Collisions: Normal
-PlayDepth: 0
-Timer: 100.0000
-WrapStyle: 0
+PlayResX: 1920
+PlayResY: 1080
+WrapStyle: 2
+ScaledBorderAndShadow: yes
 
 [V4+ Styles]
 Format: Name, Fontname, Fontsize, PrimaryColour, SecondaryColour, OutlineColour, BackColour, Bold, Italic, Underline, StrikeOut, ScaleX, ScaleY, Spacing, Angle, BorderStyle, Outline, Shadow, Alignment, MarginL, MarginR, MarginV, Encoding
-Style: Default,Arial,20,&H00FFFFFF,&H000000FF,&H00000000,&H00000000,0,0,0,0,100,100,0,0,1,2,2,2,10,10,10,1
+Style: Default,Arial,42,&H00FFFFFF,&H000000FF,&H00000000,&H64000000,0,0,0,0,100,100,0,0,1,2,0,2,40,40,40,1
 
 [Events]
 Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
@@ -305,7 +305,7 @@ def _mux_args(ffmpeg, annotated_video, source_video, temp_output, subtitle_path,
     args.extend([
         "-map", "0:v:0",
         "-map", "1:a:0?",
-        "-c:v", "libx264",
+        "-c:v", "libx264" if subtitle_path is not None else "copy",
         "-c:a", audio_codec,
     ])
     if audio_codec == "aac":

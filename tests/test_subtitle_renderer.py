@@ -47,6 +47,10 @@ def test_ass_writer_formats_unknown_caption_times(tmp_path):
     assert "[Script Info]" in contents and "[Events]" in contents
     assert "0:00:00.10,0:00:01.23" in contents
     assert "UNKNOWN: Hello there." in contents
+    assert "PlayResX: 1920" in contents
+    assert "PlayResY: 1080" in contents
+    assert "WrapStyle: 2" in contents
+    assert "Style: Default,Arial,42," in contents
 
 
 def test_build_subtitle_cues_sorts_unsorted_input():
@@ -118,40 +122,50 @@ def test_build_subtitle_cues_starts_new_cue_before_exceeding_max_lines():
 
 
 def test_ass_writer_escapes_backslash_in_speaker_label(tmp_path):
-    """Verify ASS control characters are escaped in speaker labels."""
+    """Verify literal backslashes cannot trigger ASS control sequences."""
     path = tmp_path / "test_escape_speaker.ass"
     cues = [
         SubtitleCue("Alice\\N", 100, 200, ("Alice\\N: Hello",)),
     ]
     write_ass_subtitles(cues, path)
     contents = path.read_text(encoding="utf-8")
-    # Backslash should be escaped as \\
-    assert "Alice\\\\N" in contents
+    assert "Alice\\" + chr(0x2060) + "N" in contents
 
 
 def test_ass_writer_escapes_special_chars_in_text(tmp_path):
-    """Verify ASS control characters are escaped in text content."""
+    """Verify ASS control characters are neutralized in text content."""
     path = tmp_path / "test_escape_text.ass"
     cues = [
         SubtitleCue("Alice", 100, 200, ("Test \\c&H00FF00& colored text",)),
     ]
     write_ass_subtitles(cues, path)
     contents = path.read_text(encoding="utf-8")
-    # Backslash should be escaped
-    assert "\\\\c&H00FF00&" in contents
+    assert "\\" + chr(0x2060) + "c&H00FF00&" in contents
 
 
 def test_ass_writer_escapes_braces_in_text(tmp_path):
-    """Verify ASS control characters like braces are escaped."""
+    """Verify braces are rendered literally as full-width lookalikes."""
     path = tmp_path / "test_escape_braces.ass"
     cues = [
         SubtitleCue("Alice", 100, 200, ("Test {\\an8} alignment override",)),
     ]
     write_ass_subtitles(cues, path)
     contents = path.read_text(encoding="utf-8")
-    # Braces should be escaped as \{ and \}
-    # Verify the exact escaped sequence is present
-    assert "\\{\\\\an8\\}" in contents
+    left_brace = chr(0xFF5B)
+    right_brace = chr(0xFF5D)
+    assert f"Test {left_brace}\\{chr(0x2060)}an8{right_brace} alignment override" in contents
+
+
+def test_ass_writer_normalizes_crlf_to_spaces(tmp_path):
+    path = tmp_path / "test_newlines.ass"
+    cues = [
+        SubtitleCue("Alice", 100, 300, ("one\r\ntwo\nthree\rfour",)),
+    ]
+
+    write_ass_subtitles(cues, path)
+    contents = path.read_text(encoding="utf-8")
+
+    assert "Dialogue: 0,0:00:00.10,0:00:00.30,Default,,0,0,0,,one two three four" in contents
 
 
 def test_oversized_first_word_stays_on_line_one_with_prefix():
@@ -435,6 +449,7 @@ def test_mux_tracked_video_without_subtitles_omits_vf_and_maps_optional_audio(tm
     map_positions = [i for i, token in enumerate(captured_args) if token == "-map"]
     assert captured_args[map_positions[0] + 1] == "0:v:0"
     assert captured_args[map_positions[1] + 1] == "1:a:0?"
+    assert captured_args[captured_args.index("-c:v") + 1] == "copy"
 
 
 def test_mux_tracked_video_double_failure_preserves_existing_output_and_cleans_temp_artifacts(tmp_path, monkeypatch):

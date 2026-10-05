@@ -472,6 +472,34 @@ def _split_segment_by_words(raw_segment, diarization, minimum_overlap: float = 0
     return pieces
 
 
+def _estimate_segment_word_timings(text: str, start_ms: int, end_ms: int) -> list[tuple[int, int, str]]:
+    tokens = [token for token in text.split() if token]
+    total_duration = end_ms - start_ms
+    if not tokens or total_duration <= 0:
+        return []
+
+    weights = [len(token) for token in tokens]
+    total_weight = sum(weights)
+    if total_weight <= 0:
+        return []
+
+    boundaries = [start_ms]
+    cumulative_weight = 0
+    for weight in weights[:-1]:
+        cumulative_weight += weight
+        boundaries.append(int(round(start_ms + (total_duration * cumulative_weight / total_weight))))
+    boundaries.append(end_ms)
+
+    estimated = []
+    for index, token in enumerate(tokens):
+        word_start = boundaries[index]
+        word_end = boundaries[index + 1]
+        if word_end <= word_start:
+            continue
+        estimated.append((word_start, word_end, token))
+    return estimated
+
+
 def transcribe_with_diarization(
     audio_path: str | Path,
     model_size: Optional[str] = None,
@@ -606,12 +634,17 @@ def transcribe_with_diarization(
                 minimum_speaker_overlap,
             )
         if subtitle_word_callback and not timed_words:
-            subtitle_word_callback(SubtitleWord(
-                label,
+            for word_start_ms, word_end_ms, word_text in _estimate_segment_word_timings(
+                text,
                 start_ms,
                 end_ms,
-                text,
-            ))
+            ):
+                subtitle_word_callback(SubtitleWord(
+                    label,
+                    word_start_ms,
+                    word_end_ms,
+                    word_text,
+                ))
         segments.append(TranscriptionSegment(label, start_ms, end_ms, text, confidence))
     return segments
 

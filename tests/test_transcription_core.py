@@ -635,7 +635,7 @@ def test_subtitle_word_callback_receives_face_attributed_word_timestamps(tmp_pat
     ]
 
 
-def test_subtitle_callback_uses_whole_segment_when_word_timings_are_missing(tmp_path, monkeypatch):
+def test_subtitle_callback_estimates_word_timings_when_word_timings_are_missing(tmp_path, monkeypatch):
     from transcription_core import SubtitleWord, transcribe_with_diarization
 
     wav_path = tmp_path / "audio.wav"
@@ -660,4 +660,43 @@ def test_subtitle_callback_uses_whole_segment_when_word_timings_are_missing(tmp_
         subtitle_word_callback=observed.append,
     )
 
-    assert observed == [SubtitleWord("Alice", 0, 1000, "hello world")]
+    assert observed == [
+        SubtitleWord("Alice", 0, 500, "hello"),
+        SubtitleWord("Alice", 500, 1000, "world"),
+    ]
+
+
+def test_process_meeting_transcription_forwards_exact_subtitle_callback(tmp_path, monkeypatch):
+    db_path = tmp_path / "meeting.db"
+    monkeypatch.setattr(config, "DB_PATH", db_path)
+    monkeypatch.setattr(database, "DB_PATH", db_path)
+    monkeypatch.setattr(config, "TRANSCRIPTS_DIR", tmp_path / "transcripts")
+    database.init_db()
+
+    video_path = tmp_path / "meeting.mp4"
+    video_path.write_bytes(b"video")
+
+    def fake_extract(_video_path, output_path):
+        output_path.parent.mkdir(parents=True, exist_ok=True)
+        output_path.write_bytes(b"audio")
+        return output_path
+
+    captured = {}
+
+    def fake_transcribe(_audio_path, **kwargs):
+        captured["subtitle_word_callback"] = kwargs.get("subtitle_word_callback")
+        return [TranscriptionSegment("Speaker A", 0, 1000, "hello", 0.9)]
+
+    callback_events = []
+    callback = callback_events.append
+
+    monkeypatch.setattr("transcription_core.extract_audio_from_video", fake_extract)
+    monkeypatch.setattr("transcription_core.transcribe_with_diarization", fake_transcribe)
+
+    meeting_id = process_meeting_transcription(
+        video_path,
+        subtitle_word_callback=callback,
+    )
+
+    assert meeting_id > 0
+    assert captured["subtitle_word_callback"] is callback
