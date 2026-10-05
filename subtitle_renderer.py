@@ -100,6 +100,10 @@ def _get_cue_words(
 ) -> tuple:
     """Determine how many words fit within max_lines and return them.
     
+    Special handling: the first word on the first line (with speaker prefix) is allowed
+    to exceed max_chars_per_line, as per spec: "A single unusually long word may exceed
+    the character target but must not create a third line."
+    
     Returns (words_list, count_consumed).
     """
     if not words:
@@ -108,12 +112,19 @@ def _get_cue_words(
     lines = []
     current_line = f"{speaker}: "
     words_used = 0
+    is_first_word = True
     
     for i, word in enumerate(words):
         test_line = current_line + word.text if current_line.endswith(": ") else current_line + " " + word.text
         
-        # Check if adding this word would exceed max_chars_per_line
-        if len(test_line) <= max_chars_per_line:
+        # Special case: first word is allowed to exceed max_chars_per_line
+        if is_first_word and current_line.endswith(": "):
+            # First word on the first line - always add it, even if it exceeds limit
+            current_line = test_line
+            words_used = i + 1
+            is_first_word = False
+        elif len(test_line) <= max_chars_per_line:
+            # Word fits on current line
             current_line = test_line
             words_used = i + 1
         else:
@@ -123,6 +134,7 @@ def _get_cue_words(
                 lines.append(current_line)
                 current_line = word.text
                 words_used = i + 1
+                is_first_word = False
             else:
                 # Can't add more lines - return words up to this point
                 break
@@ -132,7 +144,12 @@ def _get_cue_words(
 
 
 def _create_cue(words: List[SubtitleWord], speaker: str, start_ms: int, max_chars_per_line: int, max_lines: int) -> SubtitleCue:
-    """Create a single subtitle cue from a list of words."""
+    """Create a single subtitle cue from a list of words.
+    
+    Special handling: the first word on the first line (with speaker prefix) is allowed
+    to exceed max_chars_per_line, as per spec: "A single unusually long word may exceed
+    the character target but must not create a third line."
+    """
     if not words:
         return None
     
@@ -141,12 +158,18 @@ def _create_cue(words: List[SubtitleWord], speaker: str, start_ms: int, max_char
     # Build lines with speaker prefix on first line
     lines = []
     current_line = f"{speaker}: "
+    is_first_word = True
     
     for word in words:
         test_line = current_line + word.text if current_line.endswith(": ") else current_line + " " + word.text
         
-        # Check if adding this word would exceed max_chars_per_line
-        if len(test_line) <= max_chars_per_line:
+        # Special case: first word is allowed to exceed max_chars_per_line
+        if is_first_word and current_line.endswith(": "):
+            # First word on the first line - always add it, even if it exceeds limit
+            current_line = test_line
+            is_first_word = False
+        elif len(test_line) <= max_chars_per_line:
+            # Word fits on current line
             current_line = test_line
         else:
             # Word doesn't fit on current line

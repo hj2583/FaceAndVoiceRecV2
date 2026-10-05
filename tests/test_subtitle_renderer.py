@@ -1,4 +1,5 @@
 from subtitle_renderer import SubtitleCue, SubtitleWord, build_subtitle_cues, write_ass_subtitles
+from pathlib import Path
 import config
 
 
@@ -106,41 +107,75 @@ def test_build_subtitle_cues_starts_new_cue_before_exceeding_max_lines():
         assert len(cue.lines) <= 2
 
 
-def test_ass_writer_escapes_backslash_in_speaker_label():
+def test_ass_writer_escapes_backslash_in_speaker_label(tmp_path):
     """Verify ASS control characters are escaped in speaker labels."""
+    path = tmp_path / "test_escape_speaker.ass"
     cues = [
         SubtitleCue("Alice\\N", 100, 200, ("Alice\\N: Hello",)),
     ]
-    path = "/tmp/test_escape_speaker.ass"
     write_ass_subtitles(cues, path)
-    contents = open(path, encoding="utf-8").read()
+    contents = path.read_text(encoding="utf-8")
     # Backslash should be escaped as \\
     assert "Alice\\\\N" in contents
-    open(path).close()
 
 
-def test_ass_writer_escapes_special_chars_in_text():
+def test_ass_writer_escapes_special_chars_in_text(tmp_path):
     """Verify ASS control characters are escaped in text content."""
+    path = tmp_path / "test_escape_text.ass"
     cues = [
         SubtitleCue("Alice", 100, 200, ("Test \\c&H00FF00& colored text",)),
     ]
-    path = "/tmp/test_escape_text.ass"
     write_ass_subtitles(cues, path)
-    contents = open(path, encoding="utf-8").read()
+    contents = path.read_text(encoding="utf-8")
     # Backslash should be escaped
     assert "\\\\c&H00FF00&" in contents
-    open(path).close()
 
 
-def test_ass_writer_escapes_braces_in_text():
+def test_ass_writer_escapes_braces_in_text(tmp_path):
     """Verify ASS control characters like braces are escaped."""
+    path = tmp_path / "test_escape_braces.ass"
     cues = [
         SubtitleCue("Alice", 100, 200, ("Test {\\an8} alignment override",)),
     ]
-    path = "/tmp/test_escape_braces.ass"
     write_ass_subtitles(cues, path)
-    contents = open(path, encoding="utf-8").read()
-    # Braces should be escaped if needed for ASS format safety
-    # At minimum, the content should not cause ASS parsing errors
-    assert "Test" in contents
-    open(path).close()
+    contents = path.read_text(encoding="utf-8")
+    # Braces should be escaped as \{ and \}
+    # Verify the exact escaped sequence is present
+    assert "\\{\\\\an8\\}" in contents
+
+
+def test_oversized_first_word_stays_on_line_one_with_prefix():
+    """Verify a single oversized first word stays on line 1 with speaker prefix.
+    
+    The spec requires: "Keep speaker prefix and oversized first word together on 
+    line 1, even when it exceeds the character target."
+    """
+    words = [
+        SubtitleWord("Alice", 0, 250, "Supercalifragilisticexpialidocious"),
+        SubtitleWord("Alice", 260, 500, "there"),
+    ]
+    cues = build_subtitle_cues(words, max_gap_ms=800, max_chars_per_line=20, max_lines=2)
+    assert len(cues) == 1
+    cue = cues[0]
+    # First line should have speaker prefix + oversized word, even if exceeding target
+    assert cue.lines[0].startswith("Alice: Supercalifragilisticexpialidocious")
+    # "there" should be on line 2
+    assert len(cue.lines) >= 2
+    assert "there" in cue.lines[1]
+
+
+def test_max_lines_one_with_oversized_first_word():
+    """Verify max_lines=1 with oversized first word retains the word.
+    
+    When max_lines=1, the oversized first word should still be consumed,
+    not dropped by _get_cue_words.
+    """
+    words = [
+        SubtitleWord("Alice", 0, 250, "Supercalifragilisticexpialidocious"),
+        SubtitleWord("Alice", 260, 500, "there"),
+    ]
+    cues = build_subtitle_cues(words, max_gap_ms=800, max_chars_per_line=20, max_lines=1)
+    # Should create a cue with the first word, even if oversized
+    assert len(cues) >= 1
+    assert "Supercalifragilisticexpialidocious" in cues[0].lines[0]
+
