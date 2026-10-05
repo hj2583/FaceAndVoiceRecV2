@@ -357,7 +357,7 @@ git commit -m "feat(video): burn subtitles and mux source audio"
 
 **Files:** Modify `video_workflow.py`, test `tests/test_video_workflow.py`.
 
-**Interfaces:** Add `stage: str` to `TranscriptStageError`, preserving `.video_output_path` and `.cause`. Keep `process_video_and_transcribe()` positional arguments compatible; append optional `stage_callback: Callable[[str], None] = None`.
+**Interfaces:** Add `stage: str` and optional `meeting_id: int | None = None` to `TranscriptStageError`, preserving `.video_output_path` and `.cause`. Set `meeting_id` when transcription has completed before a later subtitle/mux failure; leave it `None` when transcription itself failed. Keep `process_video_and_transcribe()` positional arguments compatible; append optional `stage_callback: Callable[[str], None] = None`.
 
 - [ ] **Step 1: Write failing workflow tests**
 
@@ -422,7 +422,7 @@ Use a unique temporary directory beside the tracked-video output folder (on the 
 
 Report stages through `stage_callback`: `Processing faces and speaker events`, `Transcribing and timing subtitles`, `Burning subtitles and restoring audio`.
 
-If transcription or cue generation fails, call `mux_tracked_video(annotated, source, final, subtitle_path=None)` before raising a transcription-stage error. If subtitle mux fails, attempt the same audio-only mux before raising a subtitle-stage error. If audio-only mux also fails, copy the annotated silent video to `final` and report `stage="audio_mux"` with both failure causes. Clean all temporary files in `finally`; do not delete a successfully produced final output before replacement succeeds.
+If transcription or cue generation fails, call `mux_tracked_video(annotated, source, final, subtitle_path=None)` before raising a transcription-stage error. If subtitle mux fails, attempt the same audio-only mux before raising a subtitle-stage error and include the saved meeting ID. If audio-only mux also fails, copy the annotated silent video to `final` and report `stage="audio_mux"` with both failure causes and the meeting ID if transcription had completed. Clean all temporary files in `finally`; do not delete a successfully produced final output before replacement succeeds. Resolve `output_path` before choosing the sibling temp root so relative paths still put intermediates outside the tracked-output folder.
 
 - [ ] **Step 4: Verify workflow, transcription, and mux tests**
 
@@ -461,7 +461,7 @@ meeting_id = process_video_and_transcribe(
 
 - [ ] **Step 1: Update the existing combined action**
 
-Keep the `Process Video + Transcript` button and MP3 branch. Pass `stage_callback` to update the existing status area and retain the face-processing progress callback. On success show the meeting ID and final path, noting the MP4 has original audio and burned-in subtitles. In the `TranscriptStageError` handler include `exc.stage`, `exc.video_output_path`, and the exception message. Do not change the unrelated Arrow helper import, `Track` nullable dtype, or audio-log tables; leave the MP3 transcription call unchanged.
+Keep the `Process Video + Transcript` button and MP3 branch. Pass `stage_callback` to update the existing status area and retain the face-processing progress callback. On success show the meeting ID and final path, noting the MP4 has original audio and burned-in subtitles. In the `TranscriptStageError` handler include `exc.stage`, `exc.video_output_path`, and the exception message; include `exc.meeting_id` when present. Do not change the unrelated Arrow helper import, `Track` nullable dtype, or audio-log tables; leave the MP3 transcription call unchanged.
 
 - [ ] **Step 2: Compile and run focused tests**
 
