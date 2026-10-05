@@ -1,10 +1,11 @@
 import logging
+import math
 import sqlite3
 import threading
 from pathlib import Path
 from contextlib import contextmanager
 from datetime import datetime, timezone
-from pathlib import Path
+from numbers import Integral, Real
 from typing import Mapping, Sequence
 
 import config
@@ -823,21 +824,49 @@ def _validate_attendance_times(source, observed_at_utc, media_offset_ms):
             raise ValueError("realtime attendance requires observed_at_utc")
         if media_offset_ms is not None:
             raise ValueError("realtime attendance does not allow media_offset_ms")
-        return observed_at_utc, None
+        normalized = observed_at_utc.strip()
+        if normalized.endswith("Z"):
+            normalized = f"{normalized[:-1]}+00:00"
+
+        try:
+            observed_dt = datetime.fromisoformat(normalized)
+        except ValueError as exc:
+            raise ValueError("observed_at_utc must be a valid ISO-8601 datetime") from exc
+
+        if observed_dt.tzinfo is None or observed_dt.utcoffset() is None:
+            raise ValueError("observed_at_utc must be timezone-aware")
+
+        return observed_dt.astimezone(timezone.utc).isoformat(), None
 
     if observed_at_utc is not None:
         raise ValueError("video attendance does not allow observed_at_utc")
     if media_offset_ms is None:
         raise ValueError("video attendance requires media_offset_ms")
 
-    normalized_offset = int(media_offset_ms)
-    if normalized_offset < 0:
-        raise ValueError("media_offset_ms must be non-negative")
-    return None, normalized_offset
+    return None, _require_nonnegative_int(media_offset_ms, "media_offset_ms")
 
 
-def _insert_attendance_event(
-    conn,
+def _require_nonnegative_int(value, field_name):
+    if isinstance(value, bool) or not isinstance(value, Integral):
+        raise ValueError(f"{field_name} must be a non-negative integer")
+    normalized = int(value)
+    if normalized < 0:
+        raise ValueError(f"{field_name} must be a non-negative integer")
+    return normalized
+
+
+def _validate_confidence(confidence):
+    if isinstance(confidence, bool) or not isinstance(confidence, Real):
+        raise ValueError("confidence must be a finite number in [0, 1]")
+    normalized = float(confidence)
+    if not math.isfinite(normalized):
+        raise ValueError("confidence must be a finite number in [0, 1]")
+    if normalized < 0.0 or normalized > 1.0:
+        raise ValueError("confidence must be a finite number in [0, 1]")
+    return normalized
+
+
+def _validated_attendance_payload(
     *,
     person_id,
     person_name,
@@ -855,9 +884,51 @@ def _insert_attendance_event(
         media_offset_ms,
     )
 
+    if isinstance(person_id, bool) or not isinstance(person_id, Integral):
+        raise ValueError("person_id must be an integer")
+
+    normalized_person_name = str(person_name).strip()
+    if not normalized_person_name:
+        raise ValueError("person_name cannot be empty")
+
+    return {
+        "person_id": int(person_id),
+        "person_name": normalized_person_name,
+        "source": source,
+        "source_ref": normalized_source_ref,
+        "track_id": _require_nonnegative_int(track_id, "track_id"),
+        "confidence": _validate_confidence(confidence),
+        "observed_at_utc": normalized_observed_at_utc,
+        "media_offset_ms": normalized_media_offset_ms,
+    }
+
+
+def _insert_attendance_event(
+    conn,
+    *,
+    person_id,
+    person_name,
+    source,
+    source_ref,
+    track_id,
+    confidence,
+    observed_at_utc,
+    media_offset_ms,
+):
+    payload = _validated_attendance_payload(
+        person_id=person_id,
+        person_name=person_name,
+        source=source,
+        source_ref=source_ref,
+        track_id=track_id,
+        confidence=confidence,
+        observed_at_utc=observed_at_utc,
+        media_offset_ms=media_offset_ms,
+    )
+
     cur = conn.execute(
         """
-        INSERT OR IGNORE INTO attendance_events(
+        INSERT INTO attendance_events(
             person_id,
             person_name,
             source,
@@ -868,19 +939,13 @@ def _insert_attendance_event(
             media_offset_ms,
             created_at
         )
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+        VALUES (:person_id, :person_name, :source, :source_ref, :track_id, :confidence, :observed_at_utc, :media_offset_ms, :created_at)
+        ON CONFLICT(source, source_ref, track_id, person_id) DO NOTHING
         """,
-        (
-            int(person_id),
-            str(person_name),
-            source,
-            normalized_source_ref,
-            int(track_id),
-            float(confidence),
-            normalized_observed_at_utc,
-            normalized_media_offset_ms,
-            utc_now(),
-        ),
+        {
+            **payload,
+            "created_at": utc_now(),
+        },
     )
     return cur.rowcount == 1
 
@@ -911,26 +976,48 @@ def record_attendance_event(
 
 def replace_video_attendance(source_ref: str, events: Sequence[Mapping[str, object]]) -> int:
     normalized_source_ref = _normalize_source_ref("video", source_ref)
+    normalized_events = [
+        _validated_attendance_payload(
+            person_id=event["person_id"],
+            person_name=event["person_name"],
+            source="video",
+            source_ref=normalized_source_ref,
+            track_id=event["track_id"],
+            confidence=event["confidence"],
+            observed_at_utc=event.get("observed_at_utc"),
+            media_offset_ms=event.get("media_offset_ms"),
+        )
+        for event in events
+    ]
     inserted = 0
     with get_conn() as conn:
         conn.execute(
             "DELETE FROM attendance_events WHERE source='video' AND source_ref=?",
             (normalized_source_ref,),
         )
-        for event in events:
-            inserted += int(
-                _insert_attendance_event(
-                    conn,
-                    person_id=event["person_id"],
-                    person_name=event["person_name"],
-                    source="video",
-                    source_ref=normalized_source_ref,
-                    track_id=event["track_id"],
-                    confidence=event["confidence"],
-                    observed_at_utc=event.get("observed_at_utc"),
-                    media_offset_ms=event.get("media_offset_ms"),
+        for event in normalized_events:
+            cur = conn.execute(
+                """
+                INSERT INTO attendance_events(
+                    person_id,
+                    person_name,
+                    source,
+                    source_ref,
+                    track_id,
+                    confidence,
+                    observed_at_utc,
+                    media_offset_ms,
+                    created_at
                 )
+                VALUES (:person_id, :person_name, :source, :source_ref, :track_id, :confidence, :observed_at_utc, :media_offset_ms, :created_at)
+                ON CONFLICT(source, source_ref, track_id, person_id) DO NOTHING
+                """,
+                {
+                    **event,
+                    "created_at": utc_now(),
+                },
             )
+            inserted += int(cur.rowcount == 1)
     return inserted
 
 
@@ -962,7 +1049,15 @@ def fetch_attendance(source=None, person_id=None):
     if where_clauses:
         query += " WHERE " + " AND ".join(where_clauses)
 
-    query += " ORDER BY created_at DESC, event_id DESC"
+    query += """
+        ORDER BY
+            CASE
+                WHEN source='realtime' THEN observed_at_utc
+                ELSE created_at
+            END DESC,
+            created_at DESC,
+            event_id DESC
+    """
 
     with get_conn() as conn:
         conn.row_factory = sqlite3.Row
