@@ -508,7 +508,7 @@ def test_fetch_attendance_filters_inclusive_period_and_video_path(tmp_path, monk
 
 - [ ] **Step 2: Run database query tests and verify RED**
 
-Run: `.\directmlvenv\\Scripts\\python.exe -m pytest tests/test_database_attendance.py -k "period or source_ref" -q`
+Run: `.\directmlvenv\Scripts\python.exe -m pytest tests/test_database_attendance.py -k "period or source_ref" -q`
 
 Expected: `fetch_attendance` rejects the new filter arguments or lacks inclusive bounds/source-ref filtering.
 
@@ -550,7 +550,7 @@ Also assert that a naive datetime converts to `value.astimezone(timezone.utc).is
 
 - [ ] **Step 5: Run attendance query and view tests**
 
-Run: `.\directmlvenv\\Scripts\\python.exe -m pytest tests/test_database_attendance.py tests/test_attendance_view.py -q`
+Run: `.\directmlvenv\Scripts\python.exe -m pytest tests/test_database_attendance.py tests/test_attendance_view.py -q`
 
 Expected: inclusive bounds, path filtering, local-to-UTC conversion, source-specific controls, and existing SQLite-row/CSV tests pass.
 
