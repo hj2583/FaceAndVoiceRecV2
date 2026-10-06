@@ -311,7 +311,7 @@ git commit -m "feat(attendance): record uploaded video appearances"
 
 **Consumes:** Extend `database.fetch_attendance(source=None, person_id=None, source_ref=None, observed_from_utc=None, observed_to_utc=None)`. Bounds apply inclusively to realtime `observed_at_utc`; `source_ref` selects a single uploaded video.
 
-**Produces:** `local_datetime_to_utc_iso(value: datetime) -> str`, `filter_visible_attendance(rows) -> list`, `build_attendance_frame(rows) -> pandas.DataFrame`, and `attendance_frame_to_csv(frame) -> bytes` in `attendance_view.py`. Row helpers accept mapping rows and `sqlite3.Row` objects returned by `fetch_attendance()`.
+**Produces:** `local_datetime_to_utc_iso(value: datetime) -> str`, `local_datetime_range_to_utc_iso(start: datetime, end: datetime) -> tuple[str, str]`, `filter_visible_attendance(rows) -> list`, `build_attendance_frame(rows) -> pandas.DataFrame`, and `attendance_frame_to_csv(frame) -> bytes` in `attendance_view.py`. Row helpers accept mapping rows and `sqlite3.Row` objects returned by `fetch_attendance()`.
 
 **Behavior:** Add an `Attendance` tab with a horizontal source selector (`Realtime`, `Uploaded video`) and a person filter. In Realtime mode, show exact `st.datetime_input` start/end controls labeled machine-local time, defaulting to the last 24 hours. Convert both inclusive boundaries with `local_datetime_to_utc_iso()` before querying; show a warning and no rows if start is after end. In Uploaded video mode, require one source reference selected from distinct stored video paths; label options with basename plus parent path to distinguish duplicate filenames. Show a dense table with Person, Source, Observed (UTC), Video, Source Ref, Clip Time, Confidence, and Track ID. Realtime rows show run ID in Source Ref; video rows show full normalized path in Source Ref and clip-relative `mm:ss` without a calendar date. The CSV exports exactly the selected source, person, and period/video rows. Empty video history and empty query results have explicit states. Exclude unknown/empty identities, but do not reapply the current confidence threshold at display time. Escape formula-leading text cells in CSV.
 
@@ -459,6 +459,7 @@ def fetch_attendance(
 
 
 def local_datetime_to_utc_iso(value: datetime) -> str: ...
+def local_datetime_range_to_utc_iso(start: datetime, end: datetime) -> tuple[str, str]: ...
 ```
 
 - [ ] **Step 1: Write failing database query tests**
@@ -517,7 +518,35 @@ Add optional `source_ref`, `observed_from_utc`, and `observed_to_utc` parameters
 
 - [ ] **Step 4: Add failing local-time conversion and mode tests**
 
-Add `local_datetime_to_utc_iso(value)` tests: an aware datetime with a non-UTC offset converts to UTC; a naive datetime is interpreted in the machine's local timezone and converted to UTC. In `app.py`, make the Attendance source selector choose exactly `Realtime` or `Uploaded video`. Realtime shows two `st.datetime_input` controls labeled machine-local time, defaulting from now minus 24 hours to now. Video mode requires one selection from stored video source refs, with option labels combining basename and parent path to distinguish equal filenames. Both modes retain person filtering. A reversed realtime range shows a warning and performs no attendance query; a selected video calls the query with that exact source ref. Keep empty states and CSV export of the exact displayed rows.
+Add `local_datetime_to_utc_iso` tests: an aware datetime with a non-UTC offset converts to UTC; a naive datetime is interpreted in the machine's local timezone and converted to UTC. Add `local_datetime_range_to_utc_iso(start, end)` tests for inclusive UTC output and `ValueError` on reversed input. In `app.py`, make the Attendance source selector choose exactly `Realtime` or `Uploaded video`. Realtime shows two `st.datetime_input` controls labeled machine-local time, defaulting from now minus 24 hours to now. Video mode requires one selection from stored video source refs, with option labels combining basename and parent path to distinguish equal filenames. Both modes retain person filtering. A reversed realtime range shows a warning and performs no attendance query; a selected video calls the query with that exact source ref. Keep empty states and CSV export of the exact displayed rows.
+
+Use these helper tests in `tests/test_attendance_view.py`:
+
+```python
+from datetime import datetime, timedelta, timezone
+
+import pytest
+
+from attendance_view import local_datetime_range_to_utc_iso, local_datetime_to_utc_iso
+
+
+def test_local_datetime_range_converts_to_utc_inclusively():
+    start = datetime(2026, 10, 6, 9, 0, tzinfo=timezone(timedelta(hours=8)))
+    end = datetime(2026, 10, 6, 10, 0, tzinfo=timezone(timedelta(hours=8)))
+    assert local_datetime_to_utc_iso(start) == "2026-10-06T01:00:00+00:00"
+    assert local_datetime_range_to_utc_iso(start, end) == (
+        "2026-10-06T01:00:00+00:00", "2026-10-06T02:00:00+00:00",
+    )
+
+
+def test_local_datetime_range_rejects_reversed_endpoints():
+    start = datetime(2026, 10, 6, 11, 0)
+    end = datetime(2026, 10, 6, 10, 0)
+    with pytest.raises(ValueError, match="start.*end"):
+        local_datetime_range_to_utc_iso(start, end)
+```
+
+Also assert that a naive datetime converts to `value.astimezone(timezone.utc).isoformat()` in the current host timezone.
 
 - [ ] **Step 5: Run attendance query and view tests**
 
