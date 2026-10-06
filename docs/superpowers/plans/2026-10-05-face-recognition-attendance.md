@@ -538,7 +538,7 @@ git commit -m "feat(attendance): filter by video or realtime period"
 
 **Files:** No new feature surface; run validation and record evidence in the task report.
 
-- [x] **Step 1: Compile and run the full suite**
+- [ ] **Step 1: Compile and run the full suite**
 
 Run: `.\directmlvenv\Scripts\python.exe -m py_compile app.py database.py realtime.py video_processor.py video_workflow.py`
 
@@ -546,7 +546,7 @@ Run: `.\directmlvenv\Scripts\python.exe -m pytest tests -q`
 
 Expected: all tests pass; record actual count.
 
-- [x] **Step 2: Verify a bounded realtime attendance event**
+- [ ] **Step 2: Verify a bounded realtime attendance event**
 
 Run: `.\directmlvenv\Scripts\python.exe -m pytest tests/test_realtime.py -k attendance -q`
 
@@ -554,13 +554,13 @@ Expected: duplicate samples for one pair create one UTC attendance row; a second
 
 Run: `.\directmlvenv\Scripts\python.exe -m pytest tests/test_realtime.py -q`
 
-- [x] **Step 3: Verify uploaded-video replacement behavior**
+- [ ] **Step 3: Verify uploaded-video replacement behavior**
 
 Run: `.\directmlvenv\Scripts\python.exe -m pytest tests/test_video_processor.py tests/test_video_workflow.py -k attendance -q`
 
 Then run both complete test modules. Also perform one bounded run on `initialVideo/NEWS Why LPI Capital and not other insurers - The Edge TV (1080p).mp4` with temporary DB/output/log paths. Verify first-seen track offsets, persisted rows only after full workflow success, reprocessing replaces rather than duplicates rows, and a forced workflow failure leaves prior rows unchanged.
 
-- [x] **Step 4: Verify the attendance view/export**
+- [ ] **Step 4: Verify the attendance view/export**
 
 Confirm realtime UTC dates and video clip offsets render in separate columns; filter by source/person and verify CSV contains the same filtered rows.
 
