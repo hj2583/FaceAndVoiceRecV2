@@ -55,7 +55,9 @@ For realtime, generate a fresh run ID when a camera recognition process starts a
 
 ## User Experience
 
-Add an `Attendance` tab to the existing Streamlit navigation. Show a dense, filterable table with person, source, observation time or clip offset, video name, source reference/run ID, confidence, and track ID. Realtime rows use wall-clock time; video rows visibly use clip-relative `mm:ss` and the input video name. Provide source/person filters and CSV download. Protect spreadsheet CSV exports by escaping formula-leading text cells. Do not present video clip offsets as dates. Attendance eligibility is determined at capture time using the configured threshold; do not hide historical rows when that threshold is later changed.
+Add an `Attendance` tab to the existing Streamlit navigation with a source mode selector: `Realtime` or `Uploaded video`. In `Uploaded video` mode, require selection of one source video by its normalized path. In `Realtime` mode, show exact start/end datetime controls in machine-local time, defaulting to the last 24 hours; include both endpoints and convert them to UTC for querying. Keep the person filter in both modes.
+
+Show a dense table with person, source, observation time or clip offset, video name, source reference/run ID, confidence, and track ID. Realtime rows use wall-clock time; video rows visibly use clip-relative `mm:ss` and the input video name. Provide CSV download of exactly the selected source, time interval, and person rows. Protect spreadsheet CSV exports by escaping formula-leading text cells. Do not present video clip offsets as dates. Attendance eligibility is determined at capture time using the configured threshold; do not hide historical rows when that threshold is later changed.
 
 ## Testing
 
@@ -65,7 +67,8 @@ Add an `Attendance` tab to the existing Streamlit navigation. Show a dense, filt
 - Video logs carry `person_id`, `track_id`, confidence, and first clip offset for known appearances; repeated frames on a track create one row.
 - A successful reprocessing run atomically replaces events for that video path; a failed run preserves prior events.
 - Attendance queries return current/snapshotted person names, source, time representation, confidence, and track ID with filters.
-- Streamlit attendance view displays realtime dates separately from video offsets and exports the filtered rows.
+- Streamlit attendance view requires one video selection in video mode; realtime mode filters with inclusive machine-local datetimes converted to UTC and defaults to the last 24 hours. Both modes retain person filtering and export exactly the selected rows.
+- Query tests cover source_ref filtering, inclusive realtime UTC bounds, and empty/reversed time ranges.
 - Existing recognition, audio-log, face, and video workflows remain unchanged when no attendance-eligible recognition is produced.
 
 ## Limitations

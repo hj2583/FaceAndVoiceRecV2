@@ -43,7 +43,13 @@ def record_attendance_event(
 def replace_video_attendance(source_ref: str, events: Sequence[Mapping[str, object]]) -> int: ...
 
 
-def fetch_attendance(source: str | None = None, person_id: int | None = None) -> list[sqlite3.Row]: ...
+def fetch_attendance(
+    source: str | None = None,
+    person_id: int | None = None,
+    source_ref: str | None = None,
+    observed_from_utc: str | None = None,
+    observed_to_utc: str | None = None,
+) -> list[sqlite3.Row]: ...
 ```
 
 `record_attendance_event` returns true only when a new row was inserted; an identical source/run/track/person tuple is ignored. It normalizes aware realtime ISO-8601 input to UTC and rejects naive or malformed datetimes, confidence outside `[0, 1]`, and invalid offsets/track IDs. `replace_video_attendance` transactionally deletes prior `source='video'` rows for the exact normalized source path and inserts the supplied candidate set. Its caller invokes it only after successful video workflow completion. `fetch_attendance` orders realtime rows by normalized observation timestamp and video rows by import/creation time, newest first, and optionally filters by source/person.
@@ -301,13 +307,13 @@ git commit -m "feat(attendance): record uploaded video appearances"
 
 ### Task 4: Attendance view and CSV export
 
-**Files:** Modify `app.py`; create `attendance_view.py`; test `tests/test_attendance_view.py`.
+**Files:** Modify `database.py` and `app.py`; create `attendance_view.py`; test `tests/test_database_attendance.py` and `tests/test_attendance_view.py`.
 
-**Consumes:** `database.fetch_attendance(source=None, person_id=None)`.
+**Consumes:** Extend `database.fetch_attendance(source=None, person_id=None, source_ref=None, observed_from_utc=None, observed_to_utc=None)`. Bounds apply inclusively to realtime `observed_at_utc`; `source_ref` selects a single uploaded video.
 
-**Produces:** `filter_visible_attendance(rows) -> list`, `build_attendance_frame(rows) -> pandas.DataFrame`, and `attendance_frame_to_csv(frame) -> bytes` in `attendance_view.py`. All three helpers accept mapping rows and `sqlite3.Row` objects returned by `fetch_attendance()`.
+**Produces:** `local_datetime_to_utc_iso(value: datetime) -> str`, `filter_visible_attendance(rows) -> list`, `build_attendance_frame(rows) -> pandas.DataFrame`, and `attendance_frame_to_csv(frame) -> bytes` in `attendance_view.py`. Row helpers accept mapping rows and `sqlite3.Row` objects returned by `fetch_attendance()`.
 
-**Behavior:** Add an `Attendance` tab to `main()`. The view shows source and person filters, then a dense table with Person, Source, Observed (UTC), Video, Source Ref, Clip Time, Confidence, and Track ID. Realtime entries populate Observed (UTC) and show the run ID in Source Ref; video entries populate Video, full normalized path in Source Ref, and clip-relative `mm:ss` without a calendar date. The download button exports the currently filtered rows as UTF-8 CSV. Empty results show an empty state. Exclude unknown/empty identities, but do not reapply the current confidence threshold at display time; capture-time gating already controls eligibility and historical rows must survive later threshold changes. Escape text cells that begin with spreadsheet formula characters (`=`, `+`, `-`, `@`) in the CSV export.
+**Behavior:** Add an `Attendance` tab with a horizontal source selector (`Realtime`, `Uploaded video`) and a person filter. In Realtime mode, show exact `st.datetime_input` start/end controls labeled machine-local time, defaulting to the last 24 hours. Convert both inclusive boundaries with `local_datetime_to_utc_iso()` before querying; show a warning and no rows if start is after end. In Uploaded video mode, require one source reference selected from distinct stored video paths; label options with basename plus parent path to distinguish duplicate filenames. Show a dense table with Person, Source, Observed (UTC), Video, Source Ref, Clip Time, Confidence, and Track ID. Realtime rows show run ID in Source Ref; video rows show full normalized path in Source Ref and clip-relative `mm:ss` without a calendar date. The CSV exports exactly the selected source, person, and period/video rows. Empty video history and empty query results have explicit states. Exclude unknown/empty identities, but do not reapply the current confidence threshold at display time. Escape formula-leading text cells in CSV.
 
 - [x] **Step 1: Add attendance query/view tests**
 
@@ -386,6 +392,8 @@ def test_attendance_csv_exports_exact_columns_and_sanitizes_formulas():
 
 Add a DB integration test in `tests/test_attendance_view.py`: create a person/event with `database.record_attendance_event`, call `database.fetch_attendance()` to get actual `sqlite3.Row` objects, pass them through `filter_visible_attendance`, `build_attendance_frame`, and `attendance_frame_to_csv`, and assert the row survives and appears in the CSV. Add filter tests that exclude null `person_id`, empty/UNKNOWN names, and missing confidence, but retain a known historical confidence below the current threshold. Add a CSV test that prefixes text cells beginning with `=`, `+`, `-`, or `@` with an apostrophe; do not alter numeric confidence/track cells.
 
+Add tests in `tests/test_database_attendance.py` for `source_ref` video selection and inclusive realtime `observed_from_utc`/`observed_to_utc` bounds, including events exactly on both boundaries. Verify an invalid reversed range raises `ValueError`. Add tests in `tests/test_attendance_view.py` for `local_datetime_to_utc_iso()` using an aware non-UTC datetime and a naive datetime interpreted in machine-local timezone.
+
 ```python
 import database
 
@@ -417,7 +425,7 @@ Expected: the new SQLite-row integration test fails when `.get()` is called on `
 
 - [x] **Step 3: Add the tab and view**
 
-Add `filter_visible_attendance`, `format_clip_offset`, `build_attendance_frame`, and `attendance_frame_to_csv` in `attendance_view.py`. Filter to non-null person IDs, non-empty/non-UNKNOWN names, and present confidence; do not reapply the current threshold to historical rows. Format offsets as `MM:SS`, switching to `H:MM:SS` at one hour; preserve UTC values in realtime rows and keep video date fields empty. In `app.py`, add `render_attendance()` and register an `Attendance` tab. Unpack all four values returned by `list_persons()`. Provide source and person filters, fetch matching DB events, pass actual `sqlite3.Row` values through the tolerant pure helpers, render the returned frame, and wire CSV download to exactly `attendance_frame_to_csv(frame)`. Include an empty state.
+Add `local_datetime_to_utc_iso`, `filter_visible_attendance`, `format_clip_offset`, `build_attendance_frame`, and `attendance_frame_to_csv` in `attendance_view.py`. Filter to non-null person IDs, non-empty/non-UNKNOWN names, and present confidence; do not reapply the current threshold to historical rows. Format offsets as `MM:SS`, switching to `H:MM:SS` at one hour; preserve UTC values in realtime rows and keep video date fields empty. Extend `database.fetch_attendance()` with optional source reference and inclusive UTC bounds, validating `start <= end`. In `app.py`, add `render_attendance()` and register an `Attendance` tab. Unpack all four values returned by `list_persons()`. Use Realtime/Uploaded video mode selection. Realtime mode uses two machine-local `st.datetime_input` controls (default last 24 hours), converts them to UTC, and queries inclusively; reversed values show a warning without querying. Video mode requires selecting one stored source reference, with options labeled by basename plus parent path. Keep the person filter in both modes, apply only identity/presence filtering, and export exactly the displayed frame.
 
 - [x] **Step 4: Run attendance/database UI-preparation tests**
 
@@ -434,7 +442,99 @@ git commit -m "feat(attendance): add attendance list and export"
 
 ---
 
-### Task 5: Full regression and bounded smoke test
+### Task 5: Filter attendance by video or realtime period
+
+**Files:** Modify `database.py`, `app.py`, and `attendance_view.py`; test `tests/test_database_attendance.py` and `tests/test_attendance_view.py`.
+
+**Interface:** Extend `fetch_attendance` without breaking existing calls:
+
+```python
+def fetch_attendance(
+    source: str | None = None,
+    person_id: int | None = None,
+    source_ref: str | None = None,
+    observed_from_utc: str | None = None,
+    observed_to_utc: str | None = None,
+) -> list[sqlite3.Row]: ...
+
+
+def local_datetime_to_utc_iso(value: datetime) -> str: ...
+```
+
+- [ ] **Step 1: Write failing database query tests**
+
+Insert realtime attendance at 09:00, 10:00, and 11:00 UTC for one person, plus another person's row at 10:00. Query source `realtime`, that person, and inclusive bounds 10:00 through 11:00; assert the exact-boundary 10:00 and 11:00 rows return, but 09:00 and the other person do not. Insert video rows for two source references; assert `source_ref` selects only the requested video. Assert `observed_from_utc > observed_to_utc` raises `ValueError`. Keep the existing no-argument and source/person query tests passing.
+
+Use this database query test shape in `tests/test_database_attendance.py`:
+
+```python
+def test_fetch_attendance_filters_inclusive_period_and_video_path(tmp_path, monkeypatch):
+    _setup_database(tmp_path, monkeypatch)
+    person_id = database.create_person("Alice")
+    video_a = str((tmp_path / "videos" / "a.mp4").resolve())
+    video_b = str((tmp_path / "videos" / "b.mp4").resolve())
+
+    for minute in (9, 10, 11):
+        database.record_attendance_event(
+            person_id=person_id, person_name="Alice", source="realtime",
+            source_ref="run-1", track_id=minute, confidence=0.9,
+            observed_at_utc=f"2026-10-06T10:{minute:02d}:00+00:00",
+        )
+    video_event = {
+        "person_id": person_id, "person_name": "Alice", "track_id": 1,
+        "confidence": 0.9, "media_offset_ms": 1000,
+    }
+    database.replace_video_attendance(video_a, [video_event])
+    database.replace_video_attendance(video_b, [video_event])
+
+    realtime_rows = database.fetch_attendance(
+        source="realtime", person_id=person_id,
+        observed_from_utc="2026-10-06T10:10:00+00:00",
+        observed_to_utc="2026-10-06T10:11:00+00:00",
+    )
+    assert [row["track_id"] for row in realtime_rows] == [11, 10]
+    assert [row["source_ref"] for row in database.fetch_attendance(
+        source="video", source_ref=video_a,
+    )] == [video_a]
+
+    with pytest.raises(ValueError, match="start.*end"):
+        database.fetch_attendance(
+            source="realtime",
+            observed_from_utc="2026-10-06T11:00:00+00:00",
+            observed_to_utc="2026-10-06T10:00:00+00:00",
+        )
+```
+
+- [ ] **Step 2: Run database query tests and verify RED**
+
+Run: `.\directmlvenv\\Scripts\\python.exe -m pytest tests/test_database_attendance.py -k "period or source_ref" -q`
+
+Expected: `fetch_attendance` rejects the new filter arguments or lacks inclusive bounds/source-ref filtering.
+
+- [ ] **Step 3: Extend the attendance query**
+
+Add optional `source_ref`, `observed_from_utc`, and `observed_to_utc` parameters to `database.fetch_attendance`. Add parameterized SQL predicates, require datetime bounds only for realtime queries, and reject reversed bounds before executing SQL. Use inclusive `>=`/`<=` comparisons against canonical UTC ISO values. Existing callers with only source/person continue to work.
+
+- [ ] **Step 4: Add failing local-time conversion and mode tests**
+
+Add `local_datetime_to_utc_iso(value)` tests: an aware datetime with a non-UTC offset converts to UTC; a naive datetime is interpreted in the machine's local timezone and converted to UTC. In `app.py`, make the Attendance source selector choose exactly `Realtime` or `Uploaded video`. Realtime shows two `st.datetime_input` controls labeled machine-local time, defaulting from now minus 24 hours to now. Video mode requires one selection from stored video source refs, with option labels combining basename and parent path to distinguish equal filenames. Both modes retain person filtering. A reversed realtime range shows a warning and performs no attendance query; a selected video calls the query with that exact source ref. Keep empty states and CSV export of the exact displayed rows.
+
+- [ ] **Step 5: Run attendance query and view tests**
+
+Run: `.\directmlvenv\\Scripts\\python.exe -m pytest tests/test_database_attendance.py tests/test_attendance_view.py -q`
+
+Expected: inclusive bounds, path filtering, local-to-UTC conversion, source-specific controls, and existing SQLite-row/CSV tests pass.
+
+- [ ] **Step 6: Commit**
+
+```powershell
+git add database.py app.py attendance_view.py tests/test_database_attendance.py tests/test_attendance_view.py
+git commit -m "feat(attendance): filter by video or realtime period"
+```
+
+---
+
+### Task 6: Full regression and bounded smoke test
 
 **Files:** No new feature surface; run validation and record evidence in the task report.
 
