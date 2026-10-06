@@ -1021,7 +1021,32 @@ def replace_video_attendance(source_ref: str, events: Sequence[Mapping[str, obje
     return inserted
 
 
-def fetch_attendance(source=None, person_id=None):
+def _normalize_utc_iso_for_query(value, field_name):
+    if not isinstance(value, str) or not value.strip():
+        raise ValueError(f"{field_name} must be a non-empty ISO-8601 datetime")
+
+    normalized = value.strip()
+    if normalized.endswith("Z"):
+        normalized = f"{normalized[:-1]}+00:00"
+
+    try:
+        dt = datetime.fromisoformat(normalized)
+    except ValueError as exc:
+        raise ValueError(f"{field_name} must be a valid ISO-8601 datetime") from exc
+
+    if dt.tzinfo is None or dt.utcoffset() is None:
+        raise ValueError(f"{field_name} must be timezone-aware")
+
+    return dt.astimezone(timezone.utc)
+
+
+def fetch_attendance(
+    source=None,
+    person_id=None,
+    source_ref=None,
+    observed_from_utc=None,
+    observed_to_utc=None,
+):
     query = """
         SELECT
             event_id,
@@ -1045,6 +1070,27 @@ def fetch_attendance(source=None, person_id=None):
     if person_id is not None:
         where_clauses.append("person_id=?")
         params.append(int(person_id))
+    if source_ref is not None:
+        normalized_source_ref = _normalize_source_ref(source or "realtime", source_ref)
+        where_clauses.append("source_ref=?")
+        params.append(normalized_source_ref)
+
+    if observed_from_utc is not None or observed_to_utc is not None:
+        if source != "realtime":
+            raise ValueError("start/end attendance period filters require source='realtime'")
+
+        start_dt = None
+        end_dt = None
+        if observed_from_utc is not None:
+            start_dt = _normalize_utc_iso_for_query(observed_from_utc, "observed_from_utc")
+            where_clauses.append("observed_at_utc>=?")
+            params.append(start_dt.isoformat())
+        if observed_to_utc is not None:
+            end_dt = _normalize_utc_iso_for_query(observed_to_utc, "observed_to_utc")
+            where_clauses.append("observed_at_utc<=?")
+            params.append(end_dt.isoformat())
+        if start_dt is not None and end_dt is not None and start_dt > end_dt:
+            raise ValueError("start datetime must be earlier than or equal to end datetime")
 
     if where_clauses:
         query += " WHERE " + " AND ".join(where_clauses)

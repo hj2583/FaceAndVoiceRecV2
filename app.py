@@ -5,6 +5,7 @@ import sqlite3
 import tempfile
 import uuid
 import wave
+from datetime import datetime, timedelta
 from pathlib import Path
 
 from PIL import Image
@@ -24,7 +25,13 @@ import pandas as pd
 import streamlit as st
 
 from audio_log_utils import build_audio_log_frame
-from attendance_view import attendance_frame_to_csv, build_attendance_frame, filter_visible_attendance
+from attendance_view import (
+    attendance_frame_to_csv,
+    build_attendance_frame,
+    filter_visible_attendance,
+    local_datetime_range_to_utc_iso,
+    video_source_options,
+)
 from audio_core import read_wav_pcm
 from config import (
     DB_PATH,
@@ -898,11 +905,10 @@ def render_audio_logs():
 def render_attendance():
     st.header("✅ Attendance")
 
-    source_label = st.selectbox(
-        "Source",
-        ["All", "realtime", "video"],
+    source_mode = st.selectbox(
+        "Attendance source",
+        ["Realtime", "Uploaded video"],
     )
-    source_filter = None if source_label == "All" else source_label
 
     persons = list_persons()
     person_options = {"All persons": None}
@@ -912,7 +918,58 @@ def render_attendance():
     person_label = st.selectbox("Person", list(person_options.keys()))
     person_id_filter = person_options[person_label]
 
-    rows = fetch_attendance(source=source_filter, person_id=person_id_filter)
+    rows = []
+
+    if source_mode == "Realtime":
+        now_local = datetime.now().astimezone().replace(microsecond=0)
+        default_start = now_local - timedelta(hours=24)
+
+        start_local = st.datetime_input(
+            "Start (machine-local time)",
+            value=default_start,
+            key="attendance_start_local",
+        )
+        end_local = st.datetime_input(
+            "End (machine-local time)",
+            value=now_local,
+            key="attendance_end_local",
+        )
+
+        try:
+            observed_from_utc, observed_to_utc = local_datetime_range_to_utc_iso(
+                start_local,
+                end_local,
+            )
+        except ValueError:
+            st.warning("Start must be earlier than or equal to end.")
+            return
+
+        rows = fetch_attendance(
+            source="realtime",
+            person_id=person_id_filter,
+            observed_from_utc=observed_from_utc,
+            observed_to_utc=observed_to_utc,
+        )
+    else:
+        video_rows = fetch_attendance(source="video")
+        options, labels = video_source_options([row["source_ref"] for row in video_rows])
+
+        if not options:
+            st.info("No uploaded video attendance observations yet.")
+            return
+
+        selected_source_ref = st.selectbox(
+            "Video source",
+            options,
+            format_func=lambda value: labels.get(value, value),
+        )
+
+        rows = fetch_attendance(
+            source="video",
+            person_id=person_id_filter,
+            source_ref=selected_source_ref,
+        )
+
     visible_rows = filter_visible_attendance(rows)
 
     frame = build_attendance_frame(visible_rows)

@@ -1,3 +1,4 @@
+from datetime import datetime, timezone
 from pathlib import PurePath
 
 import pandas as pd
@@ -61,6 +62,39 @@ def _video_name(source_ref):
         return ""
     normalized = str(source_ref).replace("\\", "/")
     return PurePath(normalized).name
+
+
+def local_datetime_to_utc_iso(value: datetime) -> str:
+    """Convert a local machine datetime (naive or aware) to canonical UTC ISO-8601."""
+    if value.tzinfo is None or value.utcoffset() is None:
+        value = value.astimezone()
+    return value.astimezone(timezone.utc).isoformat()
+
+
+def local_datetime_range_to_utc_iso(start: datetime, end: datetime) -> tuple[str, str]:
+    start_utc = local_datetime_to_utc_iso(start)
+    end_utc = local_datetime_to_utc_iso(end)
+    if start_utc > end_utc:
+        raise ValueError("start datetime must be earlier than or equal to end datetime")
+    return start_utc, end_utc
+
+
+def video_source_options(source_refs):
+    options = []
+    labels = {}
+    for source_ref in source_refs:
+        value = str(source_ref)
+        if value in labels:
+            continue
+
+        normalized = value.replace("\\", "/")
+        path = PurePath(normalized)
+        base = path.name
+        parent = "" if str(path.parent) in ("", ".") else str(path.parent)
+        labels[value] = f"{base} ({parent})" if parent else base
+        options.append(value)
+
+    return options, labels
 
 
 def build_attendance_frame(rows):

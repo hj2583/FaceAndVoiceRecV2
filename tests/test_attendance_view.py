@@ -1,7 +1,18 @@
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 import database
-from attendance_view import attendance_frame_to_csv, build_attendance_frame, filter_visible_attendance, format_clip_offset
+import pytest
+
+from attendance_view import (
+    attendance_frame_to_csv,
+    build_attendance_frame,
+    filter_visible_attendance,
+    format_clip_offset,
+    local_datetime_range_to_utc_iso,
+    local_datetime_to_utc_iso,
+    video_source_options,
+)
 
 
 def _setup_database(tmp_path, monkeypatch):
@@ -133,3 +144,42 @@ def test_attendance_helpers_accept_sqlite_rows_from_fetch_and_export_expected_va
     assert "run-abc" in csv_text
     assert expected_video_ref in csv_text
     assert "clip.mp4" in csv_text
+
+
+def test_local_datetime_range_converts_to_utc_inclusively():
+    start = datetime(2026, 10, 6, 9, 0, tzinfo=timezone(timedelta(hours=8)))
+    end = datetime(2026, 10, 6, 10, 0, tzinfo=timezone(timedelta(hours=8)))
+
+    assert local_datetime_to_utc_iso(start) == "2026-10-06T01:00:00+00:00"
+    assert local_datetime_range_to_utc_iso(start, end) == (
+        "2026-10-06T01:00:00+00:00",
+        "2026-10-06T02:00:00+00:00",
+    )
+
+
+def test_local_datetime_naive_value_is_interpreted_in_host_timezone():
+    value = datetime(2026, 10, 6, 11, 0)
+
+    assert local_datetime_to_utc_iso(value) == value.astimezone(timezone.utc).isoformat()
+
+
+def test_local_datetime_range_rejects_reversed_endpoints():
+    start = datetime(2026, 10, 6, 11, 0)
+    end = datetime(2026, 10, 6, 10, 0)
+
+    with pytest.raises(ValueError, match="start.*end"):
+        local_datetime_range_to_utc_iso(start, end)
+
+
+def test_video_source_options_keep_equal_basenames_distinguishable():
+    refs = [
+        "C:/capture/day1/session/clip.mp4",
+        "D:/archive/day2/session/clip.mp4",
+    ]
+
+    options, labels = video_source_options(refs)
+
+    assert options == refs
+    assert labels[refs[0]] != labels[refs[1]]
+    assert "clip.mp4" in labels[refs[0]]
+    assert "clip.mp4" in labels[refs[1]]

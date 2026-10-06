@@ -424,3 +424,59 @@ def test_duplicate_candidates_in_one_video_replacement_are_inserted_once(tmp_pat
 
     assert database.replace_video_attendance(video_path, [event, event]) == 1
     assert len(database.fetch_attendance(source="video")) == 1
+
+
+def test_fetch_attendance_filters_inclusive_period_and_video_path(tmp_path, monkeypatch):
+    _setup_database(tmp_path, monkeypatch)
+    alice = database.create_person("Alice")
+    bob = database.create_person("Bob")
+    video_a = str((tmp_path / "videos" / "a.mp4").resolve())
+    video_b = str((tmp_path / "videos" / "b.mp4").resolve())
+
+    for minute in (9, 10, 11):
+        database.record_attendance_event(
+            person_id=alice,
+            person_name="Alice",
+            source="realtime",
+            source_ref="run-1",
+            track_id=minute,
+            confidence=0.9,
+            observed_at_utc=f"2026-10-06T10:{minute:02d}:00+00:00",
+        )
+    database.record_attendance_event(
+        person_id=bob,
+        person_name="Bob",
+        source="realtime",
+        source_ref="run-1",
+        track_id=50,
+        confidence=0.95,
+        observed_at_utc="2026-10-06T10:10:00+00:00",
+    )
+
+    video_event = {
+        "person_id": alice,
+        "person_name": "Alice",
+        "track_id": 1,
+        "confidence": 0.9,
+        "media_offset_ms": 1000,
+    }
+    database.replace_video_attendance(video_a, [video_event])
+    database.replace_video_attendance(video_b, [video_event])
+
+    realtime_rows = database.fetch_attendance(
+        source="realtime",
+        person_id=alice,
+        observed_from_utc="2026-10-06T10:10:00+00:00",
+        observed_to_utc="2026-10-06T10:11:00+00:00",
+    )
+    assert [row["track_id"] for row in realtime_rows] == [11, 10]
+
+    only_video_a = database.fetch_attendance(source="video", source_ref=video_a)
+    assert [row["source_ref"] for row in only_video_a] == [Path(video_a).as_posix()]
+
+    with pytest.raises(ValueError, match="start.*end"):
+        database.fetch_attendance(
+            source="realtime",
+            observed_from_utc="2026-10-06T11:00:00+00:00",
+            observed_to_utc="2026-10-06T10:00:00+00:00",
+        )
