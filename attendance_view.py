@@ -8,36 +8,34 @@ ATTENDANCE_COLUMNS = [
     "Source",
     "Observed (UTC)",
     "Video",
+    "Source Ref",
     "Clip Time",
     "Confidence",
     "Track ID",
 ]
 
 
-def filter_visible_attendance(rows, threshold):
-    """Filter attendance rows by confidence threshold and exclude unknown/empty persons.
+def _row_get(row, key, default=None):
+    if hasattr(row, "keys") and key in row.keys():
+        return row[key]
+    if hasattr(row, "get"):
+        return row.get(key, default)
+    return default
 
-    Args:
-        rows: List of attendance event dicts with keys including 'person_name' and 'confidence'
-        threshold: Minimum confidence (inclusive) to retain a row
 
-    Returns:
-        Filtered list of rows meeting the criteria:
-        - person_name is non-empty and not 'UNKNOWN' (case-insensitive)
-        - confidence is not None
-        - confidence >= threshold
-    """
+def filter_visible_attendance(rows):
+    """Exclude rows that do not represent a valid identified attendance event."""
     visible = []
     for row in rows:
-        person_name = (row.get("person_name") or "").strip()
-        confidence = row.get("confidence")
+        person_id = _row_get(row, "person_id")
+        person_name = str(_row_get(row, "person_name") or "").strip()
+        confidence = _row_get(row, "confidence")
 
-        # Exclude empty or unknown person names
+        if person_id is None:
+            continue
         if not person_name or person_name.lower() == "unknown":
             continue
-
-        # Exclude missing or below-threshold confidence
-        if confidence is None or float(confidence) < threshold:
+        if confidence is None:
             continue
 
         visible.append(row)
@@ -69,23 +67,23 @@ def build_attendance_frame(rows):
     table_rows = []
 
     for row in rows:
-        source = (row["source"] or "") if "source" in row.keys() else (row.get("source") or "")
+        source = _row_get(row, "source") or ""
+        source_ref = _row_get(row, "source_ref") or ""
         observed_utc = ""
         video = ""
         clip_time = ""
 
         if source == "realtime":
-            raw_observed = row["observed_at_utc"] if "observed_at_utc" in row.keys() else row.get("observed_at_utc")
+            raw_observed = _row_get(row, "observed_at_utc")
             observed_utc = raw_observed or ""
         elif source == "video":
-            source_ref = row["source_ref"] if "source_ref" in row.keys() else row.get("source_ref")
-            media_offset_ms = row["media_offset_ms"] if "media_offset_ms" in row.keys() else row.get("media_offset_ms")
+            media_offset_ms = _row_get(row, "media_offset_ms")
             video = _video_name(source_ref)
             clip_time = format_clip_offset(media_offset_ms)
 
-        person = row["person_name"] if "person_name" in row.keys() else row.get("person_name")
-        confidence = row["confidence"] if "confidence" in row.keys() else row.get("confidence")
-        track_id = row["track_id"] if "track_id" in row.keys() else row.get("track_id")
+        person = _row_get(row, "person_name")
+        confidence = _row_get(row, "confidence")
+        track_id = _row_get(row, "track_id")
 
         table_rows.append(
             {
@@ -93,6 +91,7 @@ def build_attendance_frame(rows):
                 "Source": source,
                 "Observed (UTC)": observed_utc,
                 "Video": video,
+                "Source Ref": source_ref,
                 "Clip Time": clip_time,
                 "Confidence": confidence if confidence is not None else "",
                 "Track ID": track_id if track_id is not None else "",
@@ -105,6 +104,16 @@ def build_attendance_frame(rows):
     return pd.DataFrame(table_rows, columns=ATTENDANCE_COLUMNS)
 
 
+def _escape_csv_formula_cell(value):
+    if isinstance(value, str) and value and value[0] in ("=", "+", "-", "@"):
+        return "'" + value
+    return value
+
+
 def attendance_frame_to_csv(frame):
-    csv_text = frame.to_csv(index=False)
+    safe_frame = frame.copy()
+    for column in safe_frame.columns:
+        safe_frame[column] = safe_frame[column].map(_escape_csv_formula_cell)
+
+    csv_text = safe_frame.to_csv(index=False)
     return csv_text.encode("utf-8-sig")

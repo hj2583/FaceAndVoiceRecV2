@@ -31,7 +31,6 @@ from config import (
     INITIAL_VIDEO_DIR,
     KNOWN_FACES_DIR,
     LOG_DIR,
-    RECOGNITION_THRESHOLD,
     TRACKED_VIDEO_DIR,
     TRANSCRIPTS_DIR,
     UNKNOWN_FACES_DIR,
@@ -914,7 +913,7 @@ def render_attendance():
     person_id_filter = person_options[person_label]
 
     rows = fetch_attendance(source=source_filter, person_id=person_id_filter)
-    visible_rows = filter_visible_attendance(rows, RECOGNITION_THRESHOLD)
+    visible_rows = filter_visible_attendance(rows)
 
     frame = build_attendance_frame(visible_rows)
 
