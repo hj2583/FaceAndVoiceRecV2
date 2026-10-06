@@ -463,7 +463,7 @@ def local_datetime_range_to_utc_iso(start: datetime, end: datetime) -> tuple[str
 def initialize_realtime_attendance_state(state: MutableMapping, now_local: datetime) -> None: ...
 ```
 
-- [ ] **Step 1: Write failing database query tests**
+- [x] **Step 1: Write failing database query tests**
 
 Insert realtime attendance at 09:00, 10:00, and 11:00 UTC for one person, plus another person's row at 10:00. Query source `realtime`, that person, and inclusive bounds 10:00 through 11:00; assert the exact-boundary 10:00 and 11:00 rows return, but 09:00 and the other person do not. Insert video rows for two source references; assert `source_ref` selects only the requested video. Assert `observed_from_utc > observed_to_utc` raises `ValueError`. Keep the existing no-argument and source/person query tests passing.
 
@@ -507,17 +507,17 @@ def test_fetch_attendance_filters_inclusive_period_and_video_path(tmp_path, monk
         )
 ```
 
-- [ ] **Step 2: Run database query tests and verify RED**
+- [x] **Step 2: Run database query tests and verify RED**
 
 Run: `.\directmlvenv\Scripts\python.exe -m pytest tests/test_database_attendance.py -k "period or source_ref" -q`
 
 Expected: `fetch_attendance` rejects the new filter arguments or lacks inclusive bounds/source-ref filtering.
 
-- [ ] **Step 3: Extend the attendance query**
+- [x] **Step 3: Extend the attendance query**
 
 Add optional `source_ref`, `observed_from_utc`, and `observed_to_utc` parameters to `database.fetch_attendance`. Add parameterized SQL predicates, require datetime bounds only for realtime queries, and reject reversed bounds before executing SQL. Use inclusive `>=`/`<=` comparisons against canonical UTC ISO values. Existing callers with only source/person continue to work.
 
-- [ ] **Step 4: Add failing local-time conversion and mode tests**
+- [x] **Step 4: Add failing local-time conversion and mode tests**
 
 Add `local_datetime_to_utc_iso` tests: an aware datetime with a non-UTC offset converts to UTC; a naive datetime is interpreted in the machine's local timezone and converted to UTC. Add `local_datetime_range_to_utc_iso(start, end)` tests for inclusive UTC output and `ValueError` on reversed input. In `app.py`, make the Attendance source selector choose exactly `Realtime` or `Uploaded video`. Realtime uses paired `st.date_input` and `st.time_input` controls, supported by the declared Streamlit floor, with start defaulting to now minus 24 hours. Add an `Up to now` checkbox defaulted true; while checked, compute the end from the current machine-local time on each rerun. Seed widget defaults in `st.session_state` only when missing, and keep end date/time widgets mounted but disabled while `Up to now` is on so fixed values survive toggling. When unchecked, use those preserved end date/time values. Video mode requires one selection from stored video source refs, with option labels combining basename and parent path to distinguish equal filenames. Both modes retain person filtering. A reversed realtime range shows a warning and performs no attendance query; a selected video calls the query with that exact source ref. Keep empty states and CSV export of the exact displayed rows.
 
@@ -551,13 +551,13 @@ def test_local_datetime_range_rejects_reversed_endpoints():
 
 Also assert that a naive datetime converts to `value.astimezone(timezone.utc).isoformat()` in the current host timezone.
 
-- [ ] **Step 5: Run attendance query and view tests**
+- [x] **Step 5: Run attendance query and view tests**
 
 Run: `.\directmlvenv\Scripts\python.exe -m pytest tests/test_database_attendance.py tests/test_attendance_view.py -q`
 
 Expected: inclusive bounds, path filtering, local-to-UTC conversion, source-specific controls, and existing SQLite-row/CSV tests pass.
 
-- [ ] **Step 6: Commit**
+- [x] **Step 6: Commit**
 
 ```powershell
 git add database.py app.py attendance_view.py tests/test_database_attendance.py tests/test_attendance_view.py
@@ -570,7 +570,7 @@ git commit -m "feat(attendance): filter by video or realtime period"
 
 **Files:** No new feature surface; run validation and record evidence in the task report.
 
-- [ ] **Step 1: Compile and run the full suite**
+- [x] **Step 1: Compile and run the full suite**
 
 Run: `.\directmlvenv\Scripts\python.exe -m py_compile app.py database.py realtime.py video_processor.py video_workflow.py`
 
@@ -578,7 +578,7 @@ Run: `.\directmlvenv\Scripts\python.exe -m pytest tests -q`
 
 Expected: all tests pass; record actual count.
 
-- [ ] **Step 2: Verify a bounded realtime attendance event**
+- [x] **Step 2: Verify a bounded realtime attendance event**
 
 Run: `.\directmlvenv\Scripts\python.exe -m pytest tests/test_realtime.py -k attendance -q`
 
@@ -586,13 +586,13 @@ Expected: duplicate samples for one pair create one UTC attendance row; a second
 
 Run: `.\directmlvenv\Scripts\python.exe -m pytest tests/test_realtime.py -q`
 
-- [ ] **Step 3: Verify uploaded-video replacement behavior**
+- [x] **Step 3: Verify uploaded-video replacement behavior**
 
 Run: `.\directmlvenv\Scripts\python.exe -m pytest tests/test_video_processor.py tests/test_video_workflow.py -k attendance -q`
 
 Then run both complete test modules. Also perform one bounded run on `initialVideo/NEWS Why LPI Capital and not other insurers - The Edge TV (1080p).mp4` with temporary DB/output/log paths. Verify first-seen track offsets, persisted rows only after full workflow success, reprocessing replaces rather than duplicates rows, and a forced workflow failure leaves prior rows unchanged.
 
-- [ ] **Step 4: Verify the attendance view/export**
+- [x] **Step 4: Verify the attendance view/export**
 
 Confirm realtime UTC dates and video clip offsets render in separate columns; filter by source/person and verify CSV contains the same filtered rows.
 
