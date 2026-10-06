@@ -30,6 +30,7 @@ from attendance_view import (
     build_attendance_frame,
     build_realtime_attendance_range,
     filter_visible_attendance,
+    initialize_realtime_attendance_state,
     video_source_options,
 )
 from audio_core import read_wav_pcm
@@ -922,19 +923,17 @@ def render_attendance():
 
     if source_mode == "Realtime":
         now_local = datetime.now().astimezone().replace(microsecond=0)
-        default_start = now_local - timedelta(hours=24)
+        initialize_realtime_attendance_state(st.session_state, now_local)
         start_column, end_column = st.columns(2)
 
         with start_column:
             st.caption("Start (machine-local time)")
             start_date = st.date_input(
                 "Start date",
-                value=default_start.date(),
                 key="attendance_start_date",
             )
             start_time = st.time_input(
                 "Start time",
-                value=default_start.time(),
                 key="attendance_start_time",
             )
 
@@ -942,22 +941,20 @@ def render_attendance():
             st.caption("End (machine-local time)")
             up_to_now = st.checkbox(
                 "Up to now",
-                value=True,
                 key="attendance_up_to_now",
+            )
+            end_date = st.date_input(
+                "End date",
+                key="attendance_end_date",
+                disabled=up_to_now,
+            )
+            end_time = st.time_input(
+                "End time",
+                key="attendance_end_time",
+                disabled=up_to_now,
             )
             if up_to_now:
                 st.caption("End time updates to the current time when the view reruns.")
-            else:
-                end_date = st.date_input(
-                    "End date",
-                    value=now_local.date(),
-                    key="attendance_end_date",
-                )
-                end_time = st.time_input(
-                    "End time",
-                    value=now_local.time(),
-                    key="attendance_end_time",
-                )
 
         try:
             observed_from_utc, observed_to_utc = build_realtime_attendance_range(

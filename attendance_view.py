@@ -1,4 +1,4 @@
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import PurePath
 
 import pandas as pd
@@ -77,6 +77,20 @@ def local_datetime_range_to_utc_iso(start: datetime, end: datetime) -> tuple[str
     if start_utc > end_utc:
         raise ValueError("start datetime must be earlier than or equal to end datetime")
     return start_utc, end_utc
+
+
+def initialize_realtime_attendance_state(state, now_local: datetime) -> None:
+    default_start = now_local - timedelta(hours=24)
+    defaults = {
+        "attendance_start_date": default_start.date(),
+        "attendance_start_time": default_start.time().replace(tzinfo=None, microsecond=0),
+        "attendance_up_to_now": True,
+        "attendance_end_date": now_local.date(),
+        "attendance_end_time": now_local.time().replace(tzinfo=None, microsecond=0),
+    }
+    for key, value in defaults.items():
+        if key not in state:
+            state[key] = value
 
 
 def build_realtime_attendance_range(

@@ -10,6 +10,7 @@ from attendance_view import (
     build_realtime_attendance_range,
     filter_visible_attendance,
     format_clip_offset,
+    initialize_realtime_attendance_state,
     local_datetime_range_to_utc_iso,
     local_datetime_to_utc_iso,
     video_source_options,
@@ -222,3 +223,26 @@ def test_realtime_attendance_range_rejects_missing_or_reversed_fixed_end():
             end_date=date(2026, 10, 6),
             end_time=time(10, 0),
         )
+
+
+def test_realtime_period_defaults_are_seeded_once_and_fixed_end_is_preserved():
+    state = {}
+    first_now = datetime(2026, 10, 6, 12, 30, tzinfo=timezone(timedelta(hours=8)))
+    initialize_realtime_attendance_state(state, first_now)
+
+    assert state["attendance_start_date"] == date(2026, 10, 5)
+    assert state["attendance_start_time"] == time(12, 30)
+    assert state["attendance_up_to_now"] is True
+    assert state["attendance_end_date"] == date(2026, 10, 6)
+    assert state["attendance_end_time"] == time(12, 30)
+
+    state["attendance_up_to_now"] = False
+    state["attendance_end_date"] = date(2026, 10, 4)
+    state["attendance_end_time"] = time(9, 15)
+    initialize_realtime_attendance_state(
+        state,
+        datetime(2026, 10, 8, 18, 0, tzinfo=timezone(timedelta(hours=8))),
+    )
+
+    assert state["attendance_end_date"] == date(2026, 10, 4)
+    assert state["attendance_end_time"] == time(9, 15)
