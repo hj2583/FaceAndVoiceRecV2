@@ -48,7 +48,7 @@ def fetch_attendance(source: str | None = None, person_id: int | None = None) ->
 
 `record_attendance_event` returns true only when a new row was inserted; an identical source/run/track/person tuple is ignored. It normalizes aware realtime ISO-8601 input to UTC and rejects naive or malformed datetimes, confidence outside `[0, 1]`, and invalid offsets/track IDs. `replace_video_attendance` transactionally deletes prior `source='video'` rows for the exact normalized source path and inserts the supplied candidate set. Its caller invokes it only after successful video workflow completion. `fetch_attendance` orders realtime rows by normalized observation timestamp and video rows by import/creation time, newest first, and optionally filters by source/person.
 
-- [ ] **Step 1: Write migration and persistence tests**
+- [x] **Step 1: Write migration and persistence tests**
 
 Add tests in `tests/test_database_attendance.py`; define a local `_setup_database(tmp_path, monkeypatch)` helper that patches `database.DB_PATH` and calls `database.init_db()`. Cover idempotent `init_db`, source/timestamp constraints, UTC normalization/rejection, confidence/offset validation, one-time insert behavior, realtime/video timestamp fields, filtered reads, observation ordering, and transactional replacement. Build video paths under `tmp_path` and pass `Path.resolve()` rather than hard-coded Windows paths so tests are portable.
 
@@ -194,23 +194,23 @@ def test_duplicate_candidates_in_one_video_replacement_are_inserted_once(tmp_pat
 
 Add parametrized validation cases asserting an offset-aware non-UTC realtime timestamp is stored normalized to `+00:00`, a naive timestamp raises `ValueError`, confidence rejects NaN and values outside `[0, 1]`, and fractional/negative/bool track IDs and fractional/negative offsets raise `ValueError`.
 
-- [ ] **Step 2: Run tests and verify RED**
+- [x] **Step 2: Run tests and verify RED**
 
 Run: `.\directmlvenv\Scripts\python.exe -m pytest tests/test_database_attendance.py -q`
 
 Expected: collection or assertions fail because the attendance table/APIs do not exist.
 
-- [ ] **Step 3: Add the schema and database APIs**
+- [x] **Step 3: Add the schema and database APIs**
 
 Add `attendance_events` in `init_db()` using the existing foreign-key/SQLite conventions. Include source `CHECK`, non-null person/source/source_ref/track/confidence/created time, nullable source-specific time fields, and a unique constraint on `(source, source_ref, track_id, person_id)`. Use `get_conn()` so an exception rolls back the replacement delete and inserts. Reject malformed source/time combinations with `ValueError` before insert. Validate confidence as a finite numeric value in `[0, 1]` and `media_offset_ms` as a non-negative integer (reject bools/fractional values). Parse realtime timestamps with `datetime.fromisoformat`, require timezone awareness, normalize to UTC, and store a canonical `+00:00` ISO value. Use `ON CONFLICT(source, source_ref, track_id, person_id) DO NOTHING` instead of broad `INSERT OR IGNORE`, so unrelated CHECK/FK/NOT NULL errors are not silently hidden. Do not modify `recognition_logs` or `audio_logs` schemas.
 
-- [ ] **Step 4: Run database attendance tests**
+- [x] **Step 4: Run database attendance tests**
 
 Run: `.\directmlvenv\Scripts\python.exe -m pytest tests/test_database_attendance.py -q`
 
 Expected: migration, idempotency, timestamp validation, filtering, replacement, and rollback tests pass.
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```powershell
 git add database.py tests/test_database_attendance.py
@@ -227,27 +227,27 @@ git commit -m "feat(attendance): add attendance event persistence"
 
 **Behavior:** Generate one UUID run ID per `realtime.run()` invocation. Keep a set of `(track_id, person_id)` pairs already recorded for attendance. At the first recognition sample for a pair where `person_id is not None` and confidence is at least `RECOGNITION_THRESHOLD`, record one event with source `realtime`, that run ID, track/person/name/confidence, and `_mono_to_wall_clock(timestamp)` converted to UTC ISO-8601. Keep existing per-second `log_recognition()` calls unchanged. A new track ID in the same run is a new appearance.
 
-- [ ] **Step 1: Add failing realtime tests**
+- [x] **Step 1: Add failing realtime tests**
 
 Extend the realtime run tests with a fake tracker/person track and monkeypatched `record_attendance_event`. Provide enough frames for repeated recognition samples. Assert exactly one attendance call for the same track, a different track produces a second call, and unknown/low-confidence tracks produce none. Assert source/ref/track/person/confidence fields and an ISO-8601 UTC time derived from the existing monotonic-to-wall-clock offset. Keep existing recognition/audio-log assertions.
 
-- [ ] **Step 2: Run the focused test and verify RED**
+- [x] **Step 2: Run the focused test and verify RED**
 
 Run: `.\directmlvenv\Scripts\python.exe -m pytest tests/test_realtime.py -k attendance -q`
 
 Expected: fails because realtime has no attendance recording yet.
 
-- [ ] **Step 3: Add first-per-track attendance recording**
+- [x] **Step 3: Add first-per-track attendance recording**
 
 Create the run ID once after realtime starts. Create `attendance_logged_pairs` beside the existing `last_recognition_log` runtime state. At an eligible known recognition, check/add `(track.track_id, track.person_id)` and call `record_attendance_event` once per pair with `observed_at_utc=datetime.fromtimestamp(_mono_to_wall_clock(timestamp), timezone.utc).isoformat()`. Do not repurpose `log_recognition` or change existing log cadence.
 
-- [ ] **Step 4: Run realtime tests**
+- [x] **Step 4: Run realtime tests**
 
 Run: `.\directmlvenv\Scripts\python.exe -m pytest tests/test_realtime.py -q`
 
 Expected: attendance tests and existing realtime tests pass.
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```powershell
 git add realtime.py tests/test_realtime.py
@@ -264,33 +264,33 @@ git commit -m "feat(attendance): record realtime recognized appearances"
 
 **Behavior:** Add a top-level `attendance` candidate list to the existing video JSON log, leaving `recognition` and `speech` unchanged. Capture only the first frame per `(track_id, person_id)` pair at which its `person_id` is set and confidence meets `RECOGNITION_THRESHOLD`; candidate fields are `person_id`, `person_name`, `track_id`, `confidence`, and `media_offset_ms=round(timestamp_sec*1000)`. After subtitle/audio finalization succeeds and immediately before returning the meeting ID, `process_video_and_transcribe()` resolves the source path and calls `replace_video_attendance()` once. If face processing, transcription, cue writing, subtitle/audio mux, or fallback finalization raises, do not replace prior attendance for that video.
 
-- [ ] **Step 1: Write failing video candidate tests**
+- [x] **Step 1: Write failing video candidate tests**
 
 Add a video-processor test with multiple frames on one known track, a second known track, an unknown track, and one low-confidence known track. Assert the new `attendance` array contains one first-seen candidate for each eligible known track with the expected media offset, while existing `recognition` and `speech` keys retain their current meanings.
 
 Add workflow tests: successful workflow calls replacement once with the resolved video path and parsed candidates; transcription/final-mux failure does not call replacement and leaves prior data untouched. Keep the existing partial-output and one-transcription assertions.
 
-- [ ] **Step 2: Run focused tests and verify RED**
+- [x] **Step 2: Run focused tests and verify RED**
 
 Run: `.\directmlvenv\Scripts\python.exe -m pytest tests/test_video_processor.py tests/test_video_workflow.py -k attendance -q`
 
 Expected: candidate log and post-success database replacement assertions fail.
 
-- [ ] **Step 3: Emit first-seen candidates in the video log**
+- [x] **Step 3: Emit first-seen candidates in the video log**
 
 Maintain an `attendance_candidates` list and `attendance_pairs` set in `process_video_pipeline()`. At each detected track, form `(track.track_id, track.person_id)` and append only if that pair is newly eligible under the global constraints. Add the list as the top-level `attendance` key; do not change `recognition` row fields or active-speaker events.
 
-- [ ] **Step 4: Replace video attendance only after full workflow success**
+- [x] **Step 4: Replace video attendance only after full workflow success**
 
 After final mux succeeds, read the candidate list from the JSON log, normalize the input video with `Path.resolve()`, and call `database.replace_video_attendance(...)`. Do not call it in any exception/fallback branch. An empty successful candidate list intentionally clears prior attendance for that video.
 
-- [ ] **Step 5: Run video attendance tests**
+- [x] **Step 5: Run video attendance tests**
 
 Run: `.\directmlvenv\Scripts\python.exe -m pytest tests/test_video_processor.py tests/test_video_workflow.py -q`
 
 Expected: event capture, success-only replacement, retry/reprocess, and existing workflow tests pass.
 
-- [ ] **Step 6: Commit**
+- [x] **Step 6: Commit**
 
 ```powershell
 git add video_processor.py video_workflow.py tests/test_video_processor.py tests/test_video_workflow.py
@@ -309,7 +309,7 @@ git commit -m "feat(attendance): record uploaded video appearances"
 
 **Behavior:** Add an `Attendance` tab to `main()`. The view shows source and person filters, then a dense table with Person, Source, Observed (UTC), Video, Source Ref, Clip Time, Confidence, and Track ID. Realtime entries populate Observed (UTC) and show the run ID in Source Ref; video entries populate Video, full normalized path in Source Ref, and clip-relative `mm:ss` without a calendar date. The download button exports the currently filtered rows as UTF-8 CSV. Empty results show an empty state. Exclude unknown/empty identities, but do not reapply the current confidence threshold at display time; capture-time gating already controls eligibility and historical rows must survive later threshold changes. Escape text cells that begin with spreadsheet formula characters (`=`, `+`, `-`, `@`) in the CSV export.
 
-- [ ] **Step 1: Add attendance query/view tests**
+- [x] **Step 1: Add attendance query/view tests**
 
 Add `tests/test_attendance_view.py`:
 
@@ -409,23 +409,23 @@ def test_sqlite_rows_flow_through_filter_frame_and_csv(tmp_path, monkeypatch):
     assert "Alice,realtime,2026-10-05T12:30:00+00:00,run-1" in csv_text
 ```
 
-- [ ] **Step 2: Run focused tests and verify RED**
+- [x] **Step 2: Run focused tests and verify RED**
 
 Run: `.\directmlvenv\Scripts\python.exe -m pytest tests/test_attendance_view.py -q`
 
 Expected: the new SQLite-row integration test fails when `.get()` is called on `sqlite3.Row`; the Source Ref assertion and CSV formula-safety assertion also fail against the current frame/export helpers.
 
-- [ ] **Step 3: Add the tab and view**
+- [x] **Step 3: Add the tab and view**
 
 Add `filter_visible_attendance`, `format_clip_offset`, `build_attendance_frame`, and `attendance_frame_to_csv` in `attendance_view.py`. Filter to non-null person IDs, non-empty/non-UNKNOWN names, and present confidence; do not reapply the current threshold to historical rows. Format offsets as `MM:SS`, switching to `H:MM:SS` at one hour; preserve UTC values in realtime rows and keep video date fields empty. In `app.py`, add `render_attendance()` and register an `Attendance` tab. Unpack all four values returned by `list_persons()`. Provide source and person filters, fetch matching DB events, pass actual `sqlite3.Row` values through the tolerant pure helpers, render the returned frame, and wire CSV download to exactly `attendance_frame_to_csv(frame)`. Include an empty state.
 
-- [ ] **Step 4: Run attendance/database UI-preparation tests**
+- [x] **Step 4: Run attendance/database UI-preparation tests**
 
 Run: `.\directmlvenv\Scripts\python.exe -m pytest tests/test_attendance_view.py -q`
 
 Expected: SQLite-row integration, historical visibility, time formatting, and CSV-safety tests pass.
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```powershell
 git add app.py attendance_view.py tests/test_attendance_view.py
@@ -438,7 +438,7 @@ git commit -m "feat(attendance): add attendance list and export"
 
 **Files:** No new feature surface; run validation and record evidence in the task report.
 
-- [ ] **Step 1: Compile and run the full suite**
+- [x] **Step 1: Compile and run the full suite**
 
 Run: `.\directmlvenv\Scripts\python.exe -m py_compile app.py database.py realtime.py video_processor.py video_workflow.py`
 
@@ -446,7 +446,7 @@ Run: `.\directmlvenv\Scripts\python.exe -m pytest tests -q`
 
 Expected: all tests pass; record actual count.
 
-- [ ] **Step 2: Verify a bounded realtime attendance event**
+- [x] **Step 2: Verify a bounded realtime attendance event**
 
 Run: `.\directmlvenv\Scripts\python.exe -m pytest tests/test_realtime.py -k attendance -q`
 
@@ -454,13 +454,13 @@ Expected: duplicate samples for one pair create one UTC attendance row; a second
 
 Run: `.\directmlvenv\Scripts\python.exe -m pytest tests/test_realtime.py -q`
 
-- [ ] **Step 3: Verify uploaded-video replacement behavior**
+- [x] **Step 3: Verify uploaded-video replacement behavior**
 
 Run: `.\directmlvenv\Scripts\python.exe -m pytest tests/test_video_processor.py tests/test_video_workflow.py -k attendance -q`
 
 Then run both complete test modules. Also perform one bounded run on `initialVideo/NEWS Why LPI Capital and not other insurers - The Edge TV (1080p).mp4` with temporary DB/output/log paths. Verify first-seen track offsets, persisted rows only after full workflow success, reprocessing replaces rather than duplicates rows, and a forced workflow failure leaves prior rows unchanged.
 
-- [ ] **Step 4: Verify the attendance view/export**
+- [x] **Step 4: Verify the attendance view/export**
 
 Confirm realtime UTC dates and video clip offsets render in separate columns; filter by source/person and verify CSV contains the same filtered rows.
 
