@@ -460,6 +460,7 @@ def fetch_attendance(
 
 def local_datetime_to_utc_iso(value: datetime) -> str: ...
 def local_datetime_range_to_utc_iso(start: datetime, end: datetime) -> tuple[str, str]: ...
+def initialize_realtime_attendance_state(state: MutableMapping, now_local: datetime) -> None: ...
 ```
 
 - [ ] **Step 1: Write failing database query tests**
@@ -518,7 +519,7 @@ Add optional `source_ref`, `observed_from_utc`, and `observed_to_utc` parameters
 
 - [ ] **Step 4: Add failing local-time conversion and mode tests**
 
-Add `local_datetime_to_utc_iso` tests: an aware datetime with a non-UTC offset converts to UTC; a naive datetime is interpreted in the machine's local timezone and converted to UTC. Add `local_datetime_range_to_utc_iso(start, end)` tests for inclusive UTC output and `ValueError` on reversed input. In `app.py`, make the Attendance source selector choose exactly `Realtime` or `Uploaded video`. Realtime uses paired `st.date_input` and `st.time_input` controls, supported by the declared Streamlit floor, with start defaulting to now minus 24 hours. Add an `Up to now` checkbox defaulted true; while checked, compute the end from the current machine-local time on each rerun so it does not stale. When unchecked, show end date/time inputs for a fixed endpoint. Video mode requires one selection from stored video source refs, with option labels combining basename and parent path to distinguish equal filenames. Both modes retain person filtering. A reversed realtime range shows a warning and performs no attendance query; a selected video calls the query with that exact source ref. Keep empty states and CSV export of the exact displayed rows.
+Add `local_datetime_to_utc_iso` tests: an aware datetime with a non-UTC offset converts to UTC; a naive datetime is interpreted in the machine's local timezone and converted to UTC. Add `local_datetime_range_to_utc_iso(start, end)` tests for inclusive UTC output and `ValueError` on reversed input. In `app.py`, make the Attendance source selector choose exactly `Realtime` or `Uploaded video`. Realtime uses paired `st.date_input` and `st.time_input` controls, supported by the declared Streamlit floor, with start defaulting to now minus 24 hours. Add an `Up to now` checkbox defaulted true; while checked, compute the end from the current machine-local time on each rerun. Seed widget defaults in `st.session_state` only when missing, and keep end date/time widgets mounted but disabled while `Up to now` is on so fixed values survive toggling. When unchecked, use those preserved end date/time values. Video mode requires one selection from stored video source refs, with option labels combining basename and parent path to distinguish equal filenames. Both modes retain person filtering. A reversed realtime range shows a warning and performs no attendance query; a selected video calls the query with that exact source ref. Keep empty states and CSV export of the exact displayed rows.
 
 Use these helper tests in `tests/test_attendance_view.py`:
 
@@ -545,6 +546,8 @@ def test_local_datetime_range_rejects_reversed_endpoints():
     with pytest.raises(ValueError, match="start.*end"):
         local_datetime_range_to_utc_iso(start, end)
 ```
+
+    Add `test_realtime_attendance_state_defaults_once_and_preserves_fixed_end`: call `initialize_realtime_attendance_state(state, now1)` on an empty dict; assert start is 24 hours before `now1`, end equals `now1`, and `attendance_up_to_now` is true. Change start/end fields and set `attendance_up_to_now=False`, call the initializer again with a later `now2`, and assert the user's values are unchanged.
 
 Also assert that a naive datetime converts to `value.astimezone(timezone.utc).isoformat()` in the current host timezone.
 
