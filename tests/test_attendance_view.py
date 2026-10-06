@@ -1,4 +1,4 @@
-from datetime import datetime, timedelta, timezone
+from datetime import date, datetime, time, timedelta, timezone
 from pathlib import Path
 
 import database
@@ -7,6 +7,7 @@ import pytest
 from attendance_view import (
     attendance_frame_to_csv,
     build_attendance_frame,
+    build_realtime_attendance_range,
     filter_visible_attendance,
     format_clip_offset,
     local_datetime_range_to_utc_iso,
@@ -183,3 +184,41 @@ def test_video_source_options_keep_equal_basenames_distinguishable():
     assert labels[refs[0]] != labels[refs[1]]
     assert "clip.mp4" in labels[refs[0]]
     assert "clip.mp4" in labels[refs[1]]
+
+
+def test_realtime_attendance_range_uses_current_time_when_up_to_now_is_enabled():
+    now_local = datetime(2026, 10, 6, 12, 30, tzinfo=timezone(timedelta(hours=8)))
+
+    assert build_realtime_attendance_range(
+        date(2026, 10, 6),
+        time(9, 0),
+        up_to_now=True,
+        now_local=now_local,
+    ) == ("2026-10-06T01:00:00+00:00", "2026-10-06T04:30:00+00:00")
+
+
+def test_realtime_attendance_range_uses_fixed_end_when_up_to_now_is_disabled():
+    expected_start = datetime.combine(date(2026, 10, 6), time(9, 0)).astimezone(timezone.utc).isoformat()
+    expected_end = datetime.combine(date(2026, 10, 6), time(10, 0)).astimezone(timezone.utc).isoformat()
+
+    assert build_realtime_attendance_range(
+        date(2026, 10, 6),
+        time(9, 0),
+        up_to_now=False,
+        end_date=date(2026, 10, 6),
+        end_time=time(10, 0),
+        now_local=datetime(2026, 10, 6, 18, 0),
+    ) == (expected_start, expected_end)
+
+
+def test_realtime_attendance_range_rejects_missing_or_reversed_fixed_end():
+    with pytest.raises(ValueError, match="end date and time"):
+        build_realtime_attendance_range(date(2026, 10, 6), time(9, 0), up_to_now=False)
+
+    with pytest.raises(ValueError, match="start.*end"):
+        build_realtime_attendance_range(
+            date(2026, 10, 6), time(11, 0),
+            up_to_now=False,
+            end_date=date(2026, 10, 6),
+            end_time=time(10, 0),
+        )

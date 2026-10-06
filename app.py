@@ -28,8 +28,8 @@ from audio_log_utils import build_audio_log_frame
 from attendance_view import (
     attendance_frame_to_csv,
     build_attendance_frame,
+    build_realtime_attendance_range,
     filter_visible_attendance,
-    local_datetime_range_to_utc_iso,
     video_source_options,
 )
 from audio_core import read_wav_pcm
@@ -923,22 +923,50 @@ def render_attendance():
     if source_mode == "Realtime":
         now_local = datetime.now().astimezone().replace(microsecond=0)
         default_start = now_local - timedelta(hours=24)
+        start_column, end_column = st.columns(2)
 
-        start_local = st.datetime_input(
-            "Start (machine-local time)",
-            value=default_start,
-            key="attendance_start_local",
-        )
-        end_local = st.datetime_input(
-            "End (machine-local time)",
-            value=now_local,
-            key="attendance_end_local",
-        )
+        with start_column:
+            st.caption("Start (machine-local time)")
+            start_date = st.date_input(
+                "Start date",
+                value=default_start.date(),
+                key="attendance_start_date",
+            )
+            start_time = st.time_input(
+                "Start time",
+                value=default_start.time(),
+                key="attendance_start_time",
+            )
+
+        with end_column:
+            st.caption("End (machine-local time)")
+            up_to_now = st.checkbox(
+                "Up to now",
+                value=True,
+                key="attendance_up_to_now",
+            )
+            if up_to_now:
+                st.caption("End time updates to the current time when the view reruns.")
+            else:
+                end_date = st.date_input(
+                    "End date",
+                    value=now_local.date(),
+                    key="attendance_end_date",
+                )
+                end_time = st.time_input(
+                    "End time",
+                    value=now_local.time(),
+                    key="attendance_end_time",
+                )
 
         try:
-            observed_from_utc, observed_to_utc = local_datetime_range_to_utc_iso(
-                start_local,
-                end_local,
+            observed_from_utc, observed_to_utc = build_realtime_attendance_range(
+                start_date,
+                start_time,
+                up_to_now=up_to_now,
+                end_date=None if up_to_now else end_date,
+                end_time=None if up_to_now else end_time,
+                now_local=now_local,
             )
         except ValueError:
             st.warning("Start must be earlier than or equal to end.")

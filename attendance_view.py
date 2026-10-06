@@ -79,6 +79,26 @@ def local_datetime_range_to_utc_iso(start: datetime, end: datetime) -> tuple[str
     return start_utc, end_utc
 
 
+def build_realtime_attendance_range(
+    start_date,
+    start_time,
+    *,
+    up_to_now: bool,
+    end_date=None,
+    end_time=None,
+    now_local: datetime | None = None,
+) -> tuple[str, str]:
+    start_local = datetime.combine(start_date, start_time)
+    if up_to_now:
+        end_local = now_local or datetime.now().astimezone().replace(microsecond=0)
+    else:
+        if end_date is None or end_time is None:
+            raise ValueError("end date and time are required when Up to now is disabled")
+        end_local = datetime.combine(end_date, end_time)
+
+    return local_datetime_range_to_utc_iso(start_local, end_local)
+
+
 def video_source_options(source_refs):
     options = []
     labels = {}
