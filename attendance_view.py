@@ -14,6 +14,37 @@ ATTENDANCE_COLUMNS = [
 ]
 
 
+def filter_visible_attendance(rows, threshold):
+    """Filter attendance rows by confidence threshold and exclude unknown/empty persons.
+
+    Args:
+        rows: List of attendance event dicts with keys including 'person_name' and 'confidence'
+        threshold: Minimum confidence (inclusive) to retain a row
+
+    Returns:
+        Filtered list of rows meeting the criteria:
+        - person_name is non-empty and not 'UNKNOWN' (case-insensitive)
+        - confidence is not None
+        - confidence >= threshold
+    """
+    visible = []
+    for row in rows:
+        person_name = (row.get("person_name") or "").strip()
+        confidence = row.get("confidence")
+
+        # Exclude empty or unknown person names
+        if not person_name or person_name.lower() == "unknown":
+            continue
+
+        # Exclude missing or below-threshold confidence
+        if confidence is None or float(confidence) < threshold:
+            continue
+
+        visible.append(row)
+
+    return visible
+
+
 def format_clip_offset(media_offset_ms):
     if media_offset_ms is None:
         return ""

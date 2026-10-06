@@ -1,4 +1,41 @@
-from attendance_view import attendance_frame_to_csv, build_attendance_frame, format_clip_offset
+from attendance_view import attendance_frame_to_csv, build_attendance_frame, filter_visible_attendance, format_clip_offset
+
+
+def test_filter_visible_attendance_uses_threshold_and_excludes_unknown():
+    """Test that filter_visible_attendance correctly filters by threshold and excludes UNKNOWN/empty names."""
+    rows = [
+        {"person_name": "Alice", "confidence": 0.70},
+        {"person_name": "Bob", "confidence": 0.699},
+        {"person_name": "UNKNOWN", "confidence": 0.95},
+        {"person_name": "", "confidence": 0.90},
+        {"person_name": "Charlie", "confidence": None},
+    ]
+
+    result = filter_visible_attendance(rows, threshold=0.70)
+    
+    # Only Alice should pass: confidence >= threshold, known name, confidence not None
+    assert len(result) == 1
+    assert result[0]["person_name"] == "Alice"
+    assert result[0]["confidence"] == 0.70
+
+
+def test_filter_visible_attendance_with_various_thresholds():
+    """Test threshold boundary behavior."""
+    rows = [
+        {"person_name": "Alice", "confidence": 0.75},
+        {"person_name": "Bob", "confidence": 0.70},
+        {"person_name": "Charlie", "confidence": 0.69},
+    ]
+
+    # Threshold 0.70: Alice and Bob pass
+    result = filter_visible_attendance(rows, threshold=0.70)
+    assert len(result) == 2
+    assert [r["person_name"] for r in result] == ["Alice", "Bob"]
+
+    # Threshold 0.75: only Alice passes
+    result = filter_visible_attendance(rows, threshold=0.75)
+    assert len(result) == 1
+    assert result[0]["person_name"] == "Alice"
 
 
 def test_attendance_frame_keeps_realtime_dates_separate_from_video_offsets():

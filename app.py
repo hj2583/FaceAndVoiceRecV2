@@ -24,13 +24,14 @@ import pandas as pd
 import streamlit as st
 
 from audio_log_utils import build_audio_log_frame
-from attendance_view import attendance_frame_to_csv, build_attendance_frame
+from attendance_view import attendance_frame_to_csv, build_attendance_frame, filter_visible_attendance
 from audio_core import read_wav_pcm
 from config import (
     DB_PATH,
     INITIAL_VIDEO_DIR,
     KNOWN_FACES_DIR,
     LOG_DIR,
+    RECOGNITION_THRESHOLD,
     TRACKED_VIDEO_DIR,
     TRANSCRIPTS_DIR,
     UNKNOWN_FACES_DIR,
@@ -906,22 +907,14 @@ def render_attendance():
 
     persons = list_persons()
     person_options = {"All persons": None}
-    for person_id, person_name, _created_at in persons:
+    for person_id, person_name, _created_at, _updated_at in persons:
         person_options[f"{person_name} (#{person_id})"] = person_id
 
     person_label = st.selectbox("Person", list(person_options.keys()))
     person_id_filter = person_options[person_label]
 
     rows = fetch_attendance(source=source_filter, person_id=person_id_filter)
-    visible_rows = []
-    for row in rows:
-        person_name = (row["person_name"] or "").strip()
-        confidence = row["confidence"]
-        if not person_name or person_name.lower() == "unknown":
-            continue
-        if confidence is None or float(confidence) < LOW_CONFIDENCE_WARN:
-            continue
-        visible_rows.append(row)
+    visible_rows = filter_visible_attendance(rows, RECOGNITION_THRESHOLD)
 
     frame = build_attendance_frame(visible_rows)
 
