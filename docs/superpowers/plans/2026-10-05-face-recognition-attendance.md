@@ -305,9 +305,9 @@ git commit -m "feat(attendance): record uploaded video appearances"
 
 **Consumes:** `database.fetch_attendance(source=None, person_id=None)`.
 
-**Produces:** `filter_visible_attendance(rows, threshold) -> list`, `build_attendance_frame(rows) -> pandas.DataFrame`, and `attendance_frame_to_csv(frame) -> bytes` in `attendance_view.py`.
+**Produces:** `filter_visible_attendance(rows) -> list`, `build_attendance_frame(rows) -> pandas.DataFrame`, and `attendance_frame_to_csv(frame) -> bytes` in `attendance_view.py`. All three helpers accept mapping rows and `sqlite3.Row` objects returned by `fetch_attendance()`.
 
-**Behavior:** Add an `Attendance` tab to `main()`. The view shows source and person filters, then a dense table with Person, Source, Observed (UTC), Video, Clip Time, Confidence, and Track ID. Realtime entries populate Observed (UTC); video entries populate Video and clip-relative `mm:ss` without a calendar date. The download button exports the currently filtered rows as UTF-8 CSV. Empty results show an empty state; do not show unknown or low-confidence observations.
+**Behavior:** Add an `Attendance` tab to `main()`. The view shows source and person filters, then a dense table with Person, Source, Observed (UTC), Video, Source Ref, Clip Time, Confidence, and Track ID. Realtime entries populate Observed (UTC) and show the run ID in Source Ref; video entries populate Video, full normalized path in Source Ref, and clip-relative `mm:ss` without a calendar date. The download button exports the currently filtered rows as UTF-8 CSV. Empty results show an empty state. Exclude unknown/empty identities, but do not reapply the current confidence threshold at display time; capture-time gating already controls eligibility and historical rows must survive later threshold changes. Escape text cells that begin with spreadsheet formula characters (`=`, `+`, `-`, `@`) in the CSV export.
 
 - [ ] **Step 1: Add attendance query/view tests**
 
@@ -339,13 +339,15 @@ def test_attendance_frame_keeps_realtime_dates_separate_from_video_offsets():
     ])
 
     assert list(frame.columns) == [
-        "Person", "Source", "Observed (UTC)", "Video", "Clip Time",
-        "Confidence", "Track ID",
+        "Person", "Source", "Observed (UTC)", "Video", "Source Ref",
+        "Clip Time", "Confidence", "Track ID",
     ]
     assert frame.iloc[0]["Observed (UTC)"] == "2026-10-05T12:30:00+00:00"
+    assert frame.iloc[0]["Source Ref"] == "run-1"
     assert frame.iloc[0]["Clip Time"] == ""
     assert frame.iloc[1]["Observed (UTC)"] == ""
     assert frame.iloc[1]["Video"] == "a.mp4"
+    assert frame.iloc[1]["Source Ref"] == "C:/videos/a.mp4"
     assert frame.iloc[1]["Clip Time"] == "01:00"
 
 
@@ -356,46 +358,72 @@ def test_clip_offset_formatting_handles_minute_and_hour_boundaries():
     assert format_clip_offset(3600000) == "1:00:00"
 
 
-def test_attendance_filter_uses_recognition_threshold_and_excludes_unknown():
+def test_attendance_filter_excludes_unresolved_but_keeps_historical_confidence():
     rows = [
-        {"person_name": "Alice", "confidence": 0.70},
-        {"person_name": "Bob", "confidence": 0.699},
-        {"person_name": "UNKNOWN", "confidence": 0.95},
-        {"person_name": "Missing", "confidence": None},
+        {"person_id": 1, "person_name": "Alice", "confidence": 0.40},
+        {"person_id": None, "person_name": "UNKNOWN", "confidence": 0.95},
+        {"person_id": None, "person_name": "Bob", "confidence": 0.95},
+        {"person_id": 2, "person_name": "", "confidence": 0.95},
+        {"person_id": 3, "person_name": "Missing confidence", "confidence": None},
     ]
 
-    assert filter_visible_attendance(rows, threshold=0.70) == [rows[0]]
+    assert filter_visible_attendance(rows) == [rows[0]]
 
 
-def test_attendance_csv_exports_exact_frame_columns():
+def test_attendance_csv_exports_exact_columns_and_sanitizes_formulas():
     frame = build_attendance_frame([{
-        "person_name": "Alice", "source": "video", "observed_at_utc": None,
+        "person_name": "=1+1", "person_id": 1, "source": "video", "observed_at_utc": None,
         "media_offset_ms": 0, "confidence": 0.9, "track_id": 1,
         "source_ref": "C:/videos/a.mp4",
     }])
 
     csv_text = attendance_frame_to_csv(frame).decode("utf-8-sig")
     assert csv_text.splitlines()[0] == (
-        "Person,Source,Observed (UTC),Video,Clip Time,Confidence,Track ID"
+        "Person,Source,Observed (UTC),Video,Source Ref,Clip Time,Confidence,Track ID"
     )
-    assert "Alice,video,,a.mp4,00:00,0.9,1" in csv_text
+    assert "'=1+1,video,,a.mp4,C:/videos/a.mp4,00:00,0.9,1" in csv_text
+```
+
+Add a DB integration test in `tests/test_attendance_view.py`: create a person/event with `database.record_attendance_event`, call `database.fetch_attendance()` to get actual `sqlite3.Row` objects, pass them through `filter_visible_attendance`, `build_attendance_frame`, and `attendance_frame_to_csv`, and assert the row survives and appears in the CSV. Add filter tests that exclude null `person_id`, empty/UNKNOWN names, and missing confidence, but retain a known historical confidence below the current threshold. Add a CSV test that prefixes text cells beginning with `=`, `+`, `-`, or `@` with an apostrophe; do not alter numeric confidence/track cells.
+
+```python
+import database
+
+
+def test_sqlite_rows_flow_through_filter_frame_and_csv(tmp_path, monkeypatch):
+    monkeypatch.setattr(database, "DB_PATH", tmp_path / "faces.db")
+    database.init_db()
+    person_id = database.create_person("Alice")
+    database.record_attendance_event(
+        person_id=person_id, person_name="Alice", source="realtime",
+        source_ref="run-1", track_id=1, confidence=0.9,
+        observed_at_utc="2026-10-05T12:30:00+00:00",
+    )
+
+    rows = database.fetch_attendance()
+    visible = filter_visible_attendance(rows)
+    frame = build_attendance_frame(visible)
+    csv_text = attendance_frame_to_csv(frame).decode("utf-8-sig")
+
+    assert len(frame) == 1
+    assert "Alice,realtime,2026-10-05T12:30:00+00:00,run-1" in csv_text
 ```
 
 - [ ] **Step 2: Run focused tests and verify RED**
 
 Run: `.\directmlvenv\Scripts\python.exe -m pytest tests/test_attendance_view.py -q`
 
-Expected: module collection fails because `attendance_view` and its formatters do not exist.
+Expected: the new SQLite-row integration test fails when `.get()` is called on `sqlite3.Row`; the Source Ref assertion and CSV formula-safety assertion also fail against the current frame/export helpers.
 
 - [ ] **Step 3: Add the tab and view**
 
-Add `filter_visible_attendance`, `format_clip_offset`, `build_attendance_frame`, and `attendance_frame_to_csv` in `attendance_view.py`. Filter with `config.RECOGNITION_THRESHOLD`, excluding unknown labels and missing confidence. Format offsets as `MM:SS`, switching to `H:MM:SS` at one hour; preserve UTC values in realtime rows and keep video date fields empty. In `app.py`, import and pass `RECOGNITION_THRESHOLD`, add `render_attendance()`, and register an `Attendance` tab. Unpack all four values returned by `list_persons()`. Provide source and person filters, fetch matching DB events, apply `filter_visible_attendance`, render the returned frame, and wire CSV download to exactly `attendance_frame_to_csv(frame)`. Include an empty state.
+Add `filter_visible_attendance`, `format_clip_offset`, `build_attendance_frame`, and `attendance_frame_to_csv` in `attendance_view.py`. Filter to non-null person IDs, non-empty/non-UNKNOWN names, and present confidence; do not reapply the current threshold to historical rows. Format offsets as `MM:SS`, switching to `H:MM:SS` at one hour; preserve UTC values in realtime rows and keep video date fields empty. In `app.py`, add `render_attendance()` and register an `Attendance` tab. Unpack all four values returned by `list_persons()`. Provide source and person filters, fetch matching DB events, pass actual `sqlite3.Row` values through the tolerant pure helpers, render the returned frame, and wire CSV download to exactly `attendance_frame_to_csv(frame)`. Include an empty state.
 
 - [ ] **Step 4: Run attendance/database UI-preparation tests**
 
 Run: `.\directmlvenv\Scripts\python.exe -m pytest tests/test_attendance_view.py -q`
 
-Expected: the frame, time formatting, and CSV tests pass.
+Expected: SQLite-row integration, historical visibility, time formatting, and CSV-safety tests pass.
 
 - [ ] **Step 5: Commit**
 

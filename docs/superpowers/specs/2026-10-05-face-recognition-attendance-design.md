@@ -55,7 +55,7 @@ For realtime, generate a fresh run ID when a camera recognition process starts a
 
 ## User Experience
 
-Add an `Attendance` tab to the existing Streamlit navigation. Show a dense, filterable table with person, source, observation time or clip offset, confidence, track ID, and source reference. Realtime rows use wall-clock time; video rows visibly use clip-relative `mm:ss` and the input video name. Provide source/person filters and CSV download. Do not present video clip offsets as dates.
+Add an `Attendance` tab to the existing Streamlit navigation. Show a dense, filterable table with person, source, observation time or clip offset, video name, source reference/run ID, confidence, and track ID. Realtime rows use wall-clock time; video rows visibly use clip-relative `mm:ss` and the input video name. Provide source/person filters and CSV download. Protect spreadsheet CSV exports by escaping formula-leading text cells. Do not present video clip offsets as dates. Attendance eligibility is determined at capture time using the configured threshold; do not hide historical rows when that threshold is later changed.
 
 ## Testing
 
