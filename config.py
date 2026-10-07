@@ -15,6 +15,7 @@ UNKNOWN_FACES_DIR = BASE_DIR / "unknown_faces"
 UNKNOWN_VOICES_DIR = BASE_DIR / "unknown_voices"
 INITIAL_VIDEO_DIR = BASE_DIR / "initialVideo"
 TRACKED_VIDEO_DIR = BASE_DIR / "trackedVideo"
+WORKFLOW_TEMP_DIR = BASE_DIR / ".workflow-temp"
 LIVE_VIDEO_DIR = BASE_DIR / "live"
 LOG_DIR = BASE_DIR / "logs"
 

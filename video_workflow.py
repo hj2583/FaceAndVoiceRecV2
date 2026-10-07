@@ -71,9 +71,14 @@ def _sibling_root(path: Path) -> Path:
 
 
 def _workflow_temp_dir(output_path: Path) -> Path:
+    config.WORKFLOW_TEMP_DIR.mkdir(parents=True, exist_ok=True)
     tracked_output_dir = output_path.parent
-    sibling_root = _sibling_root(tracked_output_dir)
-    return Path(tempfile.mkdtemp(prefix=f".{tracked_output_dir.name}-workflow-", dir=str(sibling_root)))
+    return Path(
+        tempfile.mkdtemp(
+            prefix=f".{tracked_output_dir.name}-workflow-",
+            dir=str(config.WORKFLOW_TEMP_DIR),
+        )
+    )
 
 
 def _try_audio_only_mux(annotated_video: Path, source_video: Path, output_path: Path):

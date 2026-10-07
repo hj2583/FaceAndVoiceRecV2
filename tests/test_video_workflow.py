@@ -8,6 +8,17 @@ from subtitle_renderer import SubtitleWord, VideoMuxError
 import video_workflow
 
 
+def test_workflow_temp_dir_uses_configured_folder(tmp_path, monkeypatch):
+    workflow_temp_root = tmp_path / "workflow-temp"
+    monkeypatch.setattr(config, "WORKFLOW_TEMP_DIR", workflow_temp_root)
+
+    temp_dir = video_workflow._workflow_temp_dir(tmp_path / "tracked" / "output.mp4")
+
+    assert temp_dir.parent == workflow_temp_root
+    assert temp_dir.name.startswith(".tracked-workflow-")
+    temp_dir.rmdir()
+
+
 def test_workflow_passes_face_events_to_transcription(tmp_path, monkeypatch):
     video_path = tmp_path / "meeting.mp4"
     video_path.write_bytes(b"video")
