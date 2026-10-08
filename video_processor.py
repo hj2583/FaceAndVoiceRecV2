@@ -54,6 +54,7 @@ from face_core import (
 from tracking import CentroidTracker
 from frame_pipeline import run_threaded_pipeline
 from speaker_attribution import FaceObservation, SpeakerAttributor
+from ffmpeg_utils import find_ffmpeg
 
 
 # ============================================================
@@ -70,14 +71,11 @@ MAX_RECOGNITION_FAILURES = 3
 # ============================================================
 
 def get_ffmpeg():
-    from shutil import which
-
-    path = which("ffmpeg")
+    path = find_ffmpeg()
 
     if not path:
         raise RuntimeError(
-            "FFmpeg was not found in PATH. "
-            "Install FFmpeg and add it to PATH."
+            "FFmpeg was not found. Install project requirements or add FFmpeg to PATH."
         )
 
     return path

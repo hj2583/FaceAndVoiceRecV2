@@ -399,9 +399,9 @@ def test_mux_tracked_video_missing_ffmpeg_raises(tmp_path, monkeypatch):
     annotated_video.write_bytes(b"annotated")
     source_video.write_bytes(b"source")
 
-    monkeypatch.setattr("subtitle_renderer.shutil.which", lambda _bin: None)
+    monkeypatch.setattr("subtitle_renderer.find_ffmpeg", lambda: None)
 
-    with pytest.raises(VideoMuxError, match="FFmpeg was not found in PATH"):
+    with pytest.raises(VideoMuxError, match="FFmpeg was not found"):
         mux_tracked_video(annotated_video, source_video, output_path)
 
 

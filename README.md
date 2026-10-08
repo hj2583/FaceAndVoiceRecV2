@@ -9,12 +9,36 @@ This project is built to run comfortably on CPU by default. If CUDA is available
 The system combines:
 
 - UniFace SCRFD + ArcFace for face detection and embedding extraction
+- UniFace FaceMesh for facial landmarks and mouth-motion measurements
 - OpenCV for fallback detection and video handling
 - SQLite for person and identity storage
 - NumPy for face-index matching
 - Silero VAD for speech activity detection
-- Whisper for optional transcription
+- OpenAI Whisper for optional transcription
+- SpeechBrain ECAPA-TDNN for voice embeddings and speaker clustering
 - Streamlit for the web UI
+
+## Models and processing flow
+
+No single model handles face recognition, speaker attribution, transcription,
+and attendance. The application combines these models and processing stages:
+
+| Component | Model or tool | Purpose |
+|---|---|---|
+| Face detection | UniFace SCRFD (larger model for uploaded videos, lighter model for realtime) | Detects face locations in video frames. |
+| Face recognition | UniFace ArcFace | Converts a face into a 512-dimensional embedding and compares it with enrolled face embeddings using cosine similarity and a confidence threshold. |
+| Facial landmarks | UniFace FaceMesh | Locates facial features, including the mouth, to measure mouth opening and motion. |
+| Speech detection | Silero VAD | Finds speech regions in audio; it does not generate transcript text. |
+| Transcription | OpenAI Whisper (`small`) | Converts extracted audio into text and timestamps. FFmpeg extracts audio from uploaded video. Whisper does not identify speakers. |
+| Voice embeddings | SpeechBrain ECAPA-TDNN | Represents voice samples numerically; the project uses embeddings to cluster speech and attempt matching against enrolled voice samples. |
+| Active-speaker estimate | Application logic combining VAD, FaceMesh, face confidence, and timing | Estimates which visible face is speaking. This is a fusion of signals, not a single speaker-identification model. |
+| Identity storage and matching | SQLite and NumPy | Stores people and their embeddings, then compares face embeddings against enrolled samples. |
+| Attendance | Application logic and SQLite | Records a known person when the video or realtime pipeline recognizes their face with sufficient confidence. |
+
+Face and voice enrollment are independent: enroll face samples for visual
+identity recognition, and enroll clean voice samples to support voice matching.
+Voice activity or an unknown face alone is not enough to create a known-person
+attendance record. Transcript and attendance data are stored in SQLite.
 
 ## Features
 
@@ -143,6 +167,6 @@ python -m pip check
 
 ## Troubleshooting
 
-- If `ffmpeg` is not found, install FFmpeg and add its `bin` folder to PATH.
+- FFmpeg is taken from PATH when available; otherwise the `imageio-ffmpeg` dependency supplies a bundled executable.
 - If realtime startup fails, inspect the latest log file under `logs/`.
 - If CUDA is unavailable, do not worry; CPU mode is supported.

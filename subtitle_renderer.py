@@ -7,6 +7,7 @@ import subprocess
 import tempfile
 import uuid
 import config
+from ffmpeg_utils import find_ffmpeg
 
 
 _WORD_JOINER = chr(0x2060)
@@ -325,9 +326,9 @@ def mux_tracked_video(annotated_video, source_video, output_path, subtitle_path=
     source_video = Path(source_video).resolve()
     subtitle_file = Path(subtitle_path).resolve() if subtitle_path is not None else None
 
-    ffmpeg_bin = ffmpeg or shutil.which("ffmpeg")
+    ffmpeg_bin = ffmpeg or find_ffmpeg()
     if ffmpeg_bin is None:
-        raise VideoMuxError("FFmpeg was not found in PATH")
+        raise VideoMuxError("FFmpeg was not found. Install project requirements or add FFmpeg to PATH")
 
     subtitle_cwd = str(subtitle_file.parent) if subtitle_file is not None else None
 

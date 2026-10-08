@@ -18,6 +18,7 @@ import config
 from subtitle_renderer import SubtitleWord
 import voice_core
 from audio_core import detect_speech_segments
+from ffmpeg_utils import find_ffmpeg
 
 
 logger = logging.getLogger(__name__)
@@ -238,9 +239,9 @@ def extract_audio_from_video(video_path: str | Path, output_path: str | Path) ->
     if not video_path.exists():
         raise FileNotFoundError(video_path)
 
-    ffmpeg = shutil.which("ffmpeg")
+    ffmpeg = find_ffmpeg()
     if ffmpeg is None:
-        raise RuntimeError("FFmpeg was not found in PATH")
+        raise RuntimeError("FFmpeg was not found. Install project requirements or add FFmpeg to PATH")
 
     output_path.parent.mkdir(parents=True, exist_ok=True)
     result = subprocess.run(
