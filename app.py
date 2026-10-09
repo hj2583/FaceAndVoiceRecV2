@@ -1,4 +1,5 @@
 import html
+import io
 import json
 import os
 import sqlite3
@@ -39,8 +40,10 @@ from config import (
     INITIAL_VIDEO_DIR,
     KNOWN_FACES_DIR,
     LOG_DIR,
+    TRANSCRIPT_REFINEMENT_ENABLED,
     TRACKED_VIDEO_DIR,
     TRANSCRIPTS_DIR,
+    UNKNOWN_VOICES_DIR,
     UNKNOWN_FACES_DIR,
 )
 from database import (
@@ -54,9 +57,11 @@ from database import (
     list_unknown_samples,
     list_unknown_voice_samples,
     list_unknown_voices,
+    list_voice_enrollments,
     delete_low_quality_unknowns,
     delete_unknown,
     fetch_attendance,
+    reassign_voice_embedding,
     resolve_unknown,
     resolve_unknown_voice,
     update_transcription_segments,
@@ -68,10 +73,11 @@ from video_workflow import TranscriptStageError, process_video_and_transcribe
 from transcription_core import (
     SENTENCE_TYPES,
     TranscriptionSegment,
+    classify_sentence,
     extract_audio_from_video,
-    group_transcript_turns,
+    group_readable_paragraphs,
     process_meeting_transcription,
-    reanalyze_meeting_segments,
+    refresh_readable_transcript,
 )
 import voice_core
 
@@ -139,6 +145,10 @@ def render_realtime():
     rows = fetch_audio_logs("realtime")
 
     if rows:
+        st.caption(
+            "Speaker scores are similarity or activity scores, not calibrated "
+            "identification probabilities."
+        )
         data = []
         for row in rows:
             _id, start, end, name, confidence, source, transcript, track_id = row
@@ -147,7 +157,7 @@ def render_realtime():
                 "End": fmt_time(end),
                 "Person": name or "Unknown",
                 "Track": track_id,
-                "Confidence": round(confidence, 3),
+                "Speaker score (not probability)": round(confidence, 3),
                 "Transcript": transcript or "",
             })
 
@@ -881,6 +891,11 @@ def render_audio_logs():
         st.info("No audio logs yet.")
         return
 
+    st.caption(
+        "Speaker scores are similarity or activity scores, not calibrated "
+        "identification probabilities. Video active-speaker values are lip-motion "
+        "activity scores; realtime values may be voice cosine similarities."
+    )
     data = []
 
     for row in rows:
@@ -892,7 +907,7 @@ def render_audio_logs():
             "Duration": round(float(end) - float(start), 2),
             "Person": name or "Unknown",
             "Track": track_id,
-            "Confidence": round(float(confidence), 3),
+            "Speaker score (not probability)": round(float(confidence), 3),
             "Source": source,
             "Transcript": transcript or "",
         })
@@ -1037,35 +1052,119 @@ def render_transcripts():
     )
 
     with sqlite3.connect(DB_PATH) as connection:
-        needs_analysis = connection.execute(
-            f"""
-            SELECT 1 FROM transcription_segments
-            WHERE meeting_id=? AND (
-                sentence_type IS NULL
-                OR sentence_type NOT IN ({",".join("?" * len(SENTENCE_TYPES))})
-            )
-            LIMIT 1
-            """,
-            (selected_id, *SENTENCE_TYPES),
-        ).fetchone()
-    if needs_analysis or st.button("Re-merge & classify sentences", key=f"reanalyze_{selected_id}"):
-        with st.spinner("Merging speaker turns and classifying sentences..."):
-            reanalyze_meeting_segments(selected_id)
-
-    with sqlite3.connect(DB_PATH) as connection:
         rows = connection.execute(
             """
-            SELECT speaker_label, start_ms, end_ms, text, confidence, sentence_type, segment_id
+            SELECT speaker_label, start_ms, end_ms, text, original_text,
+                   confidence, sentence_type, segment_id
             FROM transcription_segments
             WHERE meeting_id=? ORDER BY start_ms
             """,
             (selected_id,),
         ).fetchall()
+        readable_rows = connection.execute(
+            """
+            SELECT speaker_label, start_ms, end_ms, text, source_segment_ids,
+                   sentence_type, refinement_method, refined_segment_id
+            FROM refined_transcription_segments
+            WHERE meeting_id=? ORDER BY start_ms, refined_segment_id
+            """,
+            (selected_id,),
+        ).fetchall()
+        refinement_run = connection.execute(
+            """
+            SELECT status, method, speaker_change_recommendations, error
+            FROM transcript_refinement_runs WHERE meeting_id=?
+            """,
+            (selected_id,),
+        ).fetchone()
 
     if not rows:
         st.info("This meeting has no transcript segments.")
         return
 
+    if not readable_rows and st.button(
+        "Build readable transcript",
+        key=f"build_readable_{selected_id}",
+    ):
+        with st.spinner("Building a readable view from the detailed transcript..."):
+            refresh_readable_transcript(selected_id, use_llm=False)
+        st.rerun()
+
+    if TRANSCRIPT_REFINEMENT_ENABLED:
+        if st.button(
+            "Refine readable transcript with local Ollama",
+            key=f"refine_readable_{selected_id}",
+        ):
+            with st.spinner("Asking the configured local Ollama model to format the transcript..."):
+                refresh_readable_transcript(selected_id, use_llm=True)
+            st.rerun()
+    else:
+        st.caption(
+            "Local LLM refinement is disabled. Set TRANSCRIPT_REFINEMENT_ENABLED=1 "
+            "before starting the app to enable the Ollama action."
+        )
+
+    if refinement_run:
+        status, method, recommendations_json, refinement_error = refinement_run
+        status_label = (
+            "available (local LLM disabled)"
+            if status == "disabled"
+            else status
+        )
+        st.caption(f"Readable version: {status_label} · {method}")
+        if status == "fallback" and refinement_error:
+            st.warning(
+                f"LLM refinement failed; the deterministic version is shown. "
+                f"Details: {refinement_error}"
+            )
+        try:
+            recommendations = json.loads(recommendations_json or "[]")
+        except json.JSONDecodeError:
+            recommendations = []
+        for recommendation in recommendations:
+            st.info(
+                f"Review speaker attribution after detailed segment "
+                f"#{recommendation['after_segment_id']} against the audio: "
+                f"{recommendation['reason']}"
+            )
+
+    view_kind = st.radio(
+        "Transcript view",
+        ["Readable", "Detailed", "Whisper source"],
+        horizontal=True,
+        key=f"transcript_view_{selected_id}",
+    )
+
+    is_readable_view = view_kind == "Readable" and bool(readable_rows)
+    is_whisper_source_view = view_kind == "Whisper source"
+    readable_segments = []
+    if is_readable_view:
+        for (
+            speaker, start_ms, end_ms, text, source_ids,
+            _sentence_type, _method, _refined_id,
+        ) in readable_rows:
+            try:
+                parsed_source_ids = json.loads(source_ids)
+                if not isinstance(parsed_source_ids, list) or any(
+                    isinstance(segment_id, bool) or not isinstance(segment_id, int)
+                    for segment_id in parsed_source_ids
+                ):
+                    raise ValueError("Source segment references must be integer IDs.")
+            except (TypeError, json.JSONDecodeError, ValueError) as error:
+                st.warning(f"Cannot group a readable transcript row with invalid source IDs: {error}")
+                parsed_source_ids = []
+            readable_segments.append(TranscriptionSegment(
+                speaker,
+                int(start_ms),
+                int(end_ms),
+                text,
+                source_segment_ids=tuple(parsed_source_ids),
+            ))
+    readable_paragraphs = (
+        group_readable_paragraphs(readable_segments)
+        if is_readable_view
+        else []
+    )
     original_data = pd.DataFrame(
         [
             {
@@ -1074,105 +1173,147 @@ def render_transcripts():
                 "End": fmt_time(end_ms / 1000),
                 "Type": sentence_type or "",
                 "Text": text,
-                "Confidence": confidence,
+                "Whisper score (heuristic)": confidence,
+                "source_segment_ids": json.dumps([segment_id]),
                 "segment_id": segment_id,
             }
-            for speaker, start_ms, end_ms, text, confidence, sentence_type, segment_id in rows
+            for (
+                speaker, start_ms, end_ms, text, _whisper_text, confidence,
+                sentence_type, segment_id,
+            ) in rows
+        ]
+    )
+    whisper_source_data = pd.DataFrame(
+        [
+            {
+                "Speaker": speaker,
+                "Start": fmt_time(start_ms / 1000),
+                "End": fmt_time(end_ms / 1000),
+                "Type": sentence_type or "",
+                "Text": whisper_text if whisper_text is not None else text,
+                "Whisper score (heuristic)": confidence,
+                "source_segment_ids": json.dumps([segment_id]),
+                "segment_id": segment_id,
+            }
+            for (
+                speaker, start_ms, end_ms, text, whisper_text, confidence,
+                sentence_type, segment_id,
+            ) in rows
         ]
     )
 
+    if is_readable_view:
+        display_data = pd.DataFrame(
+            [
+                {
+                    "Speaker": (
+                        paragraph.speaker_labels[0]
+                        if len(paragraph.speaker_labels) == 1
+                        else "Mixed/uncertain attribution"
+                    ),
+                    "Speaker labels": " · ".join(paragraph.speaker_labels),
+                    "Start": fmt_time(paragraph.start_ms / 1000),
+                    "End": fmt_time(paragraph.end_ms / 1000),
+                    "Type": classify_sentence(paragraph.text),
+                    "Text": paragraph.text,
+                    "Whisper score (heuristic)": None,
+                    "source_segment_ids": json.dumps(paragraph.source_segment_ids),
+                    "segment_id": (
+                        paragraph.source_segment_ids[0]
+                        if paragraph.source_segment_ids
+                        else None
+                    ),
+                }
+                for paragraph in readable_paragraphs
+            ]
+        )
+    else:
+        display_data = whisper_source_data if is_whisper_source_view else original_data
+
     with st.container():
-        present_types = [t for t in SENTENCE_TYPES if t in set(original_data["Type"])]
+        present_types = [t for t in SENTENCE_TYPES if t in set(display_data["Type"])]
         selected_types = st.multiselect(
             "Filter by type",
             present_types,
             key=f"type_filter_{selected_id}",
         )
         visible_data = (
-            original_data[original_data["Type"].isin(selected_types)]
+            display_data[display_data["Type"].isin(selected_types)]
             if selected_types
-            else original_data
+            else display_data
         )
 
         st.caption(
-            f"Confidence below {LOW_CONFIDENCE_WARN} is yellow, "
-            f"below {LOW_CONFIDENCE_BAD} is red. Consecutive entries by the same speaker are shown together."
+            "Whisper score (heuristic) is derived from avg_logprob; it is not a "
+            "calibrated probability and is not a speaker-match confidence."
+            if not is_readable_view
+            else "The readable view is linked to its detailed source segment IDs."
         )
-        display_segments = [
-            TranscriptionSegment(
-                speaker,
-                start_ms,
-                end_ms,
-                text,
-                confidence,
-                sentence_type,
-            )
-            for speaker, start_ms, end_ms, text, confidence, sentence_type, _segment_id in rows
-        ]
-        for turn in group_transcript_turns(display_segments):
-            shown_segments = [
-                segment for segment in turn
-                if not selected_types or segment.sentence_type in selected_types
-            ]
-            if not shown_segments:
-                continue
-
-            start_ms = shown_segments[0].start_ms
-            end_ms = shown_segments[-1].end_ms
-            turn_types = list(dict.fromkeys(
-                segment.sentence_type for segment in shown_segments
-                if segment.sentence_type
-            ))
-            confidences = [
-                segment.confidence for segment in shown_segments
-                if segment.confidence is not None
-            ]
-            lowest_confidence = min(confidences) if confidences else None
-            if lowest_confidence is None or lowest_confidence < LOW_CONFIDENCE_BAD:
+        for record in visible_data.to_dict("records"):
+            score = record["Whisper score (heuristic)"]
+            if score is None or pd.isna(score) or score < LOW_CONFIDENCE_BAD:
                 background = "#ffb3b3"
-            elif lowest_confidence < LOW_CONFIDENCE_WARN:
+            elif score < LOW_CONFIDENCE_WARN:
                 background = "#fff3b0"
             else:
                 background = "transparent"
-
-            confidence_label = (
-                f"Lowest confidence {lowest_confidence:.2f}"
-                if lowest_confidence is not None else "Confidence unavailable"
-            )
-            type_label = ", ".join(turn_types) if turn_types else "Unclassified"
             text_color = "#111" if background != "transparent" else "inherit"
-            st.caption(
-                f"{shown_segments[0].speaker_label} · "
-                f"{fmt_time(start_ms / 1000)}–{fmt_time(end_ms / 1000)} · "
-                f"{type_label} · {confidence_label}"
+            score_label = (
+                f"Whisper score (heuristic) {float(score):.2f}"
+                if score is not None and not pd.isna(score)
+                else "Whisper score unavailable"
             )
-            turn_text = " ".join(segment.text.strip() for segment in shown_segments)
+            source_ids = record["source_segment_ids"]
+            if is_readable_view:
+                try:
+                    source_ids = ", ".join(
+                        f"#{item}" for item in json.loads(source_ids)
+                    )
+                except (TypeError, json.JSONDecodeError):
+                    source_ids = "unavailable"
+                source_label = f" · Source detailed segments {source_ids}"
+                speaker_labels = record["Speaker labels"]
+                speaker_label_text = (
+                    f"{record['Speaker']} · Source speaker labels: {speaker_labels}"
+                    if record["Speaker"] == "Mixed/uncertain attribution"
+                    else record["Speaker"]
+                )
+            else:
+                source_label = f" · Detailed segment #{record['segment_id']}"
+                speaker_label_text = record["Speaker"]
+            st.caption(
+                f"{speaker_label_text} · {record['Start']}–{record['End']} · "
+                f"{record['Type'] or 'Unclassified'} · {score_label}{source_label}"
+            )
             st.markdown(
                 f'<div style="background-color:{background};color:{text_color};padding:0.2rem 0.35rem;'
                 f'white-space:pre-wrap;overflow-wrap:anywhere;margin-bottom:0.8rem">'
-                f'{html.escape(turn_text)}</div>',
+                f'{html.escape(str(record["Text"]))}</div>',
                 unsafe_allow_html=True,
             )
 
         low_confidence = visible_data[
-            visible_data["Confidence"].isna()
-            | (visible_data["Confidence"] < LOW_CONFIDENCE_WARN)
-        ]
+            visible_data["Whisper score (heuristic)"].isna()
+            | (visible_data["Whisper score (heuristic)"] < LOW_CONFIDENCE_WARN)
+        ] if not is_readable_view and not is_whisper_source_view else pd.DataFrame()
         if not low_confidence.empty:
-            st.subheader(f"Review low-confidence sentences ({len(low_confidence)})")
+            st.subheader(f"Review low Whisper-score segments ({len(low_confidence)})")
             edited = st.data_editor(
                 low_confidence,
                 key=f"low_conf_editor_{selected_id}",
                 width="stretch",
                 hide_index=True,
-                disabled=["Speaker", "Start", "End", "Confidence"],
+                disabled=["Speaker", "Start", "End", "Whisper score (heuristic)"],
                 column_config={
+                    "source_segment_ids": None,
                     "segment_id": None,
                     "Type": st.column_config.SelectboxColumn(
                         "Type", options=list(SENTENCE_TYPES), required=True
                     ),
                     "Text": st.column_config.TextColumn("Text", width="large", required=True),
-                    "Confidence": st.column_config.NumberColumn("Confidence", format="%.2f"),
+                    "Whisper score (heuristic)": st.column_config.NumberColumn(
+                        "Whisper score (heuristic)", format="%.2f"
+                    ),
                 },
             )
             if st.button("Save corrections", key=f"save_corrections_{selected_id}"):
@@ -1183,14 +1324,12 @@ def render_transcripts():
                     text = str(record["Text"]).strip()
                     if not text:
                         continue
-                    text_changed = text != before["Text"]
-                    if text_changed or record["Type"] != before["Type"]:
+                    if text != before["Text"] or record["Type"] != before["Type"]:
                         updates.append({
                             "segment_id": int(record["segment_id"]),
                             "text": text,
                             "sentence_type": record["Type"] or None,
-                            # A human-corrected sentence is no longer low confidence.
-                            "confidence": 1.0 if text_changed else before["Confidence"],
+                            "confidence": before["Whisper score (heuristic)"],
                         })
                 if updates:
                     update_transcription_segments(selected_id, updates)
@@ -1200,10 +1339,14 @@ def render_transcripts():
                     st.info("No changes to save.")
 
         original_lines = []
-        for speaker, start_ms, _end_ms, text, _confidence, sentence_type, _segment_id in rows:
+        for (
+            speaker, start_ms, _end_ms, _text, whisper_text, _confidence,
+            sentence_type, _segment_id,
+        ) in rows:
             type_tag = f" ({sentence_type})" if sentence_type else ""
             original_lines.append(
-                f"[{fmt_time(start_ms / 1000)}] {speaker}{type_tag}: {text}"
+                f"[{fmt_time(start_ms / 1000)}] {speaker}{type_tag}: "
+                f"{whisper_text if whisper_text is not None else _text}"
             )
         st.download_button(
             "Download original transcript",
@@ -1212,35 +1355,135 @@ def render_transcripts():
             mime="text/plain",
             key=f"download_original_{selected_id}",
         )
+        if readable_rows:
+            readable_lines = [
+                f"[{fmt_time(start_ms / 1000)}–{fmt_time(end_ms / 1000)}] "
+                f"{speaker}: {text}"
+                for (
+                    speaker, start_ms, end_ms, text, _source_ids,
+                    _sentence_type, _method, _refined_id,
+                ) in readable_rows
+            ]
+            st.download_button(
+                "Download readable transcript",
+                "\n".join(readable_lines),
+                file_name=f"meeting_{selected_id}_readable.txt",
+                mime="text/plain",
+                key=f"download_readable_{selected_id}",
+            )
 
 def render_voice_enrollment():
     st.header("🎙️ Voice Enrollment")
 
-    persons = {name: person_id for person_id, name, _created, _updated in list_persons()}
+    enrollment_generation = st.session_state.setdefault(
+        "voice_enrollment_generation",
+        0,
+    )
+    person_rows = list_persons()
+    persons = {name: person_id for person_id, name, _created, _updated in person_rows}
+    known_voice_root = (KNOWN_FACES_DIR.parent / "known_voices").resolve()
+    unknown_voice_root = Path(UNKNOWN_VOICES_DIR).resolve()
+
+    def load_audio(path):
+        audio_path = Path(path).resolve()
+        if not any(
+            root == audio_path or root in audio_path.parents
+            for root in (known_voice_root, unknown_voice_root)
+        ):
+            raise ValueError("Audio path is outside the application's voice storage.")
+        if not audio_path.is_file():
+            raise FileNotFoundError(f"Audio sample is missing: {audio_path.name}")
+        audio_bytes = audio_path.read_bytes()
+        with wave.open(io.BytesIO(audio_bytes), "rb") as audio_file:
+            duration = audio_file.getnframes() / audio_file.getframerate()
+        return audio_bytes, duration
+
+    def select_audio(label, audio_bytes, mime_type="audio/wav", duration=None):
+        st.session_state["voice_enrollment_playback"] = {
+            "label": label,
+            "audio": audio_bytes,
+            "mime_type": mime_type,
+            "duration": duration,
+        }
+
+    current_playback = st.session_state.get("voice_enrollment_playback")
+    if current_playback:
+        st.caption(f"Selected sample: {current_playback['label']}")
+        try:
+            st.audio(
+                current_playback["audio"],
+                format=current_playback["mime_type"],
+                autoplay=True,
+            )
+        except Exception as error:
+            st.error(f"Could not play this voice sample: {error}")
+        st.caption(
+            "Use the player controls to pause, replay, or seek. Selecting another "
+            "sample replaces this player so voice samples do not play simultaneously."
+        )
 
     st.subheader("Enroll a clean voice sample")
     selected_name = st.selectbox(
         "Person",
-        ["-- Select --"] + list(persons.keys()),
+        ["-- Select --", "➕ Create a new person"] + list(persons.keys()),
         key="voice_enroll_person",
     )
+    new_person_name = None
+    if selected_name == "➕ Create a new person":
+        new_person_name = st.text_input(
+            "New person's name",
+            key="voice_enroll_new_person",
+        )
     uploaded = st.file_uploader(
         "Upload a short voice sample (WAV or MP3)",
         type=["wav", "mp3"],
+        key=f"voice_enrollment_upload_{enrollment_generation}",
     )
     recorded = st.audio_input(
         "Or record a voice sample",
-        key="voice_enrollment_recording",
+        key=f"voice_enrollment_recording_{enrollment_generation}",
     )
-    if st.button("➕ Add Voice Sample", key="add_voice_sample"):
+    sample_payload = recorded.getvalue() if recorded is not None else (
+        uploaded.getvalue() if uploaded is not None else None
+    )
+    sample_mime = "audio/wav"
+    if uploaded is not None and uploaded.name.lower().endswith(".mp3") and recorded is None:
+        sample_mime = "audio/mpeg"
+    if sample_payload:
+        if st.button(
+            "▶ Play uploaded/recorded sample",
+            key=f"preview_voice_enrollment_{enrollment_generation}",
+        ):
+            select_audio(
+                "New voice sample",
+                sample_payload,
+                sample_mime,
+            )
+            st.rerun()
+
+    confirm_enrollment = st.checkbox(
+        "I have listened to this sample and confirm it belongs to the selected person.",
+        key=f"confirm_voice_enrollment_{enrollment_generation}",
+    )
+    if st.button(
+        "➕ Add Voice Sample",
+        key=f"add_voice_sample_{enrollment_generation}",
+    ):
         if selected_name == "-- Select --":
             st.warning("Please select a person first.")
+        elif not confirm_enrollment:
+            st.warning("Listen to the sample and confirm its speaker before saving.")
         elif uploaded is None and recorded is None:
             st.warning("Please upload or record a voice sample first.")
+        elif (
+            selected_name == "➕ Create a new person"
+            and not (new_person_name or "").strip()
+        ):
+            st.warning("Enter a name for the new person.")
         else:
             try:
                 if recorded is not None:
-                    pcm = read_wav_pcm(recorded)
+                    pcm = read_wav_pcm(io.BytesIO(recorded.getvalue()))
                 elif uploaded.name.lower().endswith(".mp3"):
                     with tempfile.TemporaryDirectory() as tmp_dir:
                         mp3_path = Path(tmp_dir) / "upload.mp3"
@@ -1248,61 +1491,275 @@ def render_voice_enrollment():
                         wav_path = extract_audio_from_video(mp3_path, Path(tmp_dir) / "upload.wav")
                         pcm = read_wav_pcm(wav_path)
                 else:
-                    pcm = read_wav_pcm(uploaded)
+                    pcm = read_wav_pcm(io.BytesIO(uploaded.getvalue()))
             except (ValueError, wave.Error, EOFError) as error:
                 st.error(f"Invalid audio file (expected 16kHz mono 16-bit PCM): {error}")
-            except RuntimeError as error:
+            except (OSError, RuntimeError) as error:
                 st.error(f"Could not convert the uploaded MP3: {error}")
             else:
                 embedding = voice_core.extract_voice_embedding(pcm)
                 if embedding is None:
                     st.error("Could not extract a voice embedding from this sample.")
                 else:
-                    person_id = persons[selected_name]
-                    embedding_dir = KNOWN_FACES_DIR.parent / "known_voices" / str(person_id)
-                    embedding_dir.mkdir(parents=True, exist_ok=True)
-                    embedding_path = embedding_dir / f"{person_id}_{uuid.uuid4().hex}.npy"
-                    np.save(embedding_path, embedding)
-                    add_voice_embedding(person_id, embedding_path, quality=1.0)
-                    st.success(f"Voice sample added for {selected_name}.")
-                    st.rerun()
+                    embedding_path = None
+                    audio_path = None
+                    try:
+                        person_id = (
+                            persons[selected_name]
+                            if selected_name != "➕ Create a new person"
+                            else create_person(new_person_name.strip())
+                        )
+                        embedding_dir = known_voice_root / str(person_id)
+                        embedding_dir.mkdir(parents=True, exist_ok=True)
+                        sample_id = uuid.uuid4().hex
+                        embedding_path = embedding_dir / f"{person_id}_{sample_id}.npy"
+                        audio_path = embedding_dir / f"{person_id}_{sample_id}.wav"
+                        np.save(embedding_path, embedding)
+                        with wave.open(str(audio_path), "wb") as audio_file:
+                            audio_file.setnchannels(1)
+                            audio_file.setsampwidth(2)
+                            audio_file.setframerate(16000)
+                            audio_file.writeframes(pcm)
+                        add_voice_embedding(
+                            person_id,
+                            embedding_path,
+                            quality=1.0,
+                            audio_path=audio_path,
+                        )
+                    except (OSError, ValueError, sqlite3.Error, wave.Error) as error:
+                        for artifact_path in (embedding_path, audio_path):
+                            if artifact_path is not None:
+                                try:
+                                    artifact_path.unlink(missing_ok=True)
+                                except OSError as cleanup_error:
+                                    st.error(
+                                        f"Could not clean up failed voice-sample file "
+                                        f"{artifact_path.name}: {cleanup_error}"
+                                    )
+                        st.error(f"Could not save this voice sample: {error}")
+                    else:
+                        saved_name = (
+                            new_person_name.strip()
+                            if selected_name == "➕ Create a new person"
+                            else selected_name
+                        )
+                        st.success(f"Voice sample added for {saved_name}.")
+                        st.session_state["voice_enrollment_generation"] = (
+                            enrollment_generation + 1
+                        )
+                        st.session_state.pop("voice_enrollment_playback", None)
+                        st.rerun()
+
+    voice_enrollments = list_voice_enrollments()
+    with st.expander(
+        f"Saved enrolled voice samples ({len(voice_enrollments)})",
+        expanded=False,
+    ):
+        if not voice_enrollments:
+            st.info("No voice samples have been enrolled yet.")
+        else:
+            for embedding_id, person_id, person_name, _embedding_path, audio_path, quality, created_at in voice_enrollments:
+                with st.container(border=True):
+                    st.markdown(f"**Sample #{embedding_id} · {person_name}**")
+                    st.caption(
+                        f"Person ID: {person_id} · Status: Enrolled · "
+                        f"Quality: {float(quality or 0.0):.2f} · Added: {created_at}"
+                    )
+                    if audio_path:
+                        try:
+                            audio_bytes, duration = load_audio(audio_path)
+                            st.caption(f"Duration: {fmt_time(duration)}")
+                            if st.button(
+                                f"▶ Play sample #{embedding_id}",
+                                key=f"play_enrolled_voice_{embedding_id}",
+                            ):
+                                select_audio(
+                                    f"Enrolled sample #{embedding_id} · {person_name}",
+                                    audio_bytes,
+                                    duration=duration,
+                                )
+                                st.rerun()
+                        except (OSError, ValueError, wave.Error, EOFError) as error:
+                            st.error(f"Sample #{embedding_id} audio is unavailable: {error}")
+                    else:
+                        st.warning(
+                            "No original audio was saved for this older enrollment; "
+                            "only its voice embedding is available."
+                        )
+                    edit_key = f"edit_enrolled_voice_{embedding_id}"
+                    if st.button(
+                        "✏️ Edit person",
+                        key=f"edit_enrolled_voice_button_{embedding_id}",
+                    ):
+                        st.session_state["editing_voice_enrollment_id"] = embedding_id
+                    if st.session_state.get("editing_voice_enrollment_id") == embedding_id:
+                        person_names = list(persons)
+                        selected_index = next(
+                            (
+                                index
+                                for index, name in enumerate(person_names)
+                                if persons[name] == person_id
+                            ),
+                            None,
+                        )
+                        if selected_index is None:
+                            st.error(
+                                "The currently assigned person is unavailable. "
+                                "Refresh the person list before editing this sample."
+                            )
+                        else:
+                            with st.form(edit_key):
+                                replacement_name = st.selectbox(
+                                    "Assign this saved sample to",
+                                    person_names,
+                                    index=selected_index,
+                                    key=f"{edit_key}_person",
+                                )
+                                save_assignment = st.form_submit_button(
+                                    "Save person assignment"
+                                )
+                                cancel_assignment = st.form_submit_button("Cancel")
+                            if cancel_assignment:
+                                st.session_state.pop(
+                                    "editing_voice_enrollment_id",
+                                    None,
+                                )
+                                st.rerun()
+                            if save_assignment:
+                                try:
+                                    if reassign_voice_embedding(
+                                        embedding_id,
+                                        persons[replacement_name],
+                                    ):
+                                        st.session_state.pop(
+                                            "editing_voice_enrollment_id",
+                                            None,
+                                        )
+                                        st.success(
+                                            f"Sample #{embedding_id} is now assigned "
+                                            f"to {replacement_name}."
+                                        )
+                                        st.rerun()
+                                    else:
+                                        st.error(
+                                            f"Saved voice sample #{embedding_id} "
+                                            "could not be found."
+                                        )
+                                except (TypeError, ValueError, sqlite3.Error) as error:
+                                    st.error(
+                                        f"Could not change the person for sample "
+                                        f"#{embedding_id}: {error}"
+                                    )
 
     st.subheader("Unresolved unknown voices")
     unknown_voices = list_unknown_voices()
     if not unknown_voices:
         st.info("No unresolved unknown voices.")
-        return
+    else:
+        for unknown_voice_id, label, embedding_path, created_at, resolved_person_id in unknown_voices:
+            with st.container(border=True):
+                st.markdown(f"### ❓ {label} (Unknown voice #{unknown_voice_id})")
+                sample_rows = list_unknown_voice_samples(unknown_voice_id)
+                st.caption(
+                    f"Samples: {len(sample_rows)} · Created: {created_at} · "
+                    f"Status: {'Resolved' if resolved_person_id else 'Unresolved'}"
+                )
+                if not sample_rows and embedding_path:
+                    st.warning(
+                        "This legacy voice record has an embedding but no playable "
+                        "audio sample was preserved."
+                    )
+                for sample_id, sample_embedding, quality, sample_created, sample_audio, source_ref, start_ms, end_ms in sample_rows:
+                    st.markdown(f"**Sample #{sample_id}**")
+                    duration_text = "Duration unavailable"
+                    if start_ms is not None and end_ms is not None:
+                        duration_text = f"Duration: {fmt_time((end_ms - start_ms) / 1000)}"
+                    st.caption(
+                        f"{duration_text} · Quality: {float(quality or 0.0):.2f} · "
+                        f"Recorded: {sample_created}"
+                    )
+                    if sample_audio:
+                        try:
+                            audio_bytes, duration = load_audio(sample_audio)
+                            st.caption(f"Audio duration: {fmt_time(duration)}")
+                            if st.button(
+                                f"▶ Play sample #{sample_id}",
+                                key=f"play_unknown_voice_{sample_id}",
+                            ):
+                                select_audio(
+                                    f"{label} · sample #{sample_id}",
+                                    audio_bytes,
+                                    duration=duration,
+                                )
+                                st.rerun()
+                        except (OSError, ValueError, wave.Error, EOFError) as error:
+                            st.error(f"Sample #{sample_id} audio is unavailable: {error}")
+                    else:
+                        st.warning(
+                            "No original audio was saved for this sample, so it cannot "
+                            "be played. Reprocess its source video after updating the app."
+                        )
 
-    for unknown_voice_id, label, embedding_path, created_at, _resolved in unknown_voices:
-        with st.container(border=True):
-            st.markdown(f"### ❓ {label} (#{unknown_voice_id})")
-            sample_count = len(list_unknown_voice_samples(unknown_voice_id))
-            st.caption(
-                f"Samples: {sample_count}  •  Created: {created_at}"
-            )
-
-            if st.button("🗑️ Delete", key=f"delete_unknown_voice_{unknown_voice_id}"):
-                if delete_unknown_voice(unknown_voice_id):
-                    st.rerun()
-                else:
+                if st.button(
+                    "🗑️ Delete unresolved voice",
+                    key=f"delete_unknown_voice_{unknown_voice_id}",
+                ):
+                    if delete_unknown_voice(unknown_voice_id):
+                        st.rerun()
                     st.warning("This unknown voice is no longer unresolved.")
 
-            assign_name = st.selectbox(
-                "Assign to person",
-                ["-- Select --"] + list(persons.keys()),
-                key=f"assign_voice_{unknown_voice_id}",
-            )
-            if st.button("✅ Assign", key=f"assign_voice_btn_{unknown_voice_id}"):
-                if assign_name == "-- Select --":
-                    st.warning("Please select a person first.")
-                elif not os.path.exists(embedding_path):
-                    st.error("The stored embedding for this unknown voice is missing.")
-                else:
-                    person_id = persons[assign_name]
-                    add_voice_embedding(person_id, embedding_path, quality=0.7)
-                    resolve_unknown_voice(unknown_voice_id, person_id)
-                    st.success(f"{label} assigned to {assign_name}.")
-                    st.rerun()
+                with st.form(f"resolve_unknown_voice_{unknown_voice_id}"):
+                    assignment_kind = st.radio(
+                        "Assign this voice to",
+                        ["Existing person", "Create new person"],
+                        key=f"assignment_kind_{unknown_voice_id}",
+                        horizontal=True,
+                    )
+                    person_id = None
+                    new_name = None
+                    if assignment_kind == "Existing person":
+                        if persons:
+                            selected_person = st.selectbox(
+                                "Person",
+                                list(persons.keys()),
+                                key=f"assign_voice_{unknown_voice_id}",
+                            )
+                            person_id = persons[selected_person]
+                        else:
+                            st.info("No people exist yet; choose Create new person.")
+                    else:
+                        new_name = st.text_input(
+                            "New person's name",
+                            key=f"new_voice_person_{unknown_voice_id}",
+                        )
+                    confirmed = st.checkbox(
+                        "I listened to this sample and confirm the speaker's identity.",
+                        key=f"confirm_unknown_voice_{unknown_voice_id}",
+                    )
+                    submitted = st.form_submit_button("✅ Confirm and save voice profile")
+                if submitted:
+                    if not confirmed:
+                        st.warning("Confirm the speaker identity before saving.")
+                    elif assignment_kind == "Existing person" and person_id is None:
+                        st.warning("Select an existing person or choose Create new person.")
+                    elif assignment_kind == "Create new person" and not (new_name or "").strip():
+                        st.warning("Enter a name for the new person.")
+                    else:
+                        try:
+                            resolved_id = resolve_unknown_voice(
+                                unknown_voice_id,
+                                person_id=person_id,
+                                new_person_name=new_name if assignment_kind == "Create new person" else None,
+                            )
+                            resolved_name = next(
+                                name
+                                for person_id, name, _created_at, _updated_at in list_persons()
+                                if person_id == resolved_id
+                            )
+                            st.success(f"{label} assigned to {resolved_name}.")
+                            st.rerun()
+                        except (OSError, ValueError) as error:
+                            st.error(f"Could not save the voice assignment: {error}")
 
 
 def main():

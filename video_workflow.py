@@ -1,4 +1,5 @@
 import json
+import logging
 import os
 import shutil
 import tempfile
@@ -16,6 +17,38 @@ from subtitle_renderer import (
 )
 from transcription_core import build_face_event_diarizer, process_meeting_transcription
 from video_processor import process_video_pipeline
+import voice_core
+
+
+logger = logging.getLogger(__name__)
+
+
+def _build_video_diarizer(speech_events):
+    face_diarize = build_face_event_diarizer(speech_events)
+    known_speaker_events = [
+        event
+        for event in speech_events
+        if isinstance(event, dict)
+        and event.get("person_id") is not None
+        and str(event.get("speaker") or event.get("person_name") or "").strip().upper()
+        not in {"", "UNKNOWN"}
+    ]
+
+    def diarize(audio_path, speech_regions):
+        if speech_regions is None:
+            return face_diarize(audio_path, speech_regions)
+        try:
+            voice_intervals = voice_core.diarize_meeting_audio(
+                audio_path,
+                speech_regions,
+                known_speaker_events=known_speaker_events,
+            )
+        except Exception:
+            logger.exception("Voice diarization failed; using face-attributed speech events")
+            voice_intervals = []
+        return voice_intervals or face_diarize(audio_path, speech_regions)
+
+    return diarize
 
 
 class TranscriptStageError(RuntimeError):
@@ -157,7 +190,7 @@ def process_video_and_transcribe(
         subtitle_words: list[SubtitleWord] = []
         try:
             speech_events = _load_speech_events(log_path)
-            diarize = build_face_event_diarizer(speech_events)
+            diarize = _build_video_diarizer(speech_events)
             meeting_id = process_meeting_transcription(
                 video_path,
                 diarize=diarize,

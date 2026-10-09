@@ -6,14 +6,20 @@ embedding, then match it against enrolled voiceprints by cosine similarity.
 
 import logging
 import json
+import hashlib
 import threading
 import uuid
+import wave
 from pathlib import Path
 
 import numpy as np
 
 import config
-from database import get_conn, list_voice_embeddings
+from database import (
+    get_conn,
+    list_resolved_unknown_voice_samples_for_source,
+    list_voice_embeddings,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -124,43 +130,80 @@ def has_enrolled_voiceprints():
     return bool(list_voice_embeddings())
 
 
-def match_voice_embedding(query_embedding, threshold=None, ambiguity_margin=None):
-    """Compare a query embedding against every enrolled voiceprint.
+def diagnose_voice_embedding_match(
+    query_embedding,
+    threshold=None,
+    ambiguity_margin=None,
+):
+    """Rank enrolled profiles and explain why an identity was or was not accepted.
 
-    Returns {"person_id", "person_name", "similarity"} or None.
+    Scores are cosine similarities, not calibrated identification probabilities.
+    Exact duplicate embeddings count as one supporting enrollment sample.
     """
     threshold = config.VOICE_MATCH_THRESHOLD if threshold is None else threshold
     ambiguity_margin = (
         config.VOICE_AMBIGUITY_MARGIN if ambiguity_margin is None else ambiguity_margin
     )
+    result = {
+        "decision": None,
+        "reason": "no_match",
+        "threshold": float(threshold),
+        "ambiguity_margin_threshold": float(ambiguity_margin),
+        "minimum_supporting_samples": config.VOICE_MATCH_MIN_SUPPORTING_SAMPLES,
+        "candidates": [],
+        "margin": None,
+    }
 
     query = _normalize(query_embedding)
     if query is None:
-        return None
+        result["reason"] = "invalid_query_embedding"
+        return result
 
     rows = list_voice_embeddings()
     if not rows:
-        return None
+        result["reason"] = "no_enrolled_profiles"
+        return result
 
     scores_by_person = {}
+    seen_embeddings = {}
+    invalid_sample_count = 0
     for embedding_id, person_id, person_name, embedding_path, quality in rows:
         path = Path(embedding_path)
         if not path.exists():
+            invalid_sample_count += 1
             continue
         try:
             stored = _normalize(np.load(path))
             if stored is None or stored.shape[0] != EMBEDDING_DIM:
+                invalid_sample_count += 1
                 continue
+            normalized_quality = float(quality or 0.0)
+            if not np.isfinite(normalized_quality):
+                invalid_sample_count += 1
+                continue
+            if normalized_quality < config.VOICE_PROFILE_MIN_QUALITY:
+                continue
+            fingerprint = hashlib.sha256(stored.tobytes()).digest()
+            person_fingerprints = seen_embeddings.setdefault(person_id, set())
+            if fingerprint in person_fingerprints:
+                continue
+            person_fingerprints.add(fingerprint)
             similarity = float(np.dot(query, stored))
             scores_by_person.setdefault(
                 person_id,
                 {"name": person_name, "scores": []},
-            )["scores"].append((similarity, float(quality)))
+            )["scores"].append((similarity, normalized_quality, int(embedding_id)))
         except Exception:
-            logger.exception("Failed loading voice embedding: %s", path)
+            invalid_sample_count += 1
+            logger.warning(
+                "Skipping invalid voice enrollment embedding_id=%s",
+                embedding_id,
+            )
+    result["invalid_sample_count"] = invalid_sample_count
 
     if not scores_by_person:
-        return None
+        result["reason"] = "no_usable_enrollment_samples"
+        return result
 
     person_scores = []
     for person_id, profile in scores_by_person.items():
@@ -170,37 +213,65 @@ def match_voice_embedding(query_embedding, threshold=None, ambiguity_margin=None
             reverse=True,
         )[: config.VOICE_PROFILE_TOP_K]
         weights = np.asarray(
-            [max(0.1, quality) for _similarity, quality in candidates],
+            [max(0.01, quality) for _similarity, quality, _embedding_id in candidates],
             dtype=np.float32,
         )
         similarities = np.asarray(
-            [similarity for similarity, _quality in candidates],
+            [similarity for similarity, _quality, _embedding_id in candidates],
             dtype=np.float32,
         )
         profile_similarity = float(np.average(similarities, weights=weights))
         best_similarity = float(similarities[0])
-        combined_similarity = 0.7 * best_similarity + 0.3 * profile_similarity
+        supporting_samples = sum(
+            similarity >= threshold
+            for similarity, _quality, _embedding_id in profile["scores"]
+        )
         person_scores.append(
-            (combined_similarity, best_similarity, person_id, profile["name"])
+            {
+                "person_id": int(person_id),
+                "person_name": profile["name"],
+                "similarity": profile_similarity,
+                "best_sample_similarity": best_similarity,
+                "supporting_samples": supporting_samples,
+                "usable_samples": len(profile["scores"]),
+            }
         )
 
-    person_scores.sort(key=lambda item: item[0], reverse=True)
-    best_score, best_sample_similarity, best_person_id, best_person_name = person_scores[0]
+    person_scores.sort(key=lambda item: item["similarity"], reverse=True)
+    best = person_scores[0]
+    second = person_scores[1] if len(person_scores) > 1 else None
+    margin = (
+        best["similarity"] - second["similarity"]
+        if second is not None
+        else None
+    )
+    result["candidates"] = person_scores[:5]
+    result["margin"] = margin
 
-    second_similarity = person_scores[1][0] if len(person_scores) > 1 else -1.0
+    required_support = min(
+        config.VOICE_MATCH_MIN_SUPPORTING_SAMPLES,
+        best["usable_samples"],
+    )
+    if best["supporting_samples"] < required_support:
+        result["reason"] = "insufficient_independent_sample_support"
+    elif best["similarity"] < threshold:
+        result["reason"] = "below_similarity_threshold"
+    elif margin is not None and margin < ambiguity_margin:
+        result["reason"] = "ambiguous_candidate_margin"
+    else:
+        result["decision"] = best
+        result["reason"] = "accepted"
+    return result
 
-    if best_score < threshold:
-        return None
-    if second_similarity >= 0.0 and (best_score - second_similarity) < ambiguity_margin:
-        return None
 
-    return {
-        "person_id": best_person_id,
-        "person_name": best_person_name,
-        "similarity": best_score,
-        "best_sample_similarity": best_sample_similarity,
-        "margin": best_score - second_similarity if second_similarity >= 0.0 else None,
-    }
+def match_voice_embedding(query_embedding, threshold=None, ambiguity_margin=None):
+    """Return a supported person match, or None for an uncertain result."""
+    diagnostic = diagnose_voice_embedding_match(
+        query_embedding,
+        threshold=threshold,
+        ambiguity_margin=ambiguity_margin,
+    )
+    return diagnostic["decision"]
 
 
 from scipy.cluster.hierarchy import fcluster, linkage
@@ -230,6 +301,41 @@ def _read_region_pcm(wav_path, start_seconds, end_seconds):
     return _slice_pcm(pcm, start_seconds, end_seconds)
 
 
+def _persist_unknown_voice_window(
+    unknown_voice_id,
+    source_ref,
+    start,
+    end,
+    pcm,
+    embedding,
+    quality,
+):
+    start_ms = int(round(start * 1000))
+    end_ms = int(round(end * 1000))
+    source_digest = hashlib.sha256(source_ref.encode("utf-8")).hexdigest()[:16]
+    stem = f"unknown_voice_{unknown_voice_id}_{source_digest}_{start_ms}_{end_ms}"
+    audio_path = Path(config.UNKNOWN_VOICES_DIR) / "audio" / f"{stem}.wav"
+    embedding_path = Path(config.UNKNOWN_VOICES_DIR) / f"{stem}.npy"
+    audio_path.parent.mkdir(parents=True, exist_ok=True)
+    embedding_path.parent.mkdir(parents=True, exist_ok=True)
+
+    with wave.open(str(audio_path), "wb") as audio_file:
+        audio_file.setnchannels(1)
+        audio_file.setsampwidth(SAMPLE_WIDTH)
+        audio_file.setframerate(SAMPLE_RATE)
+        audio_file.writeframes(pcm)
+    np.save(embedding_path, _normalize(embedding))
+    return add_unknown_voice_sample(
+        unknown_voice_id,
+        embedding_path,
+        quality=quality,
+        audio_path=audio_path,
+        source_ref=source_ref,
+        start_ms=start_ms,
+        end_ms=end_ms,
+    )
+
+
 def find_matching_unknown_voice(query_embedding, threshold=None, candidate_ids=None):
     """candidate_ids, if given, restricts matching to those unknown_voice_ids."""
     threshold = config.VOICE_MATCH_THRESHOLD if threshold is None else threshold
@@ -254,7 +360,10 @@ def find_matching_unknown_voice(query_embedding, threshold=None, candidate_ids=N
                 continue
             scores.append((float(np.dot(query, stored)), unknown_voice_id, sample_id))
         except Exception:
-            logger.exception("Failed loading unknown voice embedding: %s", path)
+            logger.warning(
+                "Skipping invalid unknown voice embedding sample_id=%s",
+                sample_id,
+            )
 
     if not scores:
         return None
@@ -329,11 +438,6 @@ def _label_unmatched_cluster(centroid, candidate_ids, register_if_unmatched=True
     if existing is not None:
         label = _unknown_voice_label(existing["unknown_voice_id"])
         if label is not None:
-            add_unknown_voice_embedding_sample(
-                existing["unknown_voice_id"],
-                centroid,
-                quality=existing["similarity"],
-            )
             return label
     if not register_if_unmatched:
         return None
@@ -375,6 +479,45 @@ def _match_in_meeting_identity(centroid, identity_profiles):
     }
 
 
+def _match_resolved_source_identity(source_ref, windows):
+    """Reuse a user's confirmed identity for the same source audio intervals."""
+    matches_by_person = {}
+    for person_id, person_name, saved_start_ms, saved_end_ms in (
+        list_resolved_unknown_voice_samples_for_source(source_ref)
+    ):
+        saved_duration = saved_end_ms - saved_start_ms
+        if saved_duration <= 0:
+            continue
+        for start, end in windows:
+            start_ms = int(round(start * 1000))
+            end_ms = int(round(end * 1000))
+            duration = end_ms - start_ms
+            if duration <= 0:
+                continue
+            overlap = max(
+                0,
+                min(end_ms, saved_end_ms) - max(start_ms, saved_start_ms),
+            )
+            overlap_ratio = overlap / min(duration, saved_duration)
+            if overlap_ratio >= 0.8:
+                previous = matches_by_person.get(person_id)
+                if previous is None or overlap_ratio > previous[0]:
+                    matches_by_person[person_id] = (overlap_ratio, person_name)
+
+    ranked = sorted(
+        (
+            (similarity, person_id, person_name)
+            for person_id, (similarity, person_name) in matches_by_person.items()
+        ),
+        reverse=True,
+    )
+    if not ranked:
+        return None
+    if len(ranked) > 1 and ranked[0][0] - ranked[1][0] < 0.1:
+        return None
+    return {"person_id": ranked[0][1], "person_name": ranked[0][2]}
+
+
 def _sliding_windows(start, end, window_seconds, step_seconds):
     """Split [start, end) into overlapping windows; short regions stay whole."""
     if end - start <= window_seconds:
@@ -389,7 +532,29 @@ def _sliding_windows(start, end, window_seconds, step_seconds):
     return windows
 
 
-def diarize_meeting_audio(wav_path, speech_regions):
+def _merge_intervals(windows):
+    merged = []
+    union_start = None
+    union_end = None
+    for start, end in sorted(windows):
+        if end <= start:
+            continue
+        if union_end is None or start > union_end:
+            if union_start is not None and union_end is not None:
+                merged.append((union_start, union_end))
+            union_start, union_end = start, end
+        else:
+            union_end = max(union_end, end)
+    if union_start is not None and union_end is not None:
+        merged.append((union_start, union_end))
+    return merged
+
+
+def _union_duration(windows):
+    return sum(end - start for start, end in _merge_intervals(windows))
+
+
+def diarize_meeting_audio(wav_path, speech_regions, known_speaker_events=None):
     """Cluster sliding windows of VAD speech regions into speakers.
 
     Returns [(speaker_label, start_seconds, end_seconds), ...] (one entry per
@@ -401,6 +566,7 @@ def diarize_meeting_audio(wav_path, speech_regions):
     window_qualities = []
     diagnostics = []
     pcm = read_wav_pcm(wav_path)
+    source_ref = str(Path(wav_path).resolve())
     candidate_count = 0
     for region_start, region_end in speech_regions:
         for start, end in _sliding_windows(
@@ -470,7 +636,6 @@ def diarize_meeting_audio(wav_path, speech_regions):
         _write_diagnostics(
             diagnostics,
             {
-                "audio_path": str(wav_path),
                 "speech_region_count": len(speech_regions),
                 "candidate_windows": candidate_count,
                 "accepted_embeddings": 0,
@@ -510,15 +675,109 @@ def diarize_meeting_audio(wav_path, speech_regions):
     preexisting_unknown_ids = None
     cluster_labels = {}
     meeting_identity_profiles = []
+    speaker_decisions = []
     for cluster_id, centroid in cluster_centroids.items():
         if centroid is None:
-            cluster_labels[cluster_id] = "Unknown Speaker"
+            label = "UNKNOWN"
+            cluster_labels[cluster_id] = label
+            speaker_decisions.append({
+                "cluster_id": int(cluster_id),
+                "reason": "invalid_cluster_embedding",
+                "final_label": label,
+            })
             continue
-        match = match_voice_embedding(centroid)
-        if match is not None:
-            cluster_labels[cluster_id] = match["person_name"]
-            meeting_identity_profiles.append((match["person_name"], centroid))
+        windows = [
+            valid_windows[index]
+            for index, item_cluster_id in enumerate(cluster_ids)
+            if item_cluster_id == cluster_id
+        ]
+        face_match = _known_face_cluster_label(windows, known_speaker_events or [])
+        duration = _union_duration(windows)
+        voice_diagnostic = diagnose_voice_embedding_match(centroid)
+        source_match = _match_resolved_source_identity(source_ref, windows)
+        if source_match is not None:
+            label = source_match["person_name"]
+            meeting_identity_profiles.append(
+                (label, centroid)
+            )
+            reason = "confirmed_source_assignment"
+            voice_match = voice_diagnostic["decision"]
+            if (
+                voice_match is not None
+                and voice_match["person_id"] != source_match["person_id"]
+            ):
+                reason = "confirmed_source_assignment_conflicts_with_voice_profile"
+                logger.warning(
+                    "Speaker attribution conflict for cluster %s: confirmed source person_id=%s "
+                    "but voice profile candidate person_id=%s (cosine_similarity=%.3f)",
+                    cluster_id,
+                    source_match["person_id"],
+                    voice_match["person_id"],
+                    voice_match["similarity"],
+                )
+            cluster_labels[cluster_id] = label
+            speaker_decisions.append({
+                "cluster_id": int(cluster_id),
+                "duration_seconds": round(duration, 3),
+                "window_count": len(windows),
+                "face_candidate": face_match,
+                "voice_match": voice_diagnostic,
+                "decision_reason": reason,
+                "final_label": label,
+            })
             continue
+
+        if (
+            voice_diagnostic["reason"] == "no_enrolled_profiles"
+            and face_match is not None
+        ):
+            reason = "face_only_no_enrolled_voice_profiles"
+            label = face_match["person_name"]
+        elif duration < config.VOICE_MIN_IDENTITY_DURATION_SECONDS:
+            reason = "insufficient_speech_duration"
+            label = None
+        elif voice_diagnostic["decision"] is not None:
+            voice_match = voice_diagnostic["decision"]
+            if (
+                face_match is not None
+                and face_match["person_id"] != voice_match["person_id"]
+            ):
+                reason = "audio_video_identity_conflict"
+                label = None
+                logger.warning(
+                    "Speaker attribution conflict for cluster %s: voice person_id=%s "
+                    "cosine_similarity=%.3f conflicts with face person_id=%s; "
+                    "leaving attribution unresolved",
+                    cluster_id,
+                    voice_match["person_id"],
+                    voice_match["similarity"],
+                    face_match["person_id"],
+                )
+            else:
+                reason = (
+                    "voice_match_corroborated_by_face"
+                    if face_match is not None
+                    else "voice_match"
+                )
+                label = voice_match["person_name"]
+        else:
+            reason = voice_diagnostic["reason"]
+            label = None
+
+        speaker_decisions.append({
+            "cluster_id": int(cluster_id),
+            "duration_seconds": round(duration, 3),
+            "window_count": len(windows),
+            "face_candidate": face_match,
+            "voice_match": voice_diagnostic,
+            "decision_reason": reason,
+            "final_label": label,
+        })
+        if label is not None:
+            meeting_identity_profiles.append((label, centroid))
+            cluster_labels[cluster_id] = label
+            continue
+
         if preexisting_unknown_ids is None:
             preexisting_unknown_ids = {row[0] for row in list_unknown_voices()}
         in_meeting_match = _match_in_meeting_identity(
@@ -528,13 +787,9 @@ def diarize_meeting_audio(wav_path, speech_regions):
         label = None
         if in_meeting_match is not None:
             label = in_meeting_match["label"]
-            if label.startswith("Unknown Speaker"):
-                unknown_id = int(label.rsplit(" ", 1)[-1])
-                add_unknown_voice_embedding_sample(
-                    unknown_id,
-                    centroid,
-                    quality=in_meeting_match["similarity"],
-                )
+            speaker_decisions[-1]["decision_reason"] = (
+                "reused_matching_in_meeting_voice_cluster"
+            )
             logger.info(
                 "Reused in-meeting speaker identity %s for cluster %s (similarity=%.3f margin=%s)",
                 label,
@@ -552,6 +807,7 @@ def diarize_meeting_audio(wav_path, speech_regions):
             _unknown_voice_id, label = register_new_unknown_voice(centroid)
         cluster_labels[cluster_id] = label
         meeting_identity_profiles.append((label, centroid))
+        speaker_decisions[-1]["final_label"] = label
 
     for diagnostic, cluster_id in zip(
         (item for item in diagnostics if item.get("accepted")),
@@ -560,10 +816,47 @@ def diarize_meeting_audio(wav_path, speech_regions):
         diagnostic["cluster_id"] = int(cluster_id)
         diagnostic["final_speaker"] = cluster_labels[cluster_id]
 
+    unknown_ids_by_label = {
+        label: int(unknown_voice_id)
+        for unknown_voice_id, label, _path, _created, _resolved in list_unknown_voices()
+    }
+    representative_windows = {}
+    for index, (cluster_id, quality) in enumerate(zip(cluster_ids, window_qualities)):
+        speaker_label = cluster_labels[cluster_id]
+        if speaker_label not in unknown_ids_by_label:
+            continue
+        previous = representative_windows.get(speaker_label)
+        if (
+            previous is None
+            or quality > window_qualities[previous]
+        ):
+            representative_windows[speaker_label] = index
+    for index, (cluster_id, (start, end), embedding, quality) in enumerate(zip(
+        cluster_ids,
+        valid_windows,
+        embeddings,
+        window_qualities,
+    )):
+        speaker_label = cluster_labels[cluster_id]
+        if representative_windows.get(speaker_label) != index:
+            continue
+        unknown_voice_id = unknown_ids_by_label.get(speaker_label)
+        if unknown_voice_id is None:
+            continue
+        window_pcm = _slice_pcm(pcm, start, end)
+        _persist_unknown_voice_window(
+            unknown_voice_id,
+            source_ref,
+            start,
+            end,
+            window_pcm,
+            embedding,
+            quality,
+        )
+
     _write_diagnostics(
         diagnostics,
         {
-            "audio_path": str(wav_path),
             "speech_region_count": len(speech_regions),
             "candidate_windows": candidate_count,
             "accepted_embeddings": len(embeddings),
@@ -574,6 +867,7 @@ def diarize_meeting_audio(wav_path, speech_regions):
                 str(cluster_id): int(sum(item == cluster_id for item in cluster_ids))
                 for cluster_id in set(cluster_ids)
             },
+            "speaker_decisions": speaker_decisions,
         },
     )
 
@@ -596,3 +890,43 @@ def diarize_meeting_audio(wav_path, speech_regions):
         else:
             merged.append((label, start, end))
     return merged
+
+
+def _known_face_cluster_label(windows, known_speaker_events):
+    """Use a confidently face-attributed speaker only when it covers the cluster."""
+    merged_windows = _merge_intervals(windows)
+    total_duration = _union_duration(merged_windows)
+    if total_duration <= 0:
+        return None
+    overlap_by_person = {}
+    for event in known_speaker_events:
+        speaker = str(event.get("speaker") or event.get("person_name") or "").strip()
+        if (
+            event.get("person_id") is None
+            or not speaker
+            or speaker.upper() == "UNKNOWN"
+            or speaker.startswith("Unknown Speaker")
+        ):
+            continue
+        overlap = sum(
+            max(0.0, min(end, float(event["end_time"])) - max(start, float(event["start_time"])))
+            for start, end in merged_windows
+        )
+        person_id = int(event["person_id"])
+        person_entry = overlap_by_person.setdefault(
+            person_id,
+            {"person_name": speaker, "overlap": 0.0},
+        )
+        person_entry["overlap"] += overlap
+    if not overlap_by_person:
+        return None
+    person_id, entry = max(
+        overlap_by_person.items(),
+        key=lambda item: item[1]["overlap"],
+    )
+    if entry["overlap"] / total_duration < config.SPEAKER_FACE_OVERLAP_THRESHOLD:
+        return None
+    return {
+        "person_id": person_id,
+        "person_name": entry["person_name"],
+    }

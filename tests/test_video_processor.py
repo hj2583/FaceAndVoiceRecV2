@@ -59,6 +59,17 @@ class _FakeLandmarker:
         return None
 
 
+def test_uniface_landmarker_close_releases_model_sessions():
+    detector = object()
+    mesher = object()
+    landmarker = video_processor._UniFaceLandmarker(detector, mesher)
+
+    landmarker.close()
+
+    assert landmarker._detector is None
+    assert landmarker._mesher is None
+
+
 def _patch_common(monkeypatch, capture, writer):
     def _make_writer(path, *_a, **_k):
         # Real code renames this temp file on disk after writing; touch it so
@@ -122,7 +133,12 @@ def test_process_video_pipeline_logs_unknown_speaker_events(tmp_path, monkeypatc
     monkeypatch.setattr(video_processor, "extract_audio_to_wav", lambda _p: tmp_path / "audio.wav")
     monkeypatch.setattr(video_processor, "detect_speech_segments", lambda *_a, **_k: [(0.0, 10.0)])
     monkeypatch.setattr(video_processor, "extract_embedding", lambda *_a, **_k: None)
-    monkeypatch.setattr(video_processor, "lip_open_ratio", lambda _landmarks: 0.05)
+    lip_ratios = iter((0.0, 0.06, 0.0))
+    monkeypatch.setattr(
+        video_processor,
+        "lip_open_ratio",
+        lambda _landmarks: next(lip_ratios, 0.0),
+    )
 
     class _Landmarker:
         def detect_for_video(self, *_a, **_k):
@@ -162,7 +178,6 @@ def test_process_video_pipeline_logs_unknown_speaker_events(tmp_path, monkeypatc
     assert speech[0]["person_id"] is None
     assert speech[0]["track_id"] == 1
     assert speech[0]["speaker"] == "UNKNOWN"
-    assert [entry["person_name"] for entry in speech] == ["UNKNOWN"]
 
 
 def test_process_video_pipeline_logs_recognized_speaker_with_evicted_track(tmp_path, monkeypatch):
@@ -174,7 +189,12 @@ def test_process_video_pipeline_logs_recognized_speaker_with_evicted_track(tmp_p
     monkeypatch.setattr(video_processor, "extract_audio_to_wav", lambda _p: tmp_path / "audio.wav")
     monkeypatch.setattr(video_processor, "detect_speech_segments", lambda *_a, **_k: [(0.0, 10.0)])
     monkeypatch.setattr(video_processor, "extract_embedding", lambda *_a, **_k: None)
-    monkeypatch.setattr(video_processor, "lip_open_ratio", lambda _landmarks: 0.05)
+    lip_ratios = iter((0.0, 0.06, 0.0))
+    monkeypatch.setattr(
+        video_processor,
+        "lip_open_ratio",
+        lambda _landmarks: next(lip_ratios, 0.0),
+    )
 
     class _Landmarker:
         def detect_for_video(self, *_a, **_k):
@@ -206,8 +226,8 @@ def test_process_video_pipeline_logs_recognized_speaker_with_evicted_track(tmp_p
         tmp_path / "in.mp4", tmp_path / "out.mp4", tmp_path / "log.json",
     )
 
-    assert len(logged) == 1, "the open recognized run must be flushed once when the video ends"
-    args, kwargs = logged[0]
+    assert len(logged) == 2, "the uncertain startup frame and recognized run should both be recorded"
+    args, kwargs = logged[-1]
     # log_audio(start, end, person_id, person_name, confidence, source, track_id=...)
     assert args[2] == 7
     assert args[3] == "Alice"

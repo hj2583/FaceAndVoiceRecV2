@@ -1,3 +1,4 @@
+import os
 from pathlib import Path
 
 
@@ -205,9 +206,11 @@ SPEAKER_WINDOW_MS = 800
 # assignment (no incumbent yet) or to the incumbent retaining its own track.
 SPEAKER_SWITCH_THRESHOLD = 0.15
 
-# Below this smoothed score, the result is "UNKNOWN" rather than a
-# low-confidence guessed name.
-SPEAKER_MIN_CONFIDENCE = 0.35
+# Minimum normalized lip-motion activity score required before a face can be
+# identified as the active speaker. This is not an identity probability.
+SPEAKER_MIN_ACTIVITY_SCORE = 0.35
+# Deprecated compatibility alias; use SPEAKER_MIN_ACTIVITY_SCORE.
+SPEAKER_MIN_CONFIDENCE = SPEAKER_MIN_ACTIVITY_SCORE
 
 # How long to keep reporting the current speaker after voice activity
 # drops, before falling back to active_speaker=None.
@@ -217,7 +220,8 @@ SPEAKER_GRACE_PERIOD_MS = 600
 # nearest audio sample. Beyond this, no audio data is treated as available.
 AUDIO_SYNC_TOLERANCE_MS = 250
 
-# Speaker-scoring weights; must sum to 1.0.
+# Retained for compatibility with older consumers. Identity selection no
+# longer combines these values into a confidence-like score.
 VOICE_ACTIVITY_WEIGHT = 0.40
 LIP_MOTION_WEIGHT = 0.30
 FACE_CONFIDENCE_WEIGHT = 0.20
@@ -227,8 +231,8 @@ TEMPORAL_WEIGHT = 0.10
 # by this constant, then clamped to [0, 1], to produce mouth_motion_score.
 LIP_MOTION_NORM = 0.02
 
-# Minimum recent mouth-motion score required (when mouth_open is False) before
-# a visible face can be confidently attributed to active speech.
+# Minimum recent mouth-motion score required before a visible face is eligible
+# for active-speaker attribution; a single open-mouth observation is not enough.
 SPEAKER_MIN_MOUTH_MOTION_SCORE = 0.25
 
 # Drop per-track score/lip history after this much inactivity to prevent
@@ -260,6 +264,11 @@ VOICE_MATCH_THRESHOLD = 0.5
 # the match is considered ambiguous and rejected.
 VOICE_AMBIGUITY_MARGIN = 0.05
 
+# Minimum enrollment quality and independent references required for automatic
+# known-speaker matching. Cosine similarity is not a calibrated probability.
+VOICE_PROFILE_MIN_QUALITY = 0.55
+VOICE_MATCH_MIN_SUPPORTING_SAMPLES = 2
+
 # Cosine-distance threshold used by agglomerative clustering
 # when grouping a meeting's speech segments into speakers.
 # Lower = more/smaller clusters (more distinct speakers found).
@@ -271,6 +280,7 @@ VOICE_CLUSTER_DISTANCE_THRESHOLD = 0.55
 # before embedding, so speaker changes without a pause can be split.
 VOICE_DIARIZATION_WINDOW_SECONDS = 1.5
 VOICE_DIARIZATION_STEP_SECONDS = 0.75
+VOICE_MIN_IDENTITY_DURATION_SECONDS = 3.0
 
 # Reject speaker windows that contain too little usable signal. These are
 # quality gates, not identity thresholds, and should be tuned from diagnostics.
@@ -287,7 +297,9 @@ VOICE_IN_MEETING_IDENTITY_THRESHOLD = 0.68
 VOICE_IN_MEETING_IDENTITY_MARGIN = 0.08
 
 # Diagnostic output is disabled by default and does not change recognition.
-VOICE_DIAGNOSTICS_ENABLED = False
+VOICE_DIAGNOSTICS_ENABLED = os.environ.get(
+    "VOICE_DIAGNOSTICS_ENABLED", "0"
+).strip().lower() in {"1", "true", "yes", "on"}
 VOICE_DIAGNOSTICS_PATH = BASE_DIR / "logs" / "speaker_diagnostics.json"
 
 # Realtime voice fallback runs at most once per this many frames per track.
@@ -298,8 +310,10 @@ VOICE_FALLBACK_INTERVAL_FRAMES = 30
 # This meeting collection is English-dominant. Fixed language prevents a short
 # opening phrase from causing Whisper to transcribe the whole meeting as Malay.
 # Use mode="auto" again for genuinely multilingual meetings.
-WHISPER_LANGUAGE_MODE = "fixed"
-WHISPER_LANGUAGE = "en"
+WHISPER_LANGUAGE_MODE = os.environ.get(
+    "WHISPER_LANGUAGE_MODE", "fixed"
+).strip().lower()
+WHISPER_LANGUAGE = os.environ.get("WHISPER_LANGUAGE", "en").strip()
 
 # Minimum confidence required before auto-detection supplies a language to
 # Whisper. Otherwise Whisper is allowed to perform its own unconstrained
@@ -315,13 +329,29 @@ WHISPER_TASK = "transcribe"
 WHISPER_INITIAL_PROMPT = None
 
 # Consecutive same-speaker fragments closer than this are joined into one turn.
-TRANSCRIPT_MERGE_MAX_GAP_MS = 10000
+# Keep this short so readable transcript ranges do not span long silences.
+TRANSCRIPT_MERGE_MAX_GAP_MS = 1500
 TRANSCRIPT_MERGE_MAX_CHARS = 600
 
-# Unknown-speaker fragments this short (plain "Unknown Speaker"), or unknown
-# clusters with this little total speech, take the surrounding speaker's label.
+# Legacy thresholds retained for compatibility. Transcript text and duration
+# alone are no longer used to infer an unknown speaker's identity.
 TRANSCRIPT_SPEAKER_BLIP_MS = 3000
 TRANSCRIPT_MINOR_SPEAKER_TOTAL_MS = 8000
+
+# Optional local Ollama transcript formatting. No transcript is sent anywhere
+# unless explicitly enabled; the service must be available at the configured URL.
+TRANSCRIPT_REFINEMENT_ENABLED = os.environ.get(
+    "TRANSCRIPT_REFINEMENT_ENABLED", "0"
+).strip().lower() in {"1", "true", "yes", "on"}
+TRANSCRIPT_REFINEMENT_URL = os.environ.get(
+    "TRANSCRIPT_REFINEMENT_URL", "http://localhost:11434"
+).rstrip("/")
+TRANSCRIPT_REFINEMENT_MODEL = os.environ.get(
+    "TRANSCRIPT_REFINEMENT_MODEL", "qwen2.5:7b"
+)
+TRANSCRIPT_REFINEMENT_TIMEOUT_SECONDS = 90
+TRANSCRIPT_REFINEMENT_CHUNK_SEGMENTS = 30
+TRANSCRIPT_REFINEMENT_CHUNK_CHARS = 9000
 
 
 # ============================================================

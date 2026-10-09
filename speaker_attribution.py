@@ -44,13 +44,9 @@ class SpeakerAttributor:
 
         self._window_s = config.SPEAKER_WINDOW_MS / 1000.0
         self._switch_threshold = config.SPEAKER_SWITCH_THRESHOLD
-        self._min_confidence = config.SPEAKER_MIN_CONFIDENCE
+        self._min_activity_score = config.SPEAKER_MIN_ACTIVITY_SCORE
         self._grace_period_s = config.SPEAKER_GRACE_PERIOD_MS / 1000.0
         self._sync_tolerance_s = config.AUDIO_SYNC_TOLERANCE_MS / 1000.0
-        self._voice_weight = config.VOICE_ACTIVITY_WEIGHT
-        self._lip_weight = config.LIP_MOTION_WEIGHT
-        self._face_weight = config.FACE_CONFIDENCE_WEIGHT
-        self._temporal_weight = config.TEMPORAL_WEIGHT
         self._lip_motion_norm = config.LIP_MOTION_NORM
         self._min_mouth_motion_score = config.SPEAKER_MIN_MOUTH_MOTION_SCORE
         self._track_history_ttl_s = config.SPEAKER_TRACK_HISTORY_TTL_MS / 1000.0
@@ -126,7 +122,7 @@ class SpeakerAttributor:
     def _has_mouth_evidence(self, observation, motion_score):
         if not observation.face_visible:
             return False
-        return observation.mouth_open or motion_score >= self._min_mouth_motion_score
+        return motion_score >= self._min_mouth_motion_score
 
     def _smoothed_score(self, track_id, timestamp):
         history = self._track_history.get(track_id)
@@ -136,19 +132,13 @@ class SpeakerAttributor:
         recent = [score for ts, score in history.scores if ts >= window_start]
         return sum(recent) / len(recent) if recent else 0.0
 
-    def _score_candidates(self, timestamp, voice_active, voice_confidence, face_observations):
+    def _score_candidates(self, timestamp, voice_active, face_observations):
         scored = []
         for observation in face_observations:
             motion_score = self._mouth_motion_score(observation.track_id, observation.lip_open_ratio, timestamp)
             has_mouth_evidence = self._has_mouth_evidence(observation, motion_score)
-            is_incumbent = observation.track_id == self._current_track_id
             if voice_active and has_mouth_evidence:
-                score = (
-                    self._voice_weight * voice_confidence
-                    + self._lip_weight * motion_score
-                    + self._face_weight * observation.face_confidence
-                    + self._temporal_weight * (1.0 if is_incumbent else 0.0)
-                )
+                score = motion_score
                 # Silent or ineligible frames must not poison voiced smoothing.
                 self._record_score(observation.track_id, timestamp, score)
             else:
@@ -165,8 +155,7 @@ class SpeakerAttributor:
         """Test/debug helper: look up audio the same way update_faces does."""
         audio = self._nearest_audio(timestamp)
         voice_active = bool(audio and audio.voice_active)
-        voice_confidence = audio.voice_confidence if audio else 0.0
-        return self._score_candidates(timestamp, voice_active, voice_confidence, face_observations)
+        return self._score_candidates(timestamp, voice_active, face_observations)
 
     # ------------------------------------------------------------------
     # Decision / hysteresis
@@ -179,7 +168,7 @@ class SpeakerAttributor:
 
         self._prune_track_history(timestamp)
 
-        scored = self._score_candidates(timestamp, voice_active, voice_confidence, face_observations)
+        scored = self._score_candidates(timestamp, voice_active, face_observations)
 
         if self.debug:
             self._log_debug(scored)
@@ -213,7 +202,10 @@ class SpeakerAttributor:
         )
 
     def _open_or_continue_unknown_run(self, timestamp, voice_confidence, scored, extra_reason=None):
-        frame_confidence = self._voice_weight * voice_confidence
+        frame_confidence = max(
+            (entry["motion_score"] for entry in scored),
+            default=0.0,
+        )
 
         if self._current_speaker == "UNKNOWN" and self._current_track_id is None:
             self._current_run_sum += frame_confidence
@@ -271,23 +263,41 @@ class SpeakerAttributor:
         observation = best["observation"]
         label = observation.person_name if observation.person_id is not None else "UNKNOWN"
         smoothed = self._smoothed_score(observation.track_id, timestamp)
+        runner_up_score = max(
+            (
+                self._smoothed_score(item["observation"].track_id, timestamp)
+                for item in scored
+                if item["observation"].track_id != observation.track_id
+            ),
+            default=0.0,
+        )
+        if (
+            smoothed < self._min_activity_score
+            or smoothed - runner_up_score < self._switch_threshold
+        ):
+            return self._open_or_continue_unknown_run(
+                timestamp,
+                voice_confidence,
+                scored,
+                {"ambiguous_or_weak_lip_motion": True},
+            )
 
         incumbent_id = self._current_track_id
         incumbent_smoothed = self._smoothed_score(incumbent_id, timestamp) if incumbent_id is not None else 0.0
 
         if incumbent_id is None:
-            switch = best["score"] >= self._min_confidence
+            switch = smoothed >= self._min_activity_score
         elif observation.track_id == incumbent_id:
             switch = True
         else:
             switch = (
-                smoothed >= self._min_confidence
+                smoothed >= self._min_activity_score
                 and smoothed - incumbent_smoothed >= self._switch_threshold
             )
 
         challenger_switching = switch and incumbent_id is not None and observation.track_id != incumbent_id
 
-        if incumbent_id is not None and not challenger_switching and incumbent_smoothed < self._min_confidence:
+        if incumbent_id is not None and not challenger_switching and incumbent_smoothed < self._min_activity_score:
             # Weak incumbent: demote on the smoothed score, not this frame's flicker.
             self._close_current_event(timestamp)
             reason = self._build_reason(timestamp, None, voice_confidence, scored)
@@ -311,6 +321,20 @@ class SpeakerAttributor:
                     reported_confidence, reason,
                 )
             return self._open_or_continue_unknown_run(timestamp, voice_confidence, scored)
+
+        if (
+            self._current_speaker == "UNKNOWN"
+            and self._current_track_id is None
+            and label == "UNKNOWN"
+        ):
+            self._current_track_id = observation.track_id
+            self._current_person_id = None
+            self._current_last_face_at = timestamp
+            self._current_run_sum += best["score"]
+            self._current_run_count += 1
+            self._current_confidence = best["score"]
+            reason = self._build_reason(timestamp, observation.track_id, voice_confidence, scored)
+            return self._result(timestamp, label, observation.track_id, best["score"], reason)
 
         if label != self._current_speaker or observation.track_id != self._current_track_id:
             if self._current_speaker is not None:
@@ -368,6 +392,7 @@ class SpeakerAttributor:
                     "person_id": self._current_person_id,
                     "start_time": self._current_open_since,
                     "end_time": timestamp,
+                    "activity_score": confidence,
                     "confidence": confidence,
                 })
         self._current_speaker = None
@@ -383,6 +408,7 @@ class SpeakerAttributor:
         result = {"timestamp": timestamp, "active_speaker": speaker}
         if speaker is not None:
             result["track_id"] = track_id
+            result["activity_score"] = confidence
             result["confidence"] = confidence
             result["run_start_time"] = self._current_open_since
             result["reason"] = reason

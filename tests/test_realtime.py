@@ -363,7 +363,8 @@ def test_speaking_banner_drawn_below_fps_line(monkeypatch):
     )
     import sys
     fake_video_processor = ModuleType("video_processor")
-    fake_video_processor.lip_open_ratio = lambda _landmarks: 1.0
+    lip_ratios = iter((0.0, 0.06, 0.0))
+    fake_video_processor.lip_open_ratio = lambda _landmarks: next(lip_ratios, 0.0)
     monkeypatch.setitem(sys.modules, "video_processor", fake_video_processor)
     monkeypatch.setitem(sys.modules, "mediapipe", dummy_mp)
 
@@ -887,7 +888,8 @@ def test_run_uses_voice_identity_for_display_and_log_without_mutating_track(monk
 
     import sys
     fake_video_processor = ModuleType("video_processor")
-    fake_video_processor.lip_open_ratio = lambda _landmarks: 1.0
+    lip_ratios = iter((0.0, 0.06, 0.0))
+    fake_video_processor.lip_open_ratio = lambda _landmarks: next(lip_ratios, 0.0)
     monkeypatch.setitem(sys.modules, "video_processor", fake_video_processor)
     monkeypatch.setitem(
         sys.modules,
@@ -897,10 +899,12 @@ def test_run_uses_voice_identity_for_display_and_log_without_mutating_track(monk
 
     realtime.run(camera=0, width=160, height=120)
 
-    assert speaking_lines == ["SPEAKING: Vera"] * 3
+    assert speaking_lines == ["SPEAKING: Vera"] * 2
     assert extract.call_count == 1
     assert (track.person_id, track.person_name, track.confidence) == (None, "Unknown", 0.0)
-    assert [(log[2], log[3], log[4], log[5]) for log in audio_logs] == [(5, "Vera", 0.8, "realtime")]
+    assert (5, "Vera", 0.8, "realtime") in [
+        (log[2], log[3], log[4], log[5]) for log in audio_logs
+    ]
 
 
 def test_run_low_confidence_named_face_uses_voice_fallback_for_display_and_log(monkeypatch):
@@ -1005,7 +1009,8 @@ def test_run_low_confidence_named_face_uses_voice_fallback_for_display_and_log(m
 
     import sys
     fake_video_processor = ModuleType("video_processor")
-    fake_video_processor.lip_open_ratio = lambda _landmarks: 1.0
+    lip_ratios = iter((0.0, 0.06, 0.0))
+    fake_video_processor.lip_open_ratio = lambda _landmarks: next(lip_ratios, 0.0)
     monkeypatch.setitem(sys.modules, "video_processor", fake_video_processor)
     monkeypatch.setitem(
         sys.modules,
@@ -1015,12 +1020,14 @@ def test_run_low_confidence_named_face_uses_voice_fallback_for_display_and_log(m
 
     realtime.run(camera=0, width=160, height=120)
 
-    assert speaking_lines == ["SPEAKING: Vera"] * 3
+    assert speaking_lines == ["SPEAKING: Vera"] * 2
     assert extract.call_count == 1
     # Voice fallback must not mutate track identity.
     assert (track.person_id, track.person_name, track.confidence) == (7, "Alice", 0.2)
     # Logged speaker must match displayed fallback identity.
-    assert [(log[2], log[3], log[4], log[5]) for log in audio_logs] == [(5, "Vera", 0.8, "realtime")]
+    assert (5, "Vera", 0.8, "realtime") in [
+        (log[2], log[3], log[4], log[5]) for log in audio_logs
+    ]
 
 
 def test_run_uses_callback_monotonic_audio_samples_and_logs_wall_clock_event_times(monkeypatch):

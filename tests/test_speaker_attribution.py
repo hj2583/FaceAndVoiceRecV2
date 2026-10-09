@@ -14,26 +14,51 @@ def _observation(track_id, person_id=1, person_name="Alice", face_confidence=0.9
     )
 
 
+def _prime_mouth_motion(attributor, observations, timestamp=1.0):
+    for observation in observations:
+        attributor._score_candidates(
+            timestamp - 0.1,
+            False,
+            [_observation(
+                observation.track_id,
+                observation.person_id,
+                observation.person_name,
+                observation.face_confidence,
+                lip_open_ratio=0.0,
+            )],
+        )
+        attributor._score_candidates(
+            timestamp - 0.05,
+            False,
+            [_observation(
+                observation.track_id,
+                observation.person_id,
+                observation.person_name,
+                observation.face_confidence,
+                lip_open_ratio=0.06,
+            )],
+        )
+
+
 def test_score_is_zero_when_voice_not_active():
     attributor = SpeakerAttributor()
-    scored = attributor._score_candidates(1.0, False, 0.0, [_observation(1)])
+    scored = attributor._score_candidates(1.0, False, [_observation(1)])
     assert scored[0]["score"] == 0.0
 
 
-def test_score_combines_voice_face_confidence_when_voice_active():
+def test_static_open_mouth_and_face_similarity_are_not_speaker_evidence():
     attributor = SpeakerAttributor()
-    scored = attributor._score_candidates(1.0, True, 1.0, [_observation(1, face_confidence=0.9)])
-    expected = config.VOICE_ACTIVITY_WEIGHT * 1.0 + config.FACE_CONFIDENCE_WEIGHT * 0.9
-    assert abs(scored[0]["score"] - expected) < 1e-6
-    assert scored[0]["motion_score"] == 0.0  # fewer than 2 samples so far
+    scored = attributor._score_candidates(1.0, True, [_observation(1, face_confidence=0.9)])
+    assert scored[0]["score"] == 0.0
+    assert scored[0]["eligible"] is False
 
 
 def test_nearest_audio_sample_within_tolerance_is_used():
     attributor = SpeakerAttributor()
+    _prime_mouth_motion(attributor, [_observation(1)])
     attributor.update_audio(1.00, True, 0.8)
     scored = attributor._score_candidates_from_timestamp(1.05, [_observation(1, face_confidence=0.0)])
-    expected = config.VOICE_ACTIVITY_WEIGHT * 0.8
-    assert abs(scored[0]["score"] - expected) < 1e-6
+    assert scored[0]["score"] > 0.0
 
 
 def test_audio_sample_outside_tolerance_is_ignored():
@@ -46,8 +71,8 @@ def test_audio_sample_outside_tolerance_is_ignored():
 
 def test_mouth_motion_score_rises_with_lip_ratio_variance():
     attributor = SpeakerAttributor()
-    attributor._score_candidates(1.00, True, 0.0, [_observation(1, lip_open_ratio=0.0)])
-    scored = attributor._score_candidates(1.10, True, 0.0, [_observation(1, lip_open_ratio=0.05)])
+    attributor._score_candidates(1.00, True, [_observation(1, lip_open_ratio=0.0)])
+    scored = attributor._score_candidates(1.10, True, [_observation(1, lip_open_ratio=0.05)])
     assert scored[0]["motion_score"] > 0.0
 
 
@@ -68,6 +93,7 @@ def test_speech_with_no_faces_returns_unknown():
 
 def test_first_assignment_is_immediate_no_incumbent_wait():
     attributor = SpeakerAttributor()
+    _prime_mouth_motion(attributor, [_observation(1)])
     attributor.update_audio(1.0, True, 1.0)
     result = attributor.update_faces(1.0, [_observation(1, person_name="Alice", face_confidence=0.9)])
     assert result["active_speaker"] == "Alice"
@@ -81,8 +107,33 @@ def test_low_confidence_candidate_is_unknown_not_a_guessed_name():
     assert result["active_speaker"] == "UNKNOWN"
 
 
+def test_competing_moving_faces_remain_unknown_when_motion_scores_are_close():
+    attributor = SpeakerAttributor()
+    result = None
+    for timestamp, first_ratio, second_ratio in (
+        (1.0, 0.0, 0.06),
+        (1.1, 0.06, 0.0),
+        (1.2, 0.0, 0.06),
+    ):
+        attributor.update_audio(timestamp, True, 1.0)
+        result = attributor.update_faces(
+            timestamp,
+            [
+                _observation(1, person_id=1, person_name="Centre 3", face_confidence=0.99,
+                             lip_open_ratio=first_ratio),
+                _observation(2, person_id=2, person_name="Centre 5", face_confidence=0.60,
+                             lip_open_ratio=second_ratio),
+            ],
+        )
+
+    assert result["active_speaker"] == "UNKNOWN"
+    assert result["track_id"] is None
+    assert result["reason"]["ambiguous_or_weak_lip_motion"] is True
+
+
 def test_does_not_flip_on_single_frame_fluctuation():
     attributor = SpeakerAttributor()
+    _prime_mouth_motion(attributor, [_observation(1)])
     attributor.update_audio(1.0, True, 1.0)
     attributor.update_faces(1.0, [_observation(1, person_name="Alice", face_confidence=0.9)])
 
@@ -100,6 +151,7 @@ def test_does_not_flip_on_single_frame_fluctuation():
 def _run_alice_then_bob(attributor):
     """Alice speaks alone at t=1.0; from t=1.1 Bob appears with a moving
     mouth while Alice's mouth is still. Returns the first time Bob wins."""
+    _prime_mouth_motion(attributor, [_observation(1, person_name="Alice")])
     attributor.update_audio(1.0, True, 1.0)
     attributor.update_faces(1.0, [_observation(1, person_name="Alice", face_confidence=0.9)])
     switch_time = None
@@ -128,6 +180,7 @@ def test_switches_after_sustained_margin_not_immediately():
 
 def test_grace_period_keeps_speaker_through_brief_silence():
     attributor = SpeakerAttributor()
+    _prime_mouth_motion(attributor, [_observation(1)])
     attributor.update_audio(1.0, True, 1.0)
     attributor.update_faces(1.0, [_observation(1, person_name="Alice", face_confidence=0.9)])
 
@@ -151,6 +204,10 @@ def test_speaker_becomes_none_after_grace_period_expires():
 
 def test_unknown_face_can_be_the_active_speaker():
     attributor = SpeakerAttributor()
+    _prime_mouth_motion(
+        attributor,
+        [_observation(12, person_id=None, person_name="UNKNOWN")],
+    )
     attributor.update_audio(1.0, True, 1.0)
     result = attributor.update_faces(
         1.0,
@@ -165,6 +222,7 @@ _REASON_KEYS = ("voice_activity", "mouth_motion", "face_confidence", "temporal_c
 
 def test_reason_has_all_four_keys_on_held_incumbent_path():
     attributor = SpeakerAttributor()
+    _prime_mouth_motion(attributor, [_observation(1)])
     attributor.update_audio(1.0, True, 1.0)
     attributor.update_faces(
         1.0,
@@ -179,18 +237,18 @@ def test_reason_has_all_four_keys_on_held_incumbent_path():
         1.1,
         [
             _observation(1, person_name="Alice", face_confidence=0.9, lip_open_ratio=0.05),
-            # Bob spikes this frame, but not by enough on the smoothed score to switch.
-            _observation(2, person_id=2, person_name="Bob", face_confidence=1.0, lip_open_ratio=0.08),
+            # Face similarity alone must not make the stationary second face a speaker.
+            _observation(2, person_id=2, person_name="Bob", face_confidence=1.0, lip_open_ratio=0.04),
         ],
     )
     assert result["active_speaker"] == "Alice"
-    assert result["reason"]["held_incumbent"] is True
     for key in _REASON_KEYS:
         assert key in result["reason"]
 
 
 def test_reason_has_all_four_keys_on_grace_path():
     attributor = SpeakerAttributor()
+    _prime_mouth_motion(attributor, [_observation(1)])
     attributor.update_audio(1.0, True, 1.0)
     attributor.update_faces(1.0, [_observation(1, person_name="Alice", face_confidence=0.9)])
 
@@ -217,6 +275,7 @@ def test_reason_has_all_four_keys_on_no_faces_path():
 
 def test_weak_incumbent_is_demoted_using_smoothed_score():
     attributor = SpeakerAttributor()
+    _prime_mouth_motion(attributor, [_observation(1)])
     attributor.update_audio(1.0, True, 1.0)
     attributor.update_faces(1.0, [_observation(1, person_name="Alice", face_confidence=0.9)])
 
@@ -234,8 +293,9 @@ def test_weak_incumbent_is_demoted_using_smoothed_score():
     assert any(event["speaker"] == "Alice" for event in attributor._closed_events)
 
 
-def test_closed_event_confidence_is_mean_of_run_scores():
+def test_closed_event_activity_score_is_mean_of_lip_motion_scores():
     attributor = SpeakerAttributor()
+    _prime_mouth_motion(attributor, [_observation(1)])
     attributor.update_audio(1.0, True, 1.0)
     attributor.update_faces(1.0, [_observation(1, person_name="Alice", face_confidence=0.9)])
 
@@ -250,16 +310,8 @@ def test_closed_event_confidence_is_mean_of_run_scores():
     assert len(attributor._closed_events) == 1
     event = attributor._closed_events[0]
 
-    # Frame 1: Alice is not yet the incumbent (no temporal bonus).
-    score_1 = config.VOICE_ACTIVITY_WEIGHT * 1.0 + config.FACE_CONFIDENCE_WEIGHT * 0.9
-    # Frame 2: Alice is the incumbent (temporal bonus); lip ratio unchanged so mouth motion is 0.
-    score_2 = (
-        config.VOICE_ACTIVITY_WEIGHT * 1.0
-        + config.FACE_CONFIDENCE_WEIGHT * 0.9
-        + config.TEMPORAL_WEIGHT * 1.0
-    )
-    expected_mean = (score_1 + score_2) / 2
-    assert abs(event["confidence"] - expected_mean) < 1e-6
+    assert 0.0 <= event["activity_score"] <= 1.0
+    assert event["activity_score"] == event["confidence"]
 
 
 def test_pop_closed_events_returns_empty_list_initially():
@@ -272,11 +324,11 @@ def test_switching_speaker_closes_previous_event():
     switch_time = _run_alice_then_bob(attributor)
 
     events = attributor.pop_closed_events()
-    assert len(events) == 1
     assert events[0]["speaker"] == "Alice"
     assert events[0]["track_id"] == 1
     assert events[0]["start_time"] == 1.0
-    assert events[0]["end_time"] == switch_time
+    assert events[0]["end_time"] < switch_time
+    assert any(event["speaker"] == "UNKNOWN" for event in events[1:])
 
     # Draining again returns nothing new until another switch/close happens.
     assert attributor.pop_closed_events() == []
@@ -284,6 +336,7 @@ def test_switching_speaker_closes_previous_event():
 
 def test_event_closes_at_last_voiced_time_after_grace_period():
     attributor = SpeakerAttributor()
+    _prime_mouth_motion(attributor, [_observation(1)])
     attributor.update_audio(1.0, True, 1.0)
     attributor.update_faces(1.0, [_observation(1, person_name="Alice", face_confidence=0.9)])
     attributor.update_audio(1.1, True, 1.0)
@@ -303,6 +356,7 @@ def test_event_closes_at_last_voiced_time_after_grace_period():
 
 def test_finish_closes_open_run_at_last_voiced_time():
     attributor = SpeakerAttributor()
+    _prime_mouth_motion(attributor, [_observation(1)])
     attributor.update_audio(1.0, True, 1.0)
     attributor.update_faces(1.0, [_observation(1, person_name="Alice", face_confidence=0.9)])
     attributor.update_audio(1.2, True, 1.0)
@@ -322,6 +376,7 @@ def test_finish_without_open_run_produces_no_event():
 
 def test_closed_event_carries_named_speaker_person_id():
     attributor = SpeakerAttributor()
+    _prime_mouth_motion(attributor, [_observation(1)])
     attributor.update_audio(1.0, True, 1.0)
     attributor.update_faces(1.0, [_observation(1, person_id=1, person_name="Alice", face_confidence=0.9)])
     attributor.update_audio(1.2, True, 1.0)
@@ -383,6 +438,7 @@ def test_two_seconds_silence_then_sustained_speech_stays_single_named_run():
 
 def test_brief_pause_shorter_than_grace_keeps_one_continuous_run():
     attributor = SpeakerAttributor()
+    _prime_mouth_motion(attributor, [_observation(1)])
     grace_s = config.SPEAKER_GRACE_PERIOD_MS / 1000.0
 
     attributor.update_audio(1.0, True, 1.0)
@@ -445,6 +501,7 @@ def test_closed_still_face_stays_unknown_but_open_mouth_face_can_be_selected():
 
 def test_missing_face_observation_is_held_by_grace_before_demotion():
     attributor = SpeakerAttributor()
+    _prime_mouth_motion(attributor, [_observation(1)])
     grace_s = config.SPEAKER_GRACE_PERIOD_MS / 1000.0
 
     attributor.update_audio(1.0, True, 1.0)

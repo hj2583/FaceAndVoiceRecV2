@@ -69,6 +69,117 @@ def test_match_voice_embedding_returns_best_person_above_threshold(tmp_path, mon
     assert match["similarity"] > 0.99
 
 
+def test_reprocessed_diarization_uses_reassigned_source_identity(tmp_path, monkeypatch):
+    _setup_database(tmp_path, monkeypatch)
+    monkeypatch.setattr(config, "DB_PATH", database.DB_PATH)
+    transcripts_dir = tmp_path / "transcripts"
+    monkeypatch.setattr(config, "TRANSCRIPTS_DIR", transcripts_dir)
+    previous_person_id = database.create_person("Person 1")
+    replacement_person_id = database.create_person("The Centre 1")
+    audio_dir = transcripts_dir / "1"
+    audio_dir.mkdir(parents=True)
+    audio_path = audio_dir / "audio.wav"
+    audio_path.write_bytes(b"audio")
+    with database.get_conn() as conn:
+        conn.execute(
+            """
+            INSERT INTO meetings(video_path, created_at, transcription_status)
+            VALUES ('meeting.mp4', ?, 'completed')
+            """,
+            (database.utc_now(),),
+        )
+
+    embedding_path = tmp_path / "sample-3.npy"
+    cluster_path = tmp_path / "cluster.npy"
+    np.save(embedding_path, _unit(0))
+    np.save(cluster_path, _unit(0))
+    unknown_voice_id = database.create_unknown_voice(
+        "Unknown Speaker 2", cluster_path
+    )
+    database.add_unknown_voice_sample(
+        unknown_voice_id,
+        embedding_path,
+        quality=0.9,
+        audio_path=audio_path,
+        source_ref=audio_path,
+        start_ms=17_328,
+        end_ms=18_828,
+    )
+    database.resolve_unknown_voice(unknown_voice_id, previous_person_id)
+    embedding_id = next(
+        row[0]
+        for row in database.list_voice_enrollments()
+        if row[3] == str(embedding_path)
+    )
+
+    assert database.reassign_voice_embedding(embedding_id, replacement_person_id)
+    monkeypatch.setattr(
+        voice_core,
+        "read_wav_pcm",
+        lambda *_args, **_kwargs: _speech_pcm(25),
+    )
+    monkeypatch.setattr(
+        voice_core,
+        "extract_voice_embedding",
+        lambda *_args, **_kwargs: _unit(0),
+    )
+
+    diarized = voice_core.diarize_meeting_audio(
+        audio_path,
+        [(17.328, 18.828)],
+    )
+    reprocessed = voice_core.diarize_meeting_audio(
+        audio_path,
+        [(17.328, 18.828)],
+    )
+
+    assert diarized == [("The Centre 1", 17.328, 18.828)]
+    assert reprocessed == diarized
+    assert database.list_unknown_voices() == []
+    resolved = database.list_unknown_voices(include_resolved=True)
+    assert len(resolved) == 1
+    assert resolved[0][4] == replacement_person_id
+
+
+def test_voice_match_rejects_close_candidate_profiles(tmp_path, monkeypatch):
+    _setup_database(tmp_path, monkeypatch)
+    query = _unit(0)
+    for name in ("Centre 3", "Centre 5"):
+        person_id = database.create_person(name)
+        for suffix, embedding in (
+            ("a", query),
+            ("b", (0.99 * query + 0.01 * _unit(1)).astype(np.float32)),
+        ):
+            path = tmp_path / f"{name.replace(' ', '_')}_{suffix}.npy"
+            np.save(path, embedding)
+            database.add_voice_embedding(person_id, path, quality=0.9)
+
+    diagnostic = voice_core.diagnose_voice_embedding_match(query)
+
+    assert diagnostic["decision"] is None
+    assert diagnostic["reason"] == "ambiguous_candidate_margin"
+    assert [candidate["person_name"] for candidate in diagnostic["candidates"]] == [
+        "Centre 3",
+        "Centre 5",
+    ]
+    assert diagnostic["margin"] == 0.0
+
+
+def test_duplicate_enrollment_embeddings_count_as_one_reference(tmp_path, monkeypatch):
+    _setup_database(tmp_path, monkeypatch)
+    person_id = database.create_person("Centre 3")
+    for suffix in ("first", "duplicate"):
+        path = tmp_path / f"{suffix}.npy"
+        np.save(path, _unit(0))
+        database.add_voice_embedding(person_id, path, quality=0.9)
+
+    diagnostic = voice_core.diagnose_voice_embedding_match(_unit(0))
+
+    assert diagnostic["decision"] is not None
+    assert diagnostic["decision"]["usable_samples"] == 1
+    assert diagnostic["decision"]["supporting_samples"] == 1
+
+
 def test_match_voice_embedding_returns_none_below_threshold(tmp_path, monkeypatch):
     _setup_database(tmp_path, monkeypatch)
     person_id = database.create_person("Eve")
@@ -142,21 +253,155 @@ def test_diarize_meeting_audio_reads_wav_file_only_once(tmp_path, monkeypatch):
     assert read_wav_pcm_call_count == 1
 
 
-def test_diarize_meeting_audio_uses_enrolled_person_name(tmp_path, monkeypatch):
-    embedding = np.zeros(voice_core.EMBEDDING_DIM, dtype=np.float32)
-    embedding[0] = 1.0
+def test_diarize_persists_playable_unknown_sample_once_per_source_window(
+    tmp_path, monkeypatch
+):
+    _setup_database(tmp_path, monkeypatch)
+    monkeypatch.setattr(config, "UNKNOWN_VOICES_DIR", tmp_path / "unknown_voices")
+    monkeypatch.setattr(voice_core, "read_wav_pcm", lambda *_a, **_k: _speech_pcm(1))
+    monkeypatch.setattr(voice_core, "extract_voice_embedding", lambda *_a, **_k: _unit(0))
+    monkeypatch.setattr(voice_core, "match_voice_embedding", lambda *_a, **_k: None)
+    wav_path = tmp_path / "meeting" / "audio.wav"
 
+    first_result = voice_core.diarize_meeting_audio(wav_path, [(0.0, 1.0)])
+    unknown_voice_id = database.list_unknown_voices()[0][0]
+    first_samples = database.list_unknown_voice_samples(unknown_voice_id)
+    playable_samples = [row for row in first_samples if row[4]]
+
+    assert first_result[0][0] == f"Unknown Speaker {unknown_voice_id}"
+    assert len(playable_samples) == 1
+    audio_path = Path(playable_samples[0][4])
+    assert audio_path.is_file()
+    with open(audio_path, "rb") as audio_file:
+        import wave
+
+        with wave.open(audio_file, "rb") as wav:
+            assert wav.getnchannels() == 1
+            assert wav.getframerate() == 16000
+            assert wav.getnframes() > 0
+
+    second_result = voice_core.diarize_meeting_audio(wav_path, [(0.0, 1.0)])
+
+    assert second_result == first_result
+    assert len(database.list_unknown_voices()) == 1
+    assert len(database.list_unknown_voice_samples(unknown_voice_id)) == len(first_samples)
+
+
+def test_reprocessing_resolved_source_reuses_confirmed_voice_identity(
+    tmp_path, monkeypatch
+):
+    _setup_database(tmp_path, monkeypatch)
+    monkeypatch.setattr(config, "UNKNOWN_VOICES_DIR", tmp_path / "unknown_voices")
+    monkeypatch.setattr(voice_core, "read_wav_pcm", lambda *_a, **_k: _speech_pcm(1))
+    monkeypatch.setattr(voice_core, "extract_voice_embedding", lambda *_a, **_k: _unit(0))
+    monkeypatch.setattr(voice_core, "match_voice_embedding", lambda *_a, **_k: None)
+    wav_path = tmp_path / "transcripts" / "meeting_1" / "audio.wav"
+
+    first_result = voice_core.diarize_meeting_audio(wav_path, [(0.0, 1.0)])
+    unknown_voice_id = database.list_unknown_voices()[0][0]
+    person_id = database.create_person("Morgan")
+    database.resolve_unknown_voice(unknown_voice_id, person_id=person_id)
+
+    repeated_result = voice_core.diarize_meeting_audio(wav_path, [(0.0, 1.0)])
+
+    assert first_result == [(f"Unknown Speaker {unknown_voice_id}", 0.0, 1.0)]
+    assert repeated_result == [("Morgan", 0.0, 1.0)]
+    assert database.list_unknown_voices() == []
+
+
+def test_diarize_uses_confident_known_face_identity_without_registering_unknown(
+    tmp_path, monkeypatch
+):
+    _setup_database(tmp_path, monkeypatch)
+    monkeypatch.setattr(config, "UNKNOWN_VOICES_DIR", tmp_path / "unknown_voices")
+    monkeypatch.setattr(voice_core, "read_wav_pcm", lambda *_a, **_k: _speech_pcm(1))
+    monkeypatch.setattr(voice_core, "extract_voice_embedding", lambda *_a, **_k: _unit(0))
+    monkeypatch.setattr(voice_core, "match_voice_embedding", lambda *_a, **_k: None)
+
+    result = voice_core.diarize_meeting_audio(
+        tmp_path / "audio.wav",
+        [(0.0, 1.0)],
+        known_speaker_events=[{
+            "person_id": 5,
+            "speaker": "Alice",
+            "start_time": 0.0,
+            "end_time": 1.0,
+        }],
+    )
+
+    assert result == [("Alice", 0.0, 1.0)]
+    assert database.list_unknown_voices() == []
+
+
+def test_diarize_meeting_audio_uses_enrolled_person_name(tmp_path, monkeypatch):
+    _setup_database(tmp_path, monkeypatch)
+    embedding = _unit(0)
+    person_id = database.create_person("Frank")
+    embedding_path = tmp_path / "frank.npy"
+    np.save(embedding_path, embedding)
+    database.add_voice_embedding(person_id, embedding_path, quality=1.0)
+    monkeypatch.setattr(config, "VOICE_MIN_IDENTITY_DURATION_SECONDS", 0.0)
     monkeypatch.setattr(voice_core, "extract_voice_embedding", lambda *_a, **_k: embedding)
     monkeypatch.setattr(voice_core, "read_wav_pcm", lambda *_a, **_k: _speech_pcm(1))
-    monkeypatch.setattr(
-        voice_core,
-        "match_voice_embedding",
-        lambda *_a, **_k: {"person_id": 7, "person_name": "Frank", "similarity": 0.9},
-    )
 
     result = voice_core.diarize_meeting_audio(tmp_path / "audio.wav", [(0.0, 1.0)])
 
     assert result == [("Frank", 0.0, 1.0)]
+
+
+def test_short_speech_cluster_does_not_receive_known_identity(tmp_path, monkeypatch):
+    _setup_database(tmp_path, monkeypatch)
+    monkeypatch.setattr(config, "UNKNOWN_VOICES_DIR", tmp_path / "unknown_voices")
+    monkeypatch.setattr(config, "VOICE_DIAGNOSTICS_ENABLED", True)
+    monkeypatch.setattr(config, "VOICE_DIAGNOSTICS_PATH", tmp_path / "diagnostics.json")
+    person_id = database.create_person("Frank")
+    path = tmp_path / "frank.npy"
+    np.save(path, _unit(0))
+    database.add_voice_embedding(person_id, path, quality=1.0)
+    monkeypatch.setattr(voice_core, "read_wav_pcm", lambda *_a, **_k: _speech_pcm(1))
+    monkeypatch.setattr(voice_core, "extract_voice_embedding", lambda *_a, **_k: _unit(0))
+
+    result = voice_core.diarize_meeting_audio(tmp_path / "audio.wav", [(0.0, 1.0)])
+
+    assert result[0][0].startswith("Unknown Speaker ")
+    report = json.loads((tmp_path / "diagnostics.json").read_text(encoding="utf-8"))
+    assert report["summary"]["speaker_decisions"][0]["decision_reason"] == (
+        "insufficient_speech_duration"
+    )
+
+
+def test_voice_face_conflict_remains_unresolved(tmp_path, monkeypatch):
+    _setup_database(tmp_path, monkeypatch)
+    monkeypatch.setattr(config, "UNKNOWN_VOICES_DIR", tmp_path / "unknown_voices")
+    monkeypatch.setattr(config, "VOICE_MIN_IDENTITY_DURATION_SECONDS", 0.0)
+    monkeypatch.setattr(config, "VOICE_DIAGNOSTICS_ENABLED", True)
+    monkeypatch.setattr(config, "VOICE_DIAGNOSTICS_PATH", tmp_path / "diagnostics.json")
+    person_id = database.create_person("Centre 3")
+    path = tmp_path / "centre3.npy"
+    np.save(path, _unit(0))
+    database.add_voice_embedding(person_id, path, quality=1.0)
+    monkeypatch.setattr(voice_core, "read_wav_pcm", lambda *_a, **_k: _speech_pcm(1))
+    monkeypatch.setattr(voice_core, "extract_voice_embedding", lambda *_a, **_k: _unit(0))
+
+    result = voice_core.diarize_meeting_audio(
+        tmp_path / "audio.wav",
+        [(0.0, 1.0)],
+        known_speaker_events=[{
+            "person_id": 32,
+            "speaker": "Centre 5",
+            "start_time": 0.0,
+            "end_time": 1.0,
+        }],
+    )
+
+    assert result[0][0].startswith("Unknown Speaker ")
+    report = json.loads((tmp_path / "diagnostics.json").read_text(encoding="utf-8"))
+    decision = report["summary"]["speaker_decisions"][0]
+    assert decision["decision_reason"] == "audio_video_identity_conflict"
+    assert decision["face_candidate"]["person_id"] == 32
+    assert decision["voice_match"]["decision"]["person_id"] == person_id
+    assert decision["voice_match"]["threshold"] == config.VOICE_MATCH_THRESHOLD
+    assert "audio_path" not in report["summary"]
 
 
 def test_diarize_meeting_audio_writes_quality_diagnostics(tmp_path, monkeypatch):
@@ -300,7 +545,9 @@ def test_diarize_meeting_audio_reuses_unknown_identity_for_split_same_voice(tmp_
     )
 
     assert len(database.list_unknown_voices()) == 1
-    assert len(database.list_unknown_voice_samples(database.list_unknown_voices()[0][0])) == 2
+    samples = database.list_unknown_voice_samples(database.list_unknown_voices()[0][0])
+    assert len(samples) == 1
+    assert Path(samples[0][4]).is_file()
     assert {label for label, _start, _end in result} == {
         database.list_unknown_voices()[0][1]
     }

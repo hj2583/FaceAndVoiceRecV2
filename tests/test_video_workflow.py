@@ -6,6 +6,7 @@ import pytest
 import config
 from subtitle_renderer import SubtitleWord, VideoMuxError
 import video_workflow
+import voice_core
 
 
 def test_workflow_temp_dir_uses_configured_folder(tmp_path, monkeypatch):
@@ -66,6 +67,38 @@ def test_workflow_passes_face_events_to_transcription(tmp_path, monkeypatch):
         ("Alice", 1.0, 2.0),
         ("UNKNOWN", 2.0, 3.0),
     ]
+
+
+def test_video_diarizer_runs_voice_clustering_and_supplies_known_face_events(monkeypatch):
+    events = [
+        {
+            "speaker": "Alice",
+            "person_name": "Alice",
+            "person_id": 4,
+            "start_time": 0.5,
+            "end_time": 1.5,
+        },
+        {
+            "speaker": "UNKNOWN",
+            "person_name": "UNKNOWN",
+            "person_id": None,
+            "start_time": 2.0,
+            "end_time": 3.0,
+        },
+    ]
+    calls = []
+
+    def fake_diarize(audio_path, speech_regions, known_speaker_events=None):
+        calls.append((audio_path, speech_regions, known_speaker_events))
+        return [("Unknown Speaker 7", 0.0, 3.0)]
+
+    monkeypatch.setattr(voice_core, "diarize_meeting_audio", fake_diarize)
+    diarize = video_workflow._build_video_diarizer(events)
+
+    result = diarize(Path("meeting.wav"), [(0.0, 3.0)])
+
+    assert result == [("Unknown Speaker 7", 0.0, 3.0)]
+    assert calls == [(Path("meeting.wav"), [(0.0, 3.0)], [events[0]])]
 
 
 def test_video_stage_failure_does_not_start_transcription(tmp_path, monkeypatch):

@@ -6,6 +6,7 @@ without one, segments are deliberately labeled ``Unknown Speaker``.
 """
 
 from dataclasses import dataclass
+import json
 import logging
 from pathlib import Path
 import shutil
@@ -32,6 +33,17 @@ class TranscriptionSegment:
     text: str
     confidence: Optional[float] = None
     sentence_type: Optional[str] = None
+    source_segment_ids: tuple[int, ...] = ()
+    word_timestamps: Optional[tuple[tuple[int, int, str], ...]] = None
+
+
+@dataclass(frozen=True)
+class ReadableParagraph:
+    start_ms: int
+    end_ms: int
+    text: str
+    source_segment_ids: tuple[int, ...]
+    speaker_labels: tuple[str, ...]
 
 
 SENTENCE_TYPES = ("Question", "Topic", "Comment", "Unknown")
@@ -92,53 +104,12 @@ def absorb_minor_speakers(
     blip_ms: Optional[int] = None,
     minor_total_ms: Optional[int] = None,
 ) -> list[TranscriptionSegment]:
-    """Reassign short stray unknown-speaker fragments to the surrounding speaker.
+    """Sort turns without guessing a speaker from neighboring transcript text.
 
-    Diarization often gives a single short window its own unknown cluster;
-    identified (named) speakers are never relabeled.
+    Unknown labels can only be resolved by the audio/video attribution pipeline;
+    duration and textual proximity alone are not sufficient evidence.
     """
-    blip_ms = config.TRANSCRIPT_SPEAKER_BLIP_MS if blip_ms is None else blip_ms
-    minor_total_ms = (
-        config.TRANSCRIPT_MINOR_SPEAKER_TOTAL_MS if minor_total_ms is None else minor_total_ms
-    )
-    ordered = sorted(segments, key=lambda item: item.start_ms)
-    total_ms: dict[str, int] = {}
-    for segment in ordered:
-        total_ms[segment.speaker_label] = (
-            total_ms.get(segment.speaker_label, 0) + segment.end_ms - segment.start_ms
-        )
-
-    def is_stray(segment):
-        label = segment.speaker_label
-        if not label.startswith(_UNKNOWN_SPEAKER_PREFIX):
-            return False
-        if label == _UNKNOWN_SPEAKER_PREFIX:
-            return segment.end_ms - segment.start_ms <= blip_ms
-        return total_ms[label] <= minor_total_ms
-
-    result = list(ordered)
-    for index, segment in enumerate(result):
-        if not is_stray(segment):
-            continue
-        previous = next((s for s in reversed(result[:index]) if not is_stray(s)), None)
-        following = next((s for s in ordered[index + 1:] if not is_stray(s)), None)
-        if previous is not None and following is not None:
-            gap_before = segment.start_ms - previous.end_ms
-            gap_after = following.start_ms - segment.end_ms
-            neighbour = previous if gap_before <= gap_after else following
-        else:
-            neighbour = previous or following
-        if neighbour is None:
-            continue
-        result[index] = TranscriptionSegment(
-            neighbour.speaker_label,
-            segment.start_ms,
-            segment.end_ms,
-            segment.text,
-            segment.confidence,
-            segment.sentence_type,
-        )
-    return result
+    return sorted(segments, key=lambda item: (item.start_ms, item.end_ms))
 
 
 def merge_speaker_sentences(
@@ -157,13 +128,14 @@ def merge_speaker_sentences(
     merged: list[TranscriptionSegment] = []
     for segment in sorted(segments, key=lambda item: item.start_ms):
         text = segment.text.strip()
-        if not text:
+        if not text or segment.end_ms <= segment.start_ms:
             continue
         if merged:
             last = merged[-1]
+            gap_ms = segment.start_ms - last.end_ms
             can_merge = (
                 last.speaker_label == segment.speaker_label
-                and segment.start_ms - last.end_ms <= max_gap_ms
+                and 0 <= gap_ms <= max_gap_ms
                 and (
                     len(last.text) + 1 + len(text) <= max_chars
                     or not last.text.rstrip().endswith(_SENTENCE_END)
@@ -176,6 +148,11 @@ def merge_speaker_sentences(
                     max(last.end_ms, segment.end_ms),
                     f"{last.text} {text}",
                     _weighted_confidence(last, segment),
+                    last.sentence_type,
+                    last.source_segment_ids + segment.source_segment_ids,
+                    (last.word_timestamps or ()) + (segment.word_timestamps or ())
+                    if last.word_timestamps is not None or segment.word_timestamps is not None
+                    else None,
                 )
                 continue
         merged.append(TranscriptionSegment(
@@ -184,6 +161,9 @@ def merge_speaker_sentences(
             segment.end_ms,
             text,
             segment.confidence,
+            segment.sentence_type,
+            segment.source_segment_ids,
+            segment.word_timestamps,
         ))
     return merged
 
@@ -196,15 +176,73 @@ def group_transcript_turns(
     max_gap_ms = config.TRANSCRIPT_MERGE_MAX_GAP_MS if max_gap_ms is None else max_gap_ms
     turns: list[list[TranscriptionSegment]] = []
     for segment in sorted(segments, key=lambda item: item.start_ms):
+        previous = turns[-1][-1] if turns else None
+        gap_ms = segment.start_ms - previous.end_ms if previous else None
         if (
-            turns
-            and turns[-1][-1].speaker_label == segment.speaker_label
-            and segment.start_ms - turns[-1][-1].end_ms <= max_gap_ms
+            previous is not None
+            and segment.end_ms > segment.start_ms
+            and previous.end_ms > previous.start_ms
+            and previous.speaker_label == segment.speaker_label
+            and gap_ms is not None
+            and 0 <= gap_ms <= max_gap_ms
         ):
             turns[-1].append(segment)
         else:
             turns.append([segment])
     return turns
+
+
+def group_readable_paragraphs(
+    segments: Iterable[TranscriptionSegment],
+    max_gap_ms: Optional[int] = None,
+) -> list[ReadableParagraph]:
+    """Group continuous speech for reading without collapsing speaker labels.
+
+    This is a display-only grouping: when source diarization labels differ,
+    every distinct label remains attached to the paragraph as attribution
+    metadata instead of selecting one speaker for the whole paragraph.
+    """
+    max_gap_ms = config.TRANSCRIPT_MERGE_MAX_GAP_MS if max_gap_ms is None else max_gap_ms
+    paragraphs: list[ReadableParagraph] = []
+    current: list[TranscriptionSegment] = []
+
+    def flush() -> None:
+        if not current:
+            return
+        labels = tuple(dict.fromkeys(segment.speaker_label for segment in current))
+        source_ids = tuple(
+            segment_id
+            for segment in current
+            for segment_id in segment.source_segment_ids
+        )
+        text = " ".join(segment.text.strip() for segment in current if segment.text.strip())
+        text = re.sub(r"\s+([,.;:!?])", r"\1", text)
+        paragraphs.append(ReadableParagraph(
+            current[0].start_ms,
+            current[-1].end_ms,
+            text,
+            source_ids,
+            labels,
+        ))
+        current.clear()
+
+    for segment in sorted(segments, key=lambda item: (item.start_ms, item.end_ms)):
+        text = segment.text.strip()
+        if not text or segment.end_ms <= segment.start_ms:
+            continue
+        if current:
+            previous = current[-1]
+            gap_ms = segment.start_ms - previous.end_ms
+            accumulated_text = " ".join(item.text.strip() for item in current)
+            if (
+                gap_ms < 0
+                or gap_ms > max_gap_ms
+                or accumulated_text.rstrip().endswith(_SENTENCE_END)
+            ):
+                flush()
+        current.append(segment)
+    flush()
+    return paragraphs
 
 
 def _weighted_confidence(first: TranscriptionSegment, second: TranscriptionSegment) -> Optional[float]:
@@ -227,6 +265,8 @@ def classify_segments(segments: Iterable[TranscriptionSegment]) -> list[Transcri
             segment.text,
             segment.confidence,
             classify_sentence(segment.text),
+            segment.source_segment_ids,
+            segment.word_timestamps,
         )
         for segment in segments
     ]
@@ -522,6 +562,24 @@ def transcribe_with_diarization(
         raise FileNotFoundError(audio_path)
 
     try:
+        speech_regions = detect_speech_segments(audio_path)
+    except Exception:
+        # VAD unavailable/broken: degrade gracefully by skipping VAD
+        # filtering entirely rather than failing the whole transcription.
+        logger.exception("VAD speech detection failed; transcribing unfiltered")
+        speech_regions = None
+
+    if speech_regions is not None and not speech_regions:
+        return []
+
+    active_diarize = diarize if diarize is not None else voice_core.diarize_meeting_audio
+    try:
+        diarization = list(active_diarize(audio_path, speech_regions))
+    except Exception:
+        logger.exception("Diarization failed; falling back to Unknown Speaker labels")
+        diarization = []
+
+    try:
         import whisper
     except ImportError as error:
         raise RuntimeError("Install openai-whisper to transcribe audio") from error
@@ -529,14 +587,6 @@ def transcribe_with_diarization(
     from audio_core import TORCH_DEVICE
 
     model = whisper.load_model(model_size or config.WHISPER_MODEL, device=TORCH_DEVICE)
-
-    try:
-        speech_regions = detect_speech_segments(audio_path)
-    except Exception:
-        # VAD unavailable/broken: degrade gracefully by skipping VAD
-        # filtering entirely rather than failing the whole transcription.
-        logger.exception("VAD speech detection failed; transcribing unfiltered")
-        speech_regions = None
 
     active_task = task or config.WHISPER_TASK
     transcribe_kwargs = {
@@ -557,16 +607,7 @@ def transcribe_with_diarization(
     if config.WHISPER_INITIAL_PROMPT:
         transcribe_kwargs["initial_prompt"] = config.WHISPER_INITIAL_PROMPT
 
-    if speech_regions is not None and not speech_regions:
-        return []
-
     result = model.transcribe(str(audio_path), verbose=False, **transcribe_kwargs)
-    active_diarize = diarize if diarize is not None else voice_core.diarize_meeting_audio
-    try:
-        diarization = list(active_diarize(audio_path, speech_regions))
-    except Exception:
-        logger.exception("Diarization failed; falling back to Unknown Speaker labels")
-        diarization = []
     segments = []
 
     for raw in result.get("segments", []):
@@ -611,17 +652,27 @@ def transcribe_with_diarization(
                 ))
         word_pieces = _split_segment_by_words(raw, diarization, minimum_speaker_overlap) if diarization else None
         if word_pieces:
-            segments.extend(
-                TranscriptionSegment(
+            for label, piece_start, piece_end, piece_text in word_pieces:
+                if not piece_text.strip() or piece_end <= piece_start:
+                    continue
+                piece_words = tuple(
+                    (
+                        int(float(word["start"]) * 1000),
+                        int(float(word["end"]) * 1000),
+                        str(word["word"]).strip(),
+                    )
+                    for word in timed_words or ()
+                    if float(word["start"]) >= piece_start
+                    and float(word["end"]) <= piece_end
+                )
+                segments.append(TranscriptionSegment(
                     label,
                     int(piece_start * 1000),
                     int(piece_end * 1000),
                     piece_text.strip(),
                     confidence,
-                )
-                for label, piece_start, piece_end, piece_text in word_pieces
-                if piece_text.strip()
-            )
+                    word_timestamps=piece_words or None,
+                ))
             continue
 
         label = None
@@ -646,7 +697,22 @@ def transcribe_with_diarization(
                     word_end_ms,
                     word_text,
                 ))
-        segments.append(TranscriptionSegment(label, start_ms, end_ms, text, confidence))
+        word_timestamps = tuple(
+            (
+                int(float(word["start"]) * 1000),
+                int(float(word["end"]) * 1000),
+                str(word["word"]).strip(),
+            )
+            for word in timed_words or ()
+        )
+        segments.append(TranscriptionSegment(
+            label,
+            start_ms,
+            end_ms,
+            text,
+            confidence,
+            word_timestamps=word_timestamps or None,
+        ))
     return segments
 
 
@@ -709,6 +775,14 @@ def save_transcripts(
                 "DELETE FROM transcription_segments WHERE meeting_id=?",
                 (meeting_id,),
             )
+            connection.execute(
+                "DELETE FROM refined_transcription_segments WHERE meeting_id=?",
+                (meeting_id,),
+            )
+            connection.execute(
+                "DELETE FROM transcript_refinement_runs WHERE meeting_id=?",
+                (meeting_id,),
+            )
             distinct_labels = {segment.speaker_label for segment in segments}
             # Resolve all distinct labels in one query instead of one connection per segment.
             person_ids_by_label: dict[str, int] = {}
@@ -723,8 +797,9 @@ def save_transcripts(
                 """
                 INSERT INTO transcription_segments(
                     meeting_id, speaker_label, person_id, start_ms, end_ms,
-                    text, confidence, sentence_type, created_at
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
+                    text, original_text, confidence, sentence_type,
+                    word_timestamps, created_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
                 """,
                 [
                     (
@@ -733,9 +808,13 @@ def save_transcripts(
                         person_ids_by_label.get(segment.speaker_label),
                         segment.start_ms,
                         segment.end_ms,
-                        apply_text_cleanup(segment.text),
+                        segment.text,
+                        segment.text,
                         segment.confidence,
                         segment.sentence_type,
+                        json.dumps(segment.word_timestamps, ensure_ascii=False)
+                        if segment.word_timestamps is not None
+                        else None,
                     )
                     for segment in segments
                 ],
@@ -744,28 +823,209 @@ def save_transcripts(
     return paths
 
 
-def reanalyze_meeting_segments(meeting_id: int) -> int:
-    """Re-merge and re-classify a meeting's stored segments without re-transcribing."""
+def _persist_readable_transcript(
+    meeting_id: int,
+    segments: list[TranscriptionSegment],
+    method: str,
+    status: str,
+    recommendations=(),
+    error: Optional[str] = None,
+) -> None:
     with sqlite3.connect(config.DB_PATH) as connection:
+        connection.execute("PRAGMA foreign_keys=ON")
+        connection.execute(
+            "DELETE FROM refined_transcription_segments WHERE meeting_id=?",
+            (meeting_id,),
+        )
+        connection.executemany(
+            """
+            INSERT INTO refined_transcription_segments(
+                meeting_id, speaker_label, person_id, start_ms, end_ms, text,
+                source_segment_ids, sentence_type, refinement_method, created_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
+            """,
+            [
+                (
+                    meeting_id,
+                    segment.speaker_label,
+                    _person_id_for_label(connection, segment.speaker_label),
+                    segment.start_ms,
+                    segment.end_ms,
+                    apply_text_cleanup(segment.text),
+                    json.dumps(segment.source_segment_ids),
+                    segment.sentence_type,
+                    method,
+                )
+                for segment in segments
+            ],
+        )
+        connection.execute(
+            """
+            INSERT INTO transcript_refinement_runs(
+                meeting_id, status, method, speaker_change_recommendations,
+                error, updated_at
+            ) VALUES (?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
+            ON CONFLICT(meeting_id) DO UPDATE SET
+                status=excluded.status,
+                method=excluded.method,
+                speaker_change_recommendations=excluded.speaker_change_recommendations,
+                error=excluded.error,
+                updated_at=CURRENT_TIMESTAMP
+            """,
+            (
+                meeting_id,
+                status,
+                method,
+                json.dumps(
+                    [
+                        {
+                            "after_segment_id": item.after_segment_id,
+                            "reason": item.reason,
+                        }
+                        for item in recommendations
+                    ],
+                    ensure_ascii=False,
+                ),
+                error,
+            ),
+        )
+
+
+def _person_id_for_label(connection, label: str) -> Optional[int]:
+    row = connection.execute(
+        "SELECT person_id FROM persons WHERE name=?",
+        (label,),
+    ).fetchone()
+    return int(row[0]) if row else None
+
+
+def refresh_readable_transcript(meeting_id: int, use_llm: Optional[bool] = None) -> int:
+    """Build a readable view without changing detailed source transcript rows."""
+    with sqlite3.connect(config.DB_PATH) as connection:
+        connection.row_factory = sqlite3.Row
         rows = connection.execute(
             """
-            SELECT speaker_label, start_ms, end_ms, text, confidence
-            FROM transcription_segments WHERE meeting_id=? ORDER BY start_ms
+            SELECT segment_id, speaker_label, start_ms, end_ms, text, confidence,
+                   sentence_type, word_timestamps
+            FROM transcription_segments
+            WHERE meeting_id=?
+            ORDER BY start_ms, segment_id
             """,
             (meeting_id,),
         ).fetchall()
-    sentences = classify_segments(merge_speaker_sentences(absorb_minor_speakers(
-        TranscriptionSegment(*row) for row in rows
-    )))
-    meeting_dir = Path(config.TRANSCRIPTS_DIR) / str(meeting_id)
-    for stale_path in meeting_dir.glob("*.txt"):
+
+    detailed = []
+    for row in rows:
         try:
-            stale_path.unlink(missing_ok=True)
-        except OSError:
-            # Windows refuses to delete files another process has open.
-            logger.warning("Could not remove stale transcript %s", stale_path)
-    save_transcripts(sentences, meeting_dir, meeting_id)
-    return len(sentences)
+            raw_word_timestamps = (
+                json.loads(row["word_timestamps"])
+                if row["word_timestamps"]
+                else None
+            )
+            word_timestamps = (
+                tuple(
+                    (int(start), int(end), str(text))
+                    for start, end, text in raw_word_timestamps
+                )
+                if raw_word_timestamps is not None
+                else None
+            )
+        except (TypeError, ValueError, json.JSONDecodeError):
+            logger.warning(
+                "Invalid stored word timestamps for transcript segment %s",
+                row["segment_id"],
+            )
+            word_timestamps = None
+        detailed.append(TranscriptionSegment(
+            row["speaker_label"],
+            int(row["start_ms"]),
+            int(row["end_ms"]),
+            row["text"],
+            row["confidence"],
+            row["sentence_type"],
+            (int(row["segment_id"]),),
+            word_timestamps,
+        ))
+
+    readable = classify_segments(merge_speaker_sentences(detailed))
+    method = "deterministic"
+    status = "disabled"
+    recommendations = ()
+    error_message = None
+    should_use_llm = (
+        config.TRANSCRIPT_REFINEMENT_ENABLED if use_llm is None else use_llm
+    )
+    if should_use_llm and detailed:
+        try:
+            import transcript_refiner
+
+            result = transcript_refiner.refine_transcript([
+                {
+                    "segment_id": segment.source_segment_ids[0],
+                    "speaker_label": segment.speaker_label,
+                    "start_ms": segment.start_ms,
+                    "end_ms": segment.end_ms,
+                    "text": segment.text,
+                }
+                for segment in detailed
+            ])
+            by_id = {
+                segment.source_segment_ids[0]: segment
+                for segment in detailed
+            }
+            readable = classify_segments([
+                TranscriptionSegment(
+                    by_id[group.source_segment_ids[0]].speaker_label,
+                    by_id[group.source_segment_ids[0]].start_ms,
+                    by_id[group.source_segment_ids[-1]].end_ms,
+                    group.text,
+                    source_segment_ids=group.source_segment_ids,
+                    word_timestamps=tuple(
+                        word
+                        for source_id in group.source_segment_ids
+                        for word in (by_id[source_id].word_timestamps or ())
+                    ) or None,
+                )
+                for group in result.groups
+            ])
+            method = f"ollama:{config.TRANSCRIPT_REFINEMENT_MODEL}"
+            status = "complete"
+            recommendations = result.speaker_change_recommendations
+        except (OSError, RuntimeError, ValueError) as error:
+            logger.exception(
+                "Optional transcript refinement failed for meeting %s; "
+                "keeping the deterministic readable transcript",
+                meeting_id,
+            )
+            status = "fallback"
+            error_message = str(error)[:2000]
+
+    _persist_readable_transcript(
+        meeting_id,
+        readable,
+        method,
+        status,
+        recommendations,
+        error_message,
+    )
+    meeting_dir = Path(config.TRANSCRIPTS_DIR) / str(meeting_id)
+    meeting_dir.mkdir(parents=True, exist_ok=True)
+    readable_path = meeting_dir / "readable.txt"
+    readable_path.write_text(
+        "\n".join(
+            f"[{segment.start_ms // 1000:02d}s-{segment.end_ms // 1000:02d}s] "
+            f"{segment.speaker_label}: {segment.text}"
+            for segment in readable
+        )
+        + ("\n" if readable else ""),
+        encoding="utf-8",
+    )
+    return len(readable)
+
+
+def reanalyze_meeting_segments(meeting_id: int) -> int:
+    """Rebuild the readable view while preserving detailed source rows."""
+    return refresh_readable_transcript(meeting_id, use_llm=False)
 
 
 def process_meeting_transcription(
@@ -810,18 +1070,26 @@ def process_meeting_transcription(
             minimum_speaker_overlap=minimum_speaker_overlap,
             subtitle_word_callback=subtitle_word_callback,
         )
-        cleaned_segments = [
+        detailed_segments = classify_segments([
             TranscriptionSegment(
                 segment.speaker_label,
                 segment.start_ms,
                 segment.end_ms,
-                apply_text_cleanup(segment.text),
+                segment.text,
                 segment.confidence,
+                word_timestamps=segment.word_timestamps,
             )
             for segment in segments
-        ]
-        sentences = classify_segments(merge_speaker_sentences(absorb_minor_speakers(cleaned_segments)))
-        save_transcripts(sentences, meeting_dir, meeting_id)
+        ])
+        save_transcripts(detailed_segments, meeting_dir, meeting_id)
+        try:
+            refresh_readable_transcript(meeting_id)
+        except Exception:
+            logger.exception(
+                "Readable transcript generation failed for meeting %s; "
+                "the detailed transcript remains available",
+                meeting_id,
+            )
 
         with sqlite3.connect(config.DB_PATH) as connection:
             connection.execute(

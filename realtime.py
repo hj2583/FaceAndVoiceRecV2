@@ -343,7 +343,11 @@ def run(
             else:
                 person_id = event["person_id"]
                 person_name = event["speaker"]
-                confidence = event["confidence"]
+                confidence = (
+                    event["activity_score"]
+                    if "activity_score" in event
+                    else event["confidence"]
+                )
             log_audio(
                 _mono_to_wall_clock(event["start_time"]),
                 _mono_to_wall_clock(event["end_time"]),

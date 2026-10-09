@@ -1,3 +1,4 @@
+import gc
 import json
 import logging
 import os
@@ -223,7 +224,9 @@ class _UniFaceLandmarker:
         return SimpleNamespace(face_landmarks=[landmarks])
 
     def close(self):
-        return None
+        self._detector = None
+        self._mesher = None
+        gc.collect()
 
 
 def create_face_landmarker():
@@ -488,7 +491,7 @@ def process_video_pipeline(
                 event["end_time"],
                 event["person_id"],
                 event["speaker"],
-                event["confidence"],
+                event["activity_score"],
                 "video",
                 track_id=event["track_id"],
             )
@@ -499,7 +502,7 @@ def process_video_pipeline(
                 "track_id": event["track_id"],
                 "speaker": event["speaker"],
                 "person_name": event["speaker"],
-                "confidence": round(event["confidence"], 4),
+                "activity_score": round(event["activity_score"], 4),
                 "source": "video",
             })
 
@@ -1093,7 +1096,8 @@ def process_video_pipeline(
         if result["active_speaker"] is not None and speaker_origin is not None:
             cv2.putText(
                 frame,
-                f"{result['active_speaker']} [Speaking] {result['confidence']:.0%}",
+                f"{result['active_speaker']} [Speaking] lip activity "
+                f"{result['activity_score']:.2f}",
                 speaker_origin,
                 cv2.FONT_HERSHEY_SIMPLEX,
                 0.6,

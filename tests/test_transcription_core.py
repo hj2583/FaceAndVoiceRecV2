@@ -1,7 +1,12 @@
 from pathlib import Path
+import json
+import sqlite3
+
+import pytest
 
 import config
 import database
+import transcription_core
 
 from transcription_core import (
     TranscriptionSegment,
@@ -10,6 +15,7 @@ from transcription_core import (
     build_face_event_diarizer,
     classify_segments,
     classify_sentence,
+    group_readable_paragraphs,
     group_transcript_turns,
     merge_speaker_sentences,
     process_meeting_transcription,
@@ -65,6 +71,22 @@ def test_merge_does_not_join_across_long_pause():
     assert len(merge_speaker_sentences(segments, max_gap_ms=1500, max_chars=400)) == 2
 
 
+def test_merge_keeps_overlapping_and_zero_duration_segments_separate():
+    segments = [
+        TranscriptionSegment("Alice", 0, 1000, "First."),
+        TranscriptionSegment("Alice", 900, 1500, "Overlapping."),
+        TranscriptionSegment("Alice", 1500, 1500, "Invalid turn."),
+        TranscriptionSegment("Alice", 1500, 2000, "Last."),
+    ]
+
+    merged = merge_speaker_sentences(segments, max_gap_ms=1500, max_chars=400)
+
+    assert [(item.start_ms, item.end_ms, item.text) for item in merged] == [
+        (0, 1000, "First."),
+        (900, 2000, "Overlapping. Last."),
+    ]
+
+
 def test_group_transcript_turns_keeps_adjacent_same_speaker_entries_together():
     segments = [
         TranscriptionSegment("Alice", 0, 1000, "First sentence.", sentence_type="Comment"),
@@ -82,6 +104,109 @@ def test_group_transcript_turns_keeps_adjacent_same_speaker_entries_together():
     ]
 
 
+def test_group_transcript_turns_does_not_group_overlap_or_zero_duration():
+    segments = [
+        TranscriptionSegment("Alice", 0, 1000, "First."),
+        TranscriptionSegment("Alice", 900, 1500, "Overlap."),
+        TranscriptionSegment("Alice", 1500, 1500, "Invalid."),
+        TranscriptionSegment("Alice", 1600, 2000, "Last."),
+    ]
+
+    turns = group_transcript_turns(segments, max_gap_ms=1000)
+
+    assert [[segment.text for segment in turn] for turn in turns] == [
+        ["First."],
+        ["Overlap."],
+        ["Invalid."],
+        ["Last."],
+    ]
+
+
+def test_readable_paragraphs_join_continuous_fragments_but_keep_speaker_labels():
+    segments = [
+        TranscriptionSegment(
+            "UNKNOWN", 14140, 14700, "Hello,",
+            source_segment_ids=(1077,),
+        ),
+        TranscriptionSegment(
+            "The Centre 1", 14920, 16379,
+            "thank you for joining the senior management",
+            source_segment_ids=(1078,),
+        ),
+        TranscriptionSegment(
+            "UNKNOWN", 16379, 16820, "team",
+            source_segment_ids=(1079,),
+        ),
+        TranscriptionSegment(
+            "Person 1", 16820, 18080, "of Fair Threads,",
+            source_segment_ids=(1080,),
+        ),
+        TranscriptionSegment(
+            "The Centre 1", 18180, 26380,
+            "an ethically run clothing manufacturer. I'm Samantha Mason, "
+            "Chief Executive Officer and I'd now like to invite my colleagues "
+            "to introduce themselves.",
+            source_segment_ids=(1081, 1082, 1083),
+        ),
+    ]
+
+    paragraphs = group_readable_paragraphs(segments)
+
+    assert len(paragraphs) == 1
+    assert paragraphs[0].start_ms == 14140
+    assert paragraphs[0].end_ms == 26380
+    assert paragraphs[0].text == (
+        "Hello, thank you for joining the senior management team of Fair Threads, "
+        "an ethically run clothing manufacturer. I'm Samantha Mason, Chief "
+        "Executive Officer and I'd now like to invite my colleagues to introduce "
+        "themselves."
+    )
+    assert paragraphs[0].source_segment_ids == (
+        1077, 1078, 1079, 1080, 1081, 1082, 1083,
+    )
+    assert paragraphs[0].speaker_labels == (
+        "UNKNOWN", "The Centre 1", "Person 1",
+    )
+
+
+def test_readable_paragraphs_stop_at_long_pauses_and_sentence_ends():
+    segments = [
+        TranscriptionSegment("Alice", 0, 500, "First.", source_segment_ids=(1,)),
+        TranscriptionSegment("Bob", 600, 1000, "Second", source_segment_ids=(2,)),
+        TranscriptionSegment("Bob", 5000, 5500, "later.", source_segment_ids=(3,)),
+    ]
+
+    paragraphs = group_readable_paragraphs(segments, max_gap_ms=1500)
+
+    assert [paragraph.text for paragraph in paragraphs] == [
+        "First.",
+        "Second",
+        "later.",
+    ]
+    assert [paragraph.speaker_labels for paragraph in paragraphs] == [
+        ("Alice",),
+        ("Bob",),
+        ("Bob",),
+    ]
+
+
+def test_classification_preserves_detailed_source_and_word_timing_metadata():
+    segment = TranscriptionSegment(
+        "Alice",
+        0,
+        1000,
+        "Hello.",
+        0.9,
+        source_segment_ids=(12, 13),
+        word_timestamps=((100, 500, "Hello."),),
+    )
+
+    classified = classify_segments([segment])[0]
+
+    assert classified.source_segment_ids == (12, 13)
+    assert classified.word_timestamps == ((100, 500, "Hello."),)
+
+
 def test_classify_sentence_rules():
     assert classify_sentence("What is the timeline?") == "Question"
     assert classify_sentence("Okay, so when do we start? I think May.") == "Question"
@@ -94,7 +219,7 @@ def test_classify_sentence_rules():
     assert classify_sentence("Um, uh...") == "Unknown"
 
 
-def test_absorb_minor_speakers_relabels_stray_unknown_fragments():
+def test_absorb_minor_speakers_does_not_guess_unknown_identity():
     segments = [
         TranscriptionSegment("Unknown Speaker 35", 0, 20_000, "Long intro"),
         TranscriptionSegment("Unknown Speaker", 20_500, 21_000, "1."),
@@ -107,8 +232,8 @@ def test_absorb_minor_speakers_relabels_stray_unknown_fragments():
 
     assert [s.speaker_label for s in result] == [
         "Unknown Speaker 35",
-        "Unknown Speaker 35",
-        "Unknown Speaker 35",
+        "Unknown Speaker",
+        "Unknown Speaker 36",
         "Unknown Speaker 35",
         "Alice",
     ]
@@ -213,6 +338,43 @@ def test_fixed_language_mode_passes_configured_language(tmp_path, monkeypatch):
     transcribe_with_diarization(wav_path, diarize=lambda *_a: [])
 
     assert calls[0]["language"] == "en"
+
+
+def test_auto_language_mode_uses_detected_language_without_translation(tmp_path, monkeypatch):
+    wav_path = tmp_path / "audio.wav"
+    wav_path.write_bytes(b"fake wav")
+    monkeypatch.setattr("transcription_core.detect_speech_segments", lambda *_a, **_k: [(0.0, 2.0)])
+    monkeypatch.setattr(config, "WHISPER_LANGUAGE_MODE", "auto")
+    monkeypatch.setattr(config, "WHISPER_TASK", "transcribe")
+    monkeypatch.setattr(
+        "transcription_core._detect_meeting_language",
+        lambda *_args: "ms",
+    )
+
+    calls = []
+
+    class FakeModel:
+        def transcribe(self, path, verbose=False, **kwargs):
+            calls.append(kwargs)
+            return {"segments": [{"start": 0, "end": 1, "text": "Selamat pagi."}]}
+
+    fake_whisper = type(
+        "FakeWhisperModule",
+        (),
+        {"load_model": staticmethod(lambda *_a, **_k: FakeModel())},
+    )
+    monkeypatch.setitem(__import__("sys").modules, "whisper", fake_whisper)
+
+    from transcription_core import transcribe_with_diarization
+
+    segments = transcribe_with_diarization(
+        wav_path,
+        diarize=lambda *_args: [("UNKNOWN", 0.0, 2.0)],
+    )
+
+    assert calls[0]["language"] == "ms"
+    assert calls[0]["task"] == "transcribe"
+    assert segments[0].text == "Selamat pagi."
 
 
 def test_transcribe_with_diarization_degrades_gracefully_when_vad_fails(tmp_path, monkeypatch):
@@ -373,16 +535,65 @@ def test_update_transcription_segments_saves_corrections_and_rewrites_files(tmp_
         "segment_id": segment_id,
         "text": "Hello world.",
         "sentence_type": "Topic",
-        "confidence": 1.0,
+        "confidence": 0.4,
     }])
 
     with database.get_conn() as connection:
         row = connection.execute(
-            "SELECT text, sentence_type, confidence FROM transcription_segments WHERE segment_id=?",
+            "SELECT text, original_text, sentence_type, confidence, word_timestamps FROM transcription_segments WHERE segment_id=?",
             (segment_id,),
         ).fetchone()
-    assert row == ("Hello world.", "Topic", 1.0)
+        readable = connection.execute(
+            "SELECT source_segment_ids, text FROM refined_transcription_segments WHERE meeting_id=?",
+            (meeting_id,),
+        ).fetchone()
+    assert row == ("Hello world.", "helo wrld.", "Topic", 0.4, None)
+    assert readable == (f"[{segment_id}]", "Hello world.")
     assert (config.TRANSCRIPTS_DIR / str(meeting_id) / "ivy.txt").read_text(encoding="utf-8") == "[00:00] Hello world.\n"
+
+
+def test_database_migration_copies_existing_transcript_into_original_text(tmp_path, monkeypatch):
+    db_path = tmp_path / "legacy.db"
+    monkeypatch.setattr(config, "DB_PATH", db_path)
+    monkeypatch.setattr(database, "DB_PATH", db_path)
+    with sqlite3.connect(db_path) as connection:
+        connection.executescript(
+            """
+            CREATE TABLE meetings (
+                meeting_id INTEGER PRIMARY KEY AUTOINCREMENT,
+                video_path TEXT NOT NULL UNIQUE,
+                created_at TEXT NOT NULL,
+                processed_at TEXT,
+                transcription_status TEXT NOT NULL DEFAULT 'pending',
+                error_log TEXT
+            );
+            CREATE TABLE transcription_segments (
+                segment_id INTEGER PRIMARY KEY AUTOINCREMENT,
+                meeting_id INTEGER NOT NULL,
+                speaker_label TEXT NOT NULL,
+                person_id INTEGER,
+                start_ms INTEGER NOT NULL,
+                end_ms INTEGER NOT NULL,
+                text TEXT NOT NULL,
+                confidence REAL,
+                created_at TEXT NOT NULL
+            );
+            INSERT INTO meetings(video_path, created_at) VALUES ('old.mp4', 'now');
+            INSERT INTO transcription_segments(
+                meeting_id, speaker_label, start_ms, end_ms, text, created_at
+            ) VALUES (1, 'Alice', 0, 1000, 'legacy transcript', 'now');
+            """
+        )
+
+    database.init_db()
+
+    with database.get_conn() as connection:
+        migrated = connection.execute(
+            "SELECT text, original_text, word_timestamps "
+            "FROM transcription_segments WHERE segment_id=1"
+        ).fetchone()
+
+    assert migrated == ("legacy transcript", "legacy transcript", None)
 
 
 def test_reanalyze_meeting_segments_merges_and_classifies_old_rows(tmp_path, monkeypatch):
@@ -414,11 +625,20 @@ def test_reanalyze_meeting_segments_merges_and_classifies_old_rows(tmp_path, mon
     assert reanalyze_meeting_segments(meeting_id) == 1
 
     with database.get_conn() as connection:
-        rows = connection.execute(
-            "SELECT start_ms, end_ms, sentence_type FROM transcription_segments WHERE meeting_id=?",
+        detail_rows = connection.execute(
+            "SELECT start_ms, end_ms, sentence_type FROM transcription_segments WHERE meeting_id=? ORDER BY start_ms",
             (meeting_id,),
         ).fetchall()
-    assert rows == [(6000, 24000, "Topic")]
+        readable_rows = connection.execute(
+            "SELECT start_ms, end_ms, sentence_type, source_segment_ids FROM refined_transcription_segments WHERE meeting_id=?",
+            (meeting_id,),
+        ).fetchall()
+    assert detail_rows == [
+        (6000, 9000, None),
+        (9000, 16000, None),
+        (16000, 24000, None),
+    ]
+    assert readable_rows == [(6000, 24000, "Topic", "[1, 2, 3]")]
 
 
 def test_save_transcripts_groups_by_speaker(tmp_path: Path):
@@ -462,7 +682,14 @@ def test_process_meeting_transcription_persists_completed_segments(
     monkeypatch.setattr(
         "transcription_core.transcribe_with_diarization",
         lambda *_args, **_kwargs: [
-            TranscriptionSegment("Speaker A", 0, 1500, " hello ", 0.8),
+            TranscriptionSegment(
+                "Speaker A",
+                0,
+                1500,
+                " hello ",
+                0.8,
+                word_timestamps=((100, 400, "hello"),),
+            ),
         ],
     )
 
@@ -474,13 +701,127 @@ def test_process_meeting_transcription_persists_completed_segments(
             (meeting_id,),
         ).fetchone()[0]
         segments = connection.execute(
-            "SELECT speaker_label, text FROM transcription_segments WHERE meeting_id=?",
+            "SELECT speaker_label, text, original_text, word_timestamps "
+            "FROM transcription_segments WHERE meeting_id=?",
             (meeting_id,),
         ).fetchall()
 
     assert status == "completed"
-    assert segments == [("Speaker A", "hello")]
+    assert segments == [("Speaker A", " hello ", " hello ", "[[100, 400, \"hello\"]]")]
     assert (config.TRANSCRIPTS_DIR / str(meeting_id) / "speaker_a.txt").exists()
+
+
+def test_reprocessing_replaces_detailed_and_readable_rows_without_duplicates(
+    tmp_path: Path,
+    monkeypatch,
+):
+    db_path = tmp_path / "meeting.db"
+    monkeypatch.setattr(config, "DB_PATH", db_path)
+    monkeypatch.setattr(database, "DB_PATH", db_path)
+    monkeypatch.setattr(config, "TRANSCRIPTS_DIR", tmp_path / "transcripts")
+    database.init_db()
+    video_path = tmp_path / "meeting.mp4"
+    video_path.write_bytes(b"video")
+
+    def fake_extract(_video_path, output_path):
+        output_path.parent.mkdir(parents=True, exist_ok=True)
+        output_path.write_bytes(b"audio")
+        return output_path
+
+    monkeypatch.setattr("transcription_core.extract_audio_from_video", fake_extract)
+    monkeypatch.setattr(
+        "transcription_core.transcribe_with_diarization",
+        lambda *_args, **_kwargs: [
+            TranscriptionSegment("Alice", 0, 500, "Good"),
+            TranscriptionSegment("Alice", 600, 1200, "morning."),
+        ],
+    )
+
+    first_meeting_id = process_meeting_transcription(video_path)
+    second_meeting_id = process_meeting_transcription(video_path)
+
+    with database.get_conn() as connection:
+        meetings_count = connection.execute(
+            "SELECT COUNT(*) FROM meetings WHERE video_path=?",
+            (str(video_path),),
+        ).fetchone()[0]
+        detailed_rows = connection.execute(
+            "SELECT COUNT(*) FROM transcription_segments WHERE meeting_id=?",
+            (second_meeting_id,),
+        ).fetchone()[0]
+        readable_rows = connection.execute(
+            "SELECT COUNT(*) FROM refined_transcription_segments WHERE meeting_id=?",
+            (second_meeting_id,),
+        ).fetchone()[0]
+        source_refs = connection.execute(
+            "SELECT source_segment_ids FROM refined_transcription_segments WHERE meeting_id=?",
+            (second_meeting_id,),
+        ).fetchone()[0]
+        detailed_ids = [
+            row[0]
+            for row in connection.execute(
+                "SELECT segment_id FROM transcription_segments WHERE meeting_id=? ORDER BY segment_id",
+                (second_meeting_id,),
+            ).fetchall()
+        ]
+
+    assert first_meeting_id == second_meeting_id
+    assert meetings_count == 1
+    assert detailed_rows == 2
+    assert readable_rows == 1
+    assert json.loads(source_refs) == detailed_ids
+
+
+def test_ollama_failure_falls_back_without_losing_detailed_transcript(tmp_path, monkeypatch):
+    import transcript_refiner
+
+    db_path = tmp_path / "meeting.db"
+    monkeypatch.setattr(config, "DB_PATH", db_path)
+    monkeypatch.setattr(database, "DB_PATH", db_path)
+    monkeypatch.setattr(config, "TRANSCRIPTS_DIR", tmp_path / "transcripts")
+    monkeypatch.setattr(config, "TRANSCRIPT_REFINEMENT_ENABLED", True)
+    database.init_db()
+    video_path = tmp_path / "meeting.mp4"
+    video_path.write_bytes(b"video")
+
+    def fake_extract(_video_path, output_path):
+        output_path.parent.mkdir(parents=True, exist_ok=True)
+        output_path.write_bytes(b"audio")
+        return output_path
+
+    def fail_refinement(_payload):
+        raise transcript_refiner.TranscriptRefinementError(
+            "Ollama unavailable"
+        )
+
+    monkeypatch.setattr("transcription_core.extract_audio_from_video", fake_extract)
+    monkeypatch.setattr(
+        "transcription_core.transcribe_with_diarization",
+        lambda *_args, **_kwargs: [
+            TranscriptionSegment("Alice", 0, 1000, "Hello there.", 0.9),
+        ],
+    )
+    monkeypatch.setattr(transcript_refiner, "_post_ollama_chat", fail_refinement)
+
+    meeting_id = process_meeting_transcription(video_path)
+
+    with database.get_conn() as connection:
+        detailed_count = connection.execute(
+            "SELECT COUNT(*) FROM transcription_segments WHERE meeting_id=?",
+            (meeting_id,),
+        ).fetchone()[0]
+        readable = connection.execute(
+            "SELECT text FROM refined_transcription_segments WHERE meeting_id=?",
+            (meeting_id,),
+        ).fetchone()[0]
+        run = connection.execute(
+            "SELECT status, error FROM transcript_refinement_runs WHERE meeting_id=?",
+            (meeting_id,),
+        ).fetchone()
+
+    assert detailed_count == 1
+    assert readable == "Hello there."
+    assert run == ("fallback", "Ollama unavailable")
 
 
 def test_process_meeting_transcription_does_not_run_english_translation(
@@ -561,6 +902,34 @@ def test_process_meeting_transcription_uses_voice_core_diarizer_by_default(tmp_p
             (meeting_id,),
         ).fetchone()
     assert row[0] == "Gina"
+
+
+def test_voice_diarization_runs_before_whisper_model_load(tmp_path, monkeypatch):
+    wav_path = tmp_path / "audio.wav"
+    wav_path.write_bytes(b"audio")
+    calls = []
+    monkeypatch.setattr(
+        transcription_core,
+        "detect_speech_segments",
+        lambda *_args: [(0.0, 1.0)],
+    )
+    monkeypatch.setattr(
+        "voice_core.diarize_meeting_audio",
+        lambda *_args: calls.append("diarized") or [("Unknown Speaker 7", 0.0, 1.0)],
+    )
+    fake_whisper = type(
+        "FakeWhisperModule",
+        (),
+        {"load_model": staticmethod(lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            RuntimeError("Whisper model unavailable")
+        ))},
+    )
+    monkeypatch.setitem(__import__("sys").modules, "whisper", fake_whisper)
+
+    with pytest.raises(RuntimeError, match="Whisper model unavailable"):
+        transcription_core.transcribe_with_diarization(wav_path)
+
+    assert calls == ["diarized"]
 
 
 def test_process_meeting_transcription_populates_person_id_for_known_speaker(tmp_path, monkeypatch):

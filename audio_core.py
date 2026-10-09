@@ -18,7 +18,7 @@ except Exception:
 
 # Prefer CUDA for all torch-based models (Silero VAD, Whisper, SpeechBrain);
 # fall back to CPU automatically when no GPU is available.
-TORCH_DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
+TORCH_DEVICE = "cuda:0" if torch.cuda.is_available() else "cpu"
 
 
 # ============================================================
