@@ -102,11 +102,30 @@ readable transcript with an error status. The app stores the original Whisper
 text, manually corrected detailed text, and readable output separately so they
 can be compared.
 
+### Participant self-introductions
+
+After video transcription, the app looks for explicit self-introduction
+phrases in English, Malay, Spanish, and French, and saves the extracted name,
+optional role, timestamps, source segment IDs, diarized voice label, and
+time-overlapping active face track in the `meeting_introductions` table. A
+clear introduction on a stable unknown voice track can create/reuse the named
+person and enroll that track's existing voice samples. If the face is not
+already recognized, a uniquely aligned active face track is enrolled from its
+saved face samples and linked to that person. Face tracks are assigned a
+per-processing-run label so samples from different videos are not accidentally
+treated as the same face. If there is no unique saved face track, the
+introduction remains pending for review. Conflicting audio/face identities and
+multiple introductions in one segment are not auto-assigned; pending candidates
+can be confirmed in Meeting Transcripts. Introduction/parser and lip-activity
+scores are heuristic scores, not calibrated probabilities. No face identity is
+inferred just because a face is visible.
+
 ## Features
 
 - Realtime webcam recognition
 - Uploaded-video processing
 - Active-speaker estimation from voice + lip movement
+- Participant name and role extraction from explicit meeting introductions
 - Unknown-face tracking and review
 - Face database management
 - Transcription support for video/audio content

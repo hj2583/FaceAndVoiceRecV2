@@ -9,6 +9,31 @@ import video_workflow
 import voice_core
 
 
+def test_self_introduction_identity_updates_only_rename_supported_subtitle_words():
+    words = [
+        SubtitleWord("Unknown Speaker 7", 27_000, 27_300, "Hi"),
+        SubtitleWord("Unknown Speaker 7", 50_000, 50_300, "again"),
+        SubtitleWord("UNKNOWN", 27_000, 27_300, "uncertain"),
+    ]
+
+    video_workflow._apply_introduction_identity_updates(
+        words,
+        [{
+            "speaker_label": "Unknown Speaker 7",
+            "person_name": "Alex",
+            "start_ms": 27_000,
+            "end_ms": 29_000,
+            "global": False,
+        }],
+    )
+
+    assert [word.speaker_label for word in words] == [
+        "Alex",
+        "Unknown Speaker 7",
+        "UNKNOWN",
+    ]
+
+
 def test_workflow_temp_dir_uses_configured_folder(tmp_path, monkeypatch):
     workflow_temp_root = tmp_path / "workflow-temp"
     monkeypatch.setattr(config, "WORKFLOW_TEMP_DIR", workflow_temp_root)

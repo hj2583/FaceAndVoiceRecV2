@@ -51,6 +51,21 @@ def _build_video_diarizer(speech_events):
     return diarize
 
 
+def _apply_introduction_identity_updates(subtitle_words, identity_updates):
+    for word in subtitle_words:
+        for update in identity_updates:
+            matches_speaker = word.speaker_label == update["speaker_label"]
+            overlaps_introduction = (
+                word.end_ms > update["start_ms"]
+                and word.start_ms < update["end_ms"]
+            )
+            if matches_speaker and (
+                update["global"] or overlaps_introduction
+            ):
+                word.speaker_label = update["person_name"]
+                break
+
+
 class TranscriptStageError(RuntimeError):
     """Raised when transcription fails after video processing succeeded."""
 
@@ -197,6 +212,27 @@ def process_video_and_transcribe(
                 minimum_speaker_overlap=config.SPEAKER_FACE_OVERLAP_THRESHOLD,
                 subtitle_word_callback=subtitle_words.append,
             )
+            try:
+                from speaker_introductions import process_meeting_introductions
+
+                identity_updates = process_meeting_introductions(
+                    meeting_id,
+                    speech_events,
+                )
+                if any(update.get("face_enrolled") for update in identity_updates):
+                    from face_core import FaceIndex
+
+                    FaceIndex().rebuild()
+                _apply_introduction_identity_updates(
+                    subtitle_words,
+                    identity_updates,
+                )
+            except Exception:
+                logger.exception(
+                    "Self-introduction analysis failed for meeting %s; "
+                    "the original transcript remains available",
+                    meeting_id,
+                )
             cues = build_subtitle_cues(subtitle_words)
             write_ass_subtitles(cues, subtitle_path)
         except Exception as transcription_error:

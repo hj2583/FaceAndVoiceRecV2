@@ -491,3 +491,87 @@ def register_unknown(
         image_path=image_path,
         embedding_path=embedding_path,
     )
+
+
+def enroll_unknown_face_track(unknown_id, person_id):
+    """Enroll the saved samples for one unknown face track to an existing person."""
+    from database import (
+        list_embeddings,
+        list_persons,
+        list_unknown_samples,
+        list_unknowns,
+        resolve_unknown,
+    )
+
+    unknown_id = int(unknown_id)
+    person_id = int(person_id)
+    unknown = next(
+        (
+            row
+            for row in list_unknowns(include_resolved=True)
+            if int(row[0]) == unknown_id
+        ),
+        None,
+    )
+    if unknown is None:
+        raise ValueError(f"Unknown face track {unknown_id} does not exist")
+    resolved_person_id = unknown[5]
+    if resolved_person_id is not None and int(resolved_person_id) != person_id:
+        raise ValueError(
+            f"Unknown face track {unknown_id} is already linked to another person"
+        )
+
+    people = {int(row[0]): row[1] for row in list_persons()}
+    person_name = people.get(person_id)
+    if person_name is None:
+        raise ValueError(f"Person {person_id} does not exist")
+
+    existing_image_paths = {
+        str(Path(row[4]).resolve()).casefold()
+        for row in list_embeddings()
+        if int(row[1]) == person_id and row[4]
+    }
+    samples = list_unknown_samples(unknown_id)
+    if not samples:
+        samples = [
+            (
+                None,
+                unknown[2],
+                unknown[3],
+                0.0,
+                0.0,
+                None,
+            )
+        ]
+
+    embeddings_added = 0
+    for sample_id, image_path, embedding_path, quality, _angle_score, _created in samples:
+        if (
+            image_path
+            and str(Path(image_path).resolve()).casefold() in existing_image_paths
+        ):
+            continue
+        embedding = load_or_extract_embedding(embedding_path, image_path)
+        if embedding is None:
+            logging.warning(
+                "Could not enroll unknown face sample %s for person %s",
+                sample_id if sample_id is not None else unknown_id,
+                person_id,
+            )
+            continue
+        save_embedding_for_person(
+            person_name,
+            embedding,
+            image_path=image_path,
+            quality=quality,
+        )
+        embeddings_added += 1
+        if image_path:
+            existing_image_paths.add(str(Path(image_path).resolve()).casefold())
+
+    if embeddings_added == 0 and resolved_person_id is None:
+        raise ValueError(
+            f"Unknown face track {unknown_id} has no valid samples to enroll"
+        )
+    resolve_unknown(unknown_id, person_id)
+    return embeddings_added

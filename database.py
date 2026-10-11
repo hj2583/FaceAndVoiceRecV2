@@ -1,4 +1,5 @@
 import logging
+import json
 import math
 import sqlite3
 import threading
@@ -136,6 +137,53 @@ def init_db():
                 processed_at TEXT,
                 transcription_status TEXT NOT NULL DEFAULT 'pending',
                 error_log TEXT
+            )
+        """)
+
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS meeting_introductions (
+                introduction_id INTEGER PRIMARY KEY AUTOINCREMENT,
+                meeting_id INTEGER NOT NULL,
+                name TEXT NOT NULL,
+                job_title TEXT,
+                start_ms INTEGER NOT NULL,
+                end_ms INTEGER NOT NULL,
+                speaker_label TEXT NOT NULL,
+                source_segment_ids TEXT NOT NULL,
+                voice_unknown_id INTEGER,
+                face_track_id INTEGER,
+                person_id INTEGER,
+                parser_confidence REAL NOT NULL,
+                match_confidence REAL,
+                status TEXT NOT NULL,
+                reason TEXT,
+                face_unknown_id INTEGER,
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL,
+                FOREIGN KEY(meeting_id) REFERENCES meetings(meeting_id) ON DELETE CASCADE,
+                FOREIGN KEY(voice_unknown_id)
+                    REFERENCES unknown_voices(unknown_voice_id) ON DELETE SET NULL,
+                FOREIGN KEY(person_id) REFERENCES persons(person_id),
+                FOREIGN KEY(face_unknown_id)
+                    REFERENCES unknown_tracks(unknown_id) ON DELETE SET NULL
+            )
+        """)
+        introduction_columns = {
+            row[1]
+            for row in conn.execute(
+                "PRAGMA table_info(meeting_introductions)"
+            ).fetchall()
+        }
+        if "face_unknown_id" not in introduction_columns:
+            conn.execute(
+                "ALTER TABLE meeting_introductions "
+                "ADD COLUMN face_unknown_id INTEGER "
+                "REFERENCES unknown_tracks(unknown_id) ON DELETE SET NULL"
+            )
+        conn.execute("""
+            CREATE UNIQUE INDEX IF NOT EXISTS idx_meeting_introduction_source
+            ON meeting_introductions(
+                meeting_id, name, start_ms, end_ms
             )
         """)
 
@@ -504,6 +552,30 @@ def resolve_unknown(unknown_id, person_id):
             "UPDATE unknown_tracks SET resolved_person_id=? WHERE unknown_id=?",
             (person_id, unknown_id),
         )
+
+def get_unknown_face_track_by_label(label):
+    with get_conn() as conn:
+        rows = conn.execute(
+            """
+            SELECT unknown_id, resolved_person_id
+            FROM unknown_tracks
+            WHERE label=?
+            ORDER BY unknown_id DESC
+            LIMIT 2
+            """,
+            (str(label),),
+        ).fetchall()
+    if len(rows) != 1:
+        return None
+    unknown_id, resolved_person_id = rows[0]
+    return {
+        "unknown_id": int(unknown_id),
+        "resolved_person_id": (
+            int(resolved_person_id)
+            if resolved_person_id is not None
+            else None
+        ),
+    }
 
 
 _FACE_REFERENCE_SPECS = (
@@ -1031,6 +1103,263 @@ def list_resolved_unknown_voice_samples_for_source(source_ref):
             for person_id, start_ms, end_ms in effective_samples
             if person_id in names_by_person_id
         ]
+
+
+def get_unknown_voice_by_label(label):
+    with get_conn() as conn:
+        return conn.execute(
+            """
+            SELECT unknown_voice_id, resolved_person_id
+            FROM unknown_voices
+            WHERE label=?
+            """,
+            (str(label),),
+        ).fetchone()
+
+
+def save_meeting_introduction(
+    meeting_id,
+    name,
+    job_title,
+    start_ms,
+    end_ms,
+    speaker_label,
+    source_segment_ids,
+    parser_confidence,
+    status,
+    voice_unknown_id=None,
+    face_track_id=None,
+    person_id=None,
+    match_confidence=None,
+    reason=None,
+    face_unknown_id=None,
+):
+    start_ms = int(start_ms)
+    end_ms = int(end_ms)
+    if end_ms <= start_ms:
+        raise ValueError("Introduction end time must be after its start time")
+    source_segment_ids = [int(value) for value in source_segment_ids]
+    if not source_segment_ids:
+        raise ValueError("Introduction must reference at least one source segment")
+    now = utc_now()
+    with get_conn() as conn:
+        conn.execute(
+            """
+            INSERT INTO meeting_introductions(
+                meeting_id, name, job_title, start_ms, end_ms, speaker_label,
+                source_segment_ids, voice_unknown_id, face_track_id, person_id,
+                parser_confidence, match_confidence, status, reason,
+                created_at, updated_at, face_unknown_id
+            )
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(meeting_id, name, start_ms, end_ms)
+            DO UPDATE SET
+                job_title=excluded.job_title,
+                source_segment_ids=excluded.source_segment_ids,
+                voice_unknown_id=COALESCE(
+                    excluded.voice_unknown_id,
+                    meeting_introductions.voice_unknown_id
+                ),
+                face_track_id=excluded.face_track_id,
+                person_id=CASE
+                    WHEN meeting_introductions.status='manually_confirmed'
+                    THEN meeting_introductions.person_id
+                    ELSE excluded.person_id
+                END,
+                parser_confidence=excluded.parser_confidence,
+                match_confidence=excluded.match_confidence,
+                status=CASE
+                    WHEN meeting_introductions.status='manually_confirmed'
+                    THEN meeting_introductions.status
+                    ELSE excluded.status
+                END,
+                reason=CASE
+                    WHEN meeting_introductions.status='manually_confirmed'
+                    THEN meeting_introductions.reason
+                    ELSE excluded.reason
+                END,
+                face_unknown_id=COALESCE(
+                    excluded.face_unknown_id,
+                    meeting_introductions.face_unknown_id
+                ),
+                updated_at=excluded.updated_at
+            """,
+            (
+                int(meeting_id),
+                str(name),
+                str(job_title).strip() if job_title else None,
+                int(start_ms),
+                int(end_ms),
+                str(speaker_label),
+                json.dumps([int(value) for value in source_segment_ids]),
+                int(voice_unknown_id) if voice_unknown_id is not None else None,
+                int(face_track_id) if face_track_id is not None else None,
+                int(person_id) if person_id is not None else None,
+                float(parser_confidence),
+                float(match_confidence) if match_confidence is not None else None,
+                str(status),
+                str(reason) if reason else None,
+                now,
+                now,
+                int(face_unknown_id) if face_unknown_id is not None else None,
+            ),
+        )
+        if person_id is not None and str(status).startswith(
+            ("matched_", "voice_enrolled_")
+        ):
+            segment_ids = [int(value) for value in source_segment_ids]
+            if segment_ids:
+                placeholders = ",".join("?" for _ in segment_ids)
+                person_name = conn.execute(
+                    "SELECT name FROM persons WHERE person_id=?",
+                    (int(person_id),),
+                ).fetchone()
+                if person_name is None:
+                    raise ValueError(f"Person {person_id} does not exist")
+                conn.execute(
+                    f"""
+                    UPDATE transcription_segments
+                    SET speaker_label=?, person_id=?
+                    WHERE meeting_id=? AND segment_id IN ({placeholders})
+                    """,
+                    (
+                        person_name[0],
+                        int(person_id),
+                        int(meeting_id),
+                        *segment_ids,
+                    ),
+                )
+        return int(
+            conn.execute(
+                """
+                SELECT introduction_id FROM meeting_introductions
+                WHERE meeting_id=? AND name=? AND start_ms=? AND end_ms=?
+                """,
+                (
+                    int(meeting_id),
+                    str(name),
+                    int(start_ms),
+                    int(end_ms),
+                ),
+            ).fetchone()[0]
+        )
+
+
+def list_meeting_introductions(meeting_id):
+    with get_conn() as conn:
+        return conn.execute(
+            """
+            SELECT introduction_id, name, job_title, start_ms, end_ms,
+                   speaker_label, source_segment_ids, voice_unknown_id,
+                   face_track_id, person_id, parser_confidence,
+                   match_confidence, status, reason, face_unknown_id
+            FROM meeting_introductions
+            WHERE meeting_id=?
+            ORDER BY start_ms, introduction_id
+            """,
+            (int(meeting_id),),
+        ).fetchall()
+
+
+def confirm_meeting_introduction(introduction_id, person_id):
+    """Manually confirm a detected introduction for its source transcript rows."""
+    introduction_id = int(introduction_id)
+    person_id = int(person_id)
+    with get_conn() as conn:
+        row = conn.execute(
+            """
+            SELECT meeting_id, name, speaker_label, source_segment_ids,
+                   voice_unknown_id, status, face_unknown_id
+            FROM meeting_introductions WHERE introduction_id=?
+            """,
+            (introduction_id,),
+        ).fetchone()
+        if row is None:
+            raise ValueError(f"Introduction {introduction_id} does not exist")
+        person = conn.execute(
+            "SELECT name FROM persons WHERE person_id=?",
+            (person_id,),
+        ).fetchone()
+        if person is None:
+            raise ValueError(f"Person {person_id} does not exist")
+        meeting_id = int(row[0])
+        segment_ids = json.loads(row[3])
+        if (
+            not isinstance(segment_ids, list)
+            or not segment_ids
+            or any(type(value) is not int or value <= 0 for value in segment_ids)
+        ):
+            raise ValueError("Introduction has no valid source transcript segments")
+        voice_unknown_id = int(row[4]) if row[4] is not None else None
+        status = str(row[5])
+        face_unknown_id = int(row[6]) if row[6] is not None else None
+        person_name = person[0]
+    if status == "pending_multiple_introductions":
+        raise ValueError(
+            "This transcript segment contains multiple introductions and must be "
+            "split into speaker-specific segments before confirmation"
+        )
+    if voice_unknown_id is not None:
+        with get_conn() as conn:
+            unknown = conn.execute(
+                """
+                SELECT resolved_person_id FROM unknown_voices
+                WHERE unknown_voice_id=?
+                """,
+                (voice_unknown_id,),
+            ).fetchone()
+            profile = conn.execute(
+                """
+                SELECT ve.embedding_id
+                FROM voice_embeddings ve
+                JOIN unknown_voice_samples uvs
+                    ON uvs.embedding_path=ve.embedding_path
+                WHERE uvs.unknown_voice_id=?
+                ORDER BY uvs.quality DESC, ve.embedding_id
+                LIMIT 1
+                """,
+                (voice_unknown_id,),
+            ).fetchone()
+        if unknown is None:
+            raise ValueError(f"Unknown voice {voice_unknown_id} no longer exists")
+        if unknown[0] is None:
+            resolve_unknown_voice(voice_unknown_id, person_id=person_id)
+        elif int(unknown[0]) != person_id:
+            if profile is None:
+                raise ValueError(
+                    "The linked unknown voice has no enrolled sample to reassign"
+                )
+            reassign_voice_embedding(int(profile[0]), person_id)
+
+    if face_unknown_id is not None:
+        from face_core import enroll_unknown_face_track
+
+        enroll_unknown_face_track(face_unknown_id, person_id)
+
+    with get_conn() as conn:
+        placeholders = ",".join("?" for _ in segment_ids)
+        conn.execute(
+            f"""
+            UPDATE transcription_segments
+            SET speaker_label=?, person_id=?
+            WHERE meeting_id=? AND segment_id IN ({placeholders})
+            """,
+            (person_name, person_id, meeting_id, *segment_ids),
+        )
+        conn.execute(
+            """
+            UPDATE meeting_introductions
+            SET person_id=?, status='manually_confirmed', reason=NULL,
+                updated_at=?
+            WHERE introduction_id=?
+            """,
+            (person_id, utc_now(), introduction_id),
+        )
+    _regenerate_meeting_transcripts([meeting_id])
+    import transcription_core
+
+    transcription_core.refresh_readable_transcript(meeting_id, use_llm=False)
+    return person_id
 
 
 def list_unknown_voices(include_resolved=False):

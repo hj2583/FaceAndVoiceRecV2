@@ -4,6 +4,7 @@ import logging
 import os
 import subprocess
 import tempfile
+import uuid
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -480,12 +481,15 @@ def process_video_pipeline(
     attendance_pairs = set()
 
     active_speech_logs = []
+    unknown_track_labels = {}
+    run_id = uuid.uuid4().hex[:12]
     last_tiled_detections = []
 
     attributor = SpeakerAttributor()
 
     def _log_speaker_events(events):
         for event in events:
+            event_track_id = event["track_id"]
             log_audio(
                 event["start_time"],
                 event["end_time"],
@@ -493,16 +497,19 @@ def process_video_pipeline(
                 event["speaker"],
                 event["activity_score"],
                 "video",
-                track_id=event["track_id"],
+                track_id=event_track_id,
             )
             active_speech_logs.append({
                 "start_time": round(event["start_time"], 2),
                 "end_time": round(event["end_time"], 2),
                 "person_id": event["person_id"],
-                "track_id": event["track_id"],
+                "track_id": event_track_id,
                 "speaker": event["speaker"],
                 "person_name": event["speaker"],
                 "activity_score": round(event["activity_score"], 4),
+                "face_unknown_label": unknown_track_labels.get(
+                    int(event_track_id)
+                ) if event_track_id is not None else None,
                 "source": "video",
             })
 
@@ -893,9 +900,7 @@ def process_video_pipeline(
                             exist_ok=True,
                         )
 
-                        unknown_label = (
-                            f"track_{track.track_id}"
-                        )
+                        unknown_label = f"track_{track.track_id}_{run_id}"
 
                         image_path = (
                             UNKNOWN_FACES_DIR
@@ -930,6 +935,9 @@ def process_video_pipeline(
                                 track.registered_unknown = (
                                     True
                                 )
+                                unknown_track_labels[
+                                    int(track.track_id)
+                                ] = unknown_label
 
                             except Exception:
 

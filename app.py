@@ -64,6 +64,8 @@ from database import (
     reassign_voice_embedding,
     resolve_unknown,
     resolve_unknown_voice,
+    list_meeting_introductions,
+    confirm_meeting_introduction,
     update_transcription_segments,
 )
 from face_core import FaceIndex
@@ -237,6 +239,14 @@ def render_video():
                 progress_callback=update_progress,
                 stage_callback=update_stage,
             )
+            if any(
+                introduction[14] is not None
+                for introduction in list_meeting_introductions(meeting_id)
+            ):
+                try:
+                    get_face_index().reload()
+                except Exception as error:
+                    st.warning(f"Face identity index refresh failed: {error}")
             progress.progress(1.0)
             status.success("Processing and transcription completed.")
             st.success(
@@ -1081,6 +1091,90 @@ def render_transcripts():
     if not rows:
         st.info("This meeting has no transcript segments.")
         return
+
+    introductions = list_meeting_introductions(selected_id)
+    st.subheader("Participant self-introductions")
+    if not introductions:
+        st.info("No explicit self-introductions have been detected for this meeting.")
+    for (
+        introduction_id,
+        name,
+        job_title,
+        start_ms,
+        end_ms,
+        speaker_label,
+        _source_segment_ids,
+        _voice_unknown_id,
+        face_track_id,
+        person_id,
+        parser_confidence,
+        match_confidence,
+        status,
+        reason,
+        face_unknown_id,
+    ) in introductions:
+        title_text = f" — {job_title}" if job_title else ""
+        track_text = (
+            f" · face track {face_track_id}"
+            if face_track_id is not None
+            else ""
+        )
+        if face_unknown_id is not None:
+            track_text += f" · saved face record {face_unknown_id}"
+        person_text = f" · person ID {person_id}" if person_id is not None else ""
+        match_text = (
+            f" · face activity score {float(match_confidence):.2f} (heuristic)"
+            if match_confidence is not None
+            else ""
+        )
+        st.caption(
+            f"{fmt_time(start_ms / 1000)}–{fmt_time(end_ms / 1000)} · "
+            f"{name}{title_text} · voice label {speaker_label} · "
+            f"{status}{person_text}{track_text}{match_text} · "
+            f"introduction parser score {float(parser_confidence):.2f} (heuristic)"
+        )
+        if reason:
+            st.info(reason)
+        if status == "pending_multiple_introductions":
+            st.warning(
+                "This segment contains more than one introduction, so speaker "
+                "boundaries must be separated before confirming either identity."
+            )
+        elif (
+            str(status).startswith("pending")
+            or str(status).endswith("_face_pending")
+        ):
+            persons = list_persons()
+            person_options = {
+                f"{person_name} (ID {existing_person_id})": existing_person_id
+                for existing_person_id, person_name, _created, _updated in persons
+            }
+            create_option = f"Create new person: {name}"
+            options = [*person_options, create_option]
+            with st.form(key=f"confirm_introduction_{introduction_id}"):
+                chosen = st.selectbox(
+                    "Confirm this introduction as",
+                    options,
+                    key=f"introduction_person_{introduction_id}",
+                )
+                submitted = st.form_submit_button("Confirm identity")
+            if submitted:
+                try:
+                    person_id_to_assign = (
+                        create_person(name)
+                        if chosen == create_option
+                        else person_options[chosen]
+                    )
+                    confirm_meeting_introduction(
+                        introduction_id,
+                        person_id_to_assign,
+                    )
+                    get_face_index().rebuild()
+                except (ValueError, OSError, sqlite3.Error) as error:
+                    st.error(f"Could not confirm introduction: {error}")
+                else:
+                    st.success(f"Confirmed {name} as {person_id_to_assign}.")
+                    st.rerun()
 
     if not readable_rows and st.button(
         "Build readable transcript",
