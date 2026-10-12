@@ -248,9 +248,12 @@ def diagnose_voice_embedding_match(
     result["candidates"] = person_scores[:5]
     result["margin"] = margin
 
-    required_support = min(
-        config.VOICE_MATCH_MIN_SUPPORTING_SAMPLES,
-        best["usable_samples"],
+    required_support = max(
+        2,
+        min(
+            config.VOICE_MATCH_MIN_SUPPORTING_SAMPLES,
+            best["usable_samples"],
+        ),
     )
     if best["supporting_samples"] < required_support:
         result["reason"] = "insufficient_independent_sample_support"
