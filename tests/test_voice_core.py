@@ -52,11 +52,13 @@ def test_extract_voice_embedding_returns_none_for_empty_audio(monkeypatch):
 def test_match_voice_embedding_returns_best_person_above_threshold(tmp_path, monkeypatch):
     _setup_database(tmp_path, monkeypatch)
     person_id = database.create_person("Dana")
-    embedding = np.zeros(voice_core.EMBEDDING_DIM, dtype=np.float32)
-    embedding[0] = 1.0
-    embedding_path = tmp_path / "dana.npy"
-    np.save(embedding_path, embedding)
-    database.add_voice_embedding(person_id, embedding_path, quality=1.0)
+    for suffix, embedding in (
+        ("first", _unit(0)),
+        ("second", (0.99 * _unit(0) + 0.01 * _unit(1)).astype(np.float32)),
+    ):
+        embedding_path = tmp_path / f"dana_{suffix}.npy"
+        np.save(embedding_path, embedding)
+        database.add_voice_embedding(person_id, embedding_path, quality=1.0)
 
     query = np.zeros(voice_core.EMBEDDING_DIM, dtype=np.float32)
     query[0] = 1.0
@@ -175,9 +177,27 @@ def test_duplicate_enrollment_embeddings_count_as_one_reference(tmp_path, monkey
 
     diagnostic = voice_core.diagnose_voice_embedding_match(_unit(0))
 
-    assert diagnostic["decision"] is not None
-    assert diagnostic["decision"]["usable_samples"] == 1
-    assert diagnostic["decision"]["supporting_samples"] == 1
+    assert diagnostic["decision"] is None
+    assert diagnostic["reason"] == "insufficient_independent_sample_support"
+    assert diagnostic["candidates"][0]["person_id"] == person_id
+
+
+def test_match_voice_embedding_requires_two_supporting_samples(tmp_path, monkeypatch):
+    _setup_database(tmp_path, monkeypatch)
+    person_id = database.create_person("Eve")
+    embedding = np.zeros(voice_core.EMBEDDING_DIM, dtype=np.float32)
+    embedding[0] = 1.0
+    embedding_path = tmp_path / "eve.npy"
+    np.save(embedding_path, embedding)
+    database.add_voice_embedding(person_id, embedding_path, quality=1.0)
+
+    query = np.zeros(voice_core.EMBEDDING_DIM, dtype=np.float32)
+    query[0] = 1.0
+
+    diagnostic = voice_core.diagnose_voice_embedding_match(query)
+
+    assert diagnostic["decision"] is None
+    assert diagnostic["reason"] == "insufficient_independent_sample_support"
 
 
 def test_match_voice_embedding_returns_none_below_threshold(tmp_path, monkeypatch):
@@ -337,9 +357,10 @@ def test_diarize_meeting_audio_uses_enrolled_person_name(tmp_path, monkeypatch):
     _setup_database(tmp_path, monkeypatch)
     embedding = _unit(0)
     person_id = database.create_person("Frank")
-    embedding_path = tmp_path / "frank.npy"
-    np.save(embedding_path, embedding)
-    database.add_voice_embedding(person_id, embedding_path, quality=1.0)
+    for suffix, sample in (("first", embedding), ("second", (0.99 * embedding + 0.01 * _unit(1)).astype(np.float32))):
+        embedding_path = tmp_path / f"frank_{suffix}.npy"
+        np.save(embedding_path, sample)
+        database.add_voice_embedding(person_id, embedding_path, quality=1.0)
     monkeypatch.setattr(config, "VOICE_MIN_IDENTITY_DURATION_SECONDS", 0.0)
     monkeypatch.setattr(voice_core, "extract_voice_embedding", lambda *_a, **_k: embedding)
     monkeypatch.setattr(voice_core, "read_wav_pcm", lambda *_a, **_k: _speech_pcm(1))
@@ -397,10 +418,9 @@ def test_voice_face_conflict_remains_unresolved(tmp_path, monkeypatch):
     assert result[0][0].startswith("Unknown Speaker ")
     report = json.loads((tmp_path / "diagnostics.json").read_text(encoding="utf-8"))
     decision = report["summary"]["speaker_decisions"][0]
-    assert decision["decision_reason"] == "audio_video_identity_conflict"
+    assert decision["decision_reason"] == "insufficient_independent_sample_support"
     assert decision["face_candidate"]["person_id"] == 32
-    assert decision["voice_match"]["decision"]["person_id"] == person_id
-    assert decision["voice_match"]["threshold"] == config.VOICE_MATCH_THRESHOLD
+    assert decision["voice_match"]["reason"] == "insufficient_independent_sample_support"
     assert "audio_path" not in report["summary"]
 
 
