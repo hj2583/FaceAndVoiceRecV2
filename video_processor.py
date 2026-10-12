@@ -1,8 +1,10 @@
+import gc
 import json
 import logging
 import os
 import subprocess
 import tempfile
+import uuid
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -53,6 +55,8 @@ from face_core import (
 
 from tracking import CentroidTracker
 from frame_pipeline import run_threaded_pipeline
+from speaker_attribution import FaceObservation, SpeakerAttributor
+from ffmpeg_utils import find_ffmpeg
 
 
 # ============================================================
@@ -69,14 +73,11 @@ MAX_RECOGNITION_FAILURES = 3
 # ============================================================
 
 def get_ffmpeg():
-    from shutil import which
-
-    path = which("ffmpeg")
+    path = find_ffmpeg()
 
     if not path:
         raise RuntimeError(
-            "FFmpeg was not found in PATH. "
-            "Install FFmpeg and add it to PATH."
+            "FFmpeg was not found. Install project requirements or add FFmpeg to PATH."
         )
 
     return path
@@ -224,7 +225,9 @@ class _UniFaceLandmarker:
         return SimpleNamespace(face_landmarks=[landmarks])
 
     def close(self):
-        return None
+        self._detector = None
+        self._mesher = None
+        gc.collect()
 
 
 def create_face_landmarker():
@@ -474,9 +477,41 @@ def process_video_pipeline(
     frame_no = 0
 
     recognition_logs = []
+    attendance_candidates = []
+    attendance_pairs = set()
 
     active_speech_logs = []
+    unknown_track_labels = {}
+    run_id = uuid.uuid4().hex[:12]
     last_tiled_detections = []
+
+    attributor = SpeakerAttributor()
+
+    def _log_speaker_events(events):
+        for event in events:
+            event_track_id = event["track_id"]
+            log_audio(
+                event["start_time"],
+                event["end_time"],
+                event["person_id"],
+                event["speaker"],
+                event["activity_score"],
+                "video",
+                track_id=event_track_id,
+            )
+            active_speech_logs.append({
+                "start_time": round(event["start_time"], 2),
+                "end_time": round(event["end_time"], 2),
+                "person_id": event["person_id"],
+                "track_id": event_track_id,
+                "speaker": event["speaker"],
+                "person_name": event["speaker"],
+                "activity_score": round(event["activity_score"], 4),
+                "face_unknown_label": unknown_track_labels.get(
+                    int(event_track_id)
+                ) if event_track_id is not None else None,
+                "source": "video",
+            })
 
     # ========================================================
     # Processing
@@ -583,7 +618,8 @@ def process_video_pipeline(
             for start, end in speech_segments
         )
 
-        speaking_candidates = []
+        face_observations = []
+        track_label_origins = {}
 
         # =================================================
         # Process tracked faces
@@ -864,9 +900,7 @@ def process_video_pipeline(
                             exist_ok=True,
                         )
 
-                        unknown_label = (
-                            f"track_{track.track_id}"
-                        )
+                        unknown_label = f"track_{track.track_id}_{run_id}"
 
                         image_path = (
                             UNKNOWN_FACES_DIR
@@ -901,6 +935,9 @@ def process_video_pipeline(
                                 track.registered_unknown = (
                                     True
                                 )
+                                unknown_track_labels[
+                                    int(track.track_id)
+                                ] = unknown_label
 
                             except Exception:
 
@@ -943,6 +980,36 @@ def process_video_pipeline(
                 )
 
             # =================================================
+            # Attendance candidates for uploaded-video replacement
+            # =================================================
+
+            confidence_value = None
+            if getattr(track, "confidence", None) is not None:
+                try:
+                    confidence_value = float(track.confidence)
+                except (TypeError, ValueError):
+                    confidence_value = None
+
+            pair = (track.track_id, track.person_id)
+            if (
+                track.person_id is not None
+                and confidence_value is not None
+                and confidence_value >= RECOGNITION_THRESHOLD
+                and pair not in attendance_pairs
+            ):
+                clamped_confidence = max(0.0, min(1.0, confidence_value))
+                attendance_pairs.add(pair)
+                attendance_candidates.append(
+                    {
+                        "person_id": int(track.person_id),
+                        "person_name": track.person_name,
+                        "track_id": int(track.track_id),
+                        "confidence": round(clamped_confidence, 4),
+                        "media_offset_ms": int(round(timestamp * 1000)),
+                    }
+                )
+
+            # =================================================
             # Lip movement
             # =================================================
 
@@ -954,18 +1021,17 @@ def process_video_pipeline(
             # Active speaker candidates
             # =================================================
 
-            if (
-                audio_is_speech
-                and
-                track.lip_open is not None
-                and
-                track.lip_open
-                >= LIP_OPEN_THRESHOLD
-            ):
-
-                speaking_candidates.append(
-                    track
-                )
+            if track.lip_open is not None:
+                face_observations.append(FaceObservation(
+                    track_id=track.track_id,
+                    person_id=track.person_id,
+                    person_name=track.person_name if track.person_id is not None else "UNKNOWN",
+                    face_confidence=track.confidence,
+                    mouth_open=track.lip_open >= LIP_OPEN_THRESHOLD,
+                    lip_open_ratio=track.lip_open,
+                    face_visible=True,
+                ))
+            track_label_origins[track.track_id] = (x0, max(20, y0 - 30))
 
             # =================================================
             # Draw bounding box
@@ -1002,13 +1068,6 @@ def process_video_pipeline(
                         "Recognition Pending"
                     )
 
-            if (
-                track
-                in speaking_candidates
-            ):
-
-                label += " [Speaking]"
-
             cv2.rectangle(
                 frame,
                 (x0, y0),
@@ -1037,82 +1096,22 @@ def process_video_pipeline(
         # Select ONE active speaker
         # =====================================================
 
-        if (
-            audio_is_speech
-            and
-            speaking_candidates
-        ):
+        attributor.update_audio(timestamp, audio_is_speech)
+        result = attributor.update_faces(timestamp, face_observations)
+        _log_speaker_events(attributor.pop_closed_events())
 
-            speaker = max(
-                speaking_candidates,
-                key=lambda t:
-                    t.lip_open,
+        speaker_origin = track_label_origins.get(result.get("track_id"))
+        if result["active_speaker"] is not None and speaker_origin is not None:
+            cv2.putText(
+                frame,
+                f"{result['active_speaker']} [Speaking] lip activity "
+                f"{result['activity_score']:.2f}",
+                speaker_origin,
+                cv2.FONT_HERSHEY_SIMPLEX,
+                0.6,
+                (0, 255, 255),
+                2,
             )
-
-            speaker.speech_frames += 1
-            speaker.silent_frames = 0
-
-            if (
-                speaker.speech_frames
-                >= 2
-            ):
-
-                start = max(
-                    0.0,
-                    timestamp - 0.1,
-                )
-
-                end = timestamp
-
-                if (
-                    speaker.person_id
-                    is not None
-                ):
-
-                    log_audio(
-                        start,
-                        end,
-                        speaker.person_id,
-                        speaker.person_name,
-                        speaker.confidence,
-                        "video",
-                    )
-
-                    active_speech_logs.append(
-                        {
-                            "start_time": round(
-                                start,
-                                2,
-                            ),
-                            "end_time": round(
-                                end,
-                                2,
-                            ),
-                            "person_name": (
-                                speaker.person_name
-                            ),
-                            "confidence": round(
-                                speaker.confidence,
-                                4,
-                            ),
-                            "source": "video",
-                        }
-                    )
-
-        else:
-
-            for track in (
-                tracker.tracks.values()
-            ):
-
-                track.silent_frames += 1
-
-                if (
-                    track.silent_frames
-                    >= 4
-                ):
-
-                    track.speech_frames = 0
 
         return frame_no, frame
 
@@ -1135,6 +1134,9 @@ def process_video_pipeline(
         cap.release()
         writer.release()
         face_landmarker.close()
+
+    attributor.finish()
+    _log_speaker_events(attributor.pop_closed_events())
 
     # ==========================================================
     # Convert to H264
@@ -1172,6 +1174,9 @@ def process_video_pipeline(
                 ),
                 "speech": (
                     active_speech_logs
+                ),
+                "attendance": (
+                    attendance_candidates
                 ),
             },
             f,

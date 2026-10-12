@@ -50,3 +50,21 @@ def test_realtime_detection_defaults_prioritize_responsiveness():
     assert config.REALTIME_HAAR_SCALE_FACTOR > 1.0
     assert config.REALTIME_HAAR_MIN_NEIGHBORS >= 1
     assert config.REALTIME_FPS_WINDOW_SECONDS == 1.0
+
+
+def test_speaker_attribution_weights_are_configurable_and_positive():
+    assert config.SPEAKER_WINDOW_MS > 0
+    assert config.SPEAKER_SWITCH_THRESHOLD > 0
+    assert 0.0 < config.SPEAKER_MIN_CONFIDENCE < 1.0
+    assert config.SPEAKER_GRACE_PERIOD_MS > 0
+    assert config.AUDIO_SYNC_TOLERANCE_MS > 0
+    assert config.LIP_MOTION_NORM > 0
+    assert config.SPEAKER_HISTORY_MAXLEN > 0
+    weights = (
+        config.VOICE_ACTIVITY_WEIGHT,
+        config.LIP_MOTION_WEIGHT,
+        config.FACE_CONFIDENCE_WEIGHT,
+        config.TEMPORAL_WEIGHT,
+    )
+    assert all(w >= 0.0 for w in weights)
+    assert abs(sum(weights) - 1.0) < 1e-6
