@@ -1,44 +1,88 @@
 from contextlib import nullcontext
 
 import importlib
+import sys
+
+
+class _FakeNavigation:
+    def __init__(self, events, pages):
+        self._events = events
+        self._pages = pages
+
+    def run(self):
+        self._events.append(("st.navigation.run", len(self._pages)))
+        self._pages[0].render_fn()
+
+
+class _FakePage:
+    def __init__(self, render_fn, title, default):
+        self.render_fn = render_fn
+        self.title = title
+        self.default = default
 
 
 class _FakeStreamlit:
-    def __init__(self):
-        self.calls = []
+    def __init__(self, events):
+        self._events = events
+
+    def cache_resource(self, fn=None, **_kwargs):
+        if fn is None:
+            return lambda wrapped: wrapped
+        return fn
 
     def set_page_config(self, **kwargs):
-        self.calls.append(("set_page_config", kwargs))
+        self._events.append(("st.set_page_config", kwargs))
+
+    def Page(self, render_fn, *, title, default=False):
+        self._events.append(("st.Page", title, default))
+        return _FakePage(render_fn, title=title, default=default)
+
+    def navigation(self, pages, *, position="sidebar"):
+        pages = list(pages)
+        self._events.append(("st.navigation", len(pages), pages[0].title, position))
+        return _FakeNavigation(self._events, pages)
 
     def title(self, value):
-        self.calls.append(("title", value))
+        self._events.append(("st.title", value))
 
     def caption(self, value):
-        self.calls.append(("caption", value))
+        self._events.append(("st.caption", value))
 
     def tabs(self, labels):
         labels = list(labels)
-        self.calls.append(("tabs", labels))
+        self._events.append(("st.tabs", labels))
         return [nullcontext() for _ in labels]
+
+
+def test_importing_app_main_is_inert(monkeypatch):
+    events = []
+    fake_st = _FakeStreamlit(events)
+
+    monkeypatch.setitem(sys.modules, "streamlit", fake_st)
+    monkeypatch.delitem(sys.modules, "app.main", raising=False)
+
+    importlib.import_module("app.main")
+
+    assert events == []
 
 
 def test_main_renders_tabs_in_expected_order_with_startup_sequence(monkeypatch):
     main = importlib.import_module("app.main")
 
-    fake_st = _FakeStreamlit()
-    calls = []
+    events = []
+    fake_st = _FakeStreamlit(events)
 
     monkeypatch.setattr(main, "st", fake_st)
 
-    monkeypatch.setattr(main, "initialize_runtime_paths", lambda: calls.append("init_paths"))
-    monkeypatch.setattr(main, "init_db", lambda: calls.append("init_db"))
-    monkeypatch.setattr(main.realtime, "render", lambda: calls.append("realtime"))
-    monkeypatch.setattr(main.video, "render", lambda: calls.append("video"))
-    monkeypatch.setattr(main.face_database, "render", lambda: calls.append("face_database"))
-    monkeypatch.setattr(main.audio_logs, "render", lambda: calls.append("audio_logs"))
-    monkeypatch.setattr(main.attendance, "render", lambda: calls.append("attendance"))
-    monkeypatch.setattr(main.transcripts, "render", lambda: calls.append("transcripts"))
-    monkeypatch.setattr(main.voice_enrollment, "render", lambda: calls.append("voice_enrollment"))
+    monkeypatch.setattr(main, "initialize_runtime_paths", lambda: events.append(("initialize_runtime_paths",)))
+    monkeypatch.setattr(main, "init_db", lambda: events.append(("init_db",)))
+    monkeypatch.setattr(main.realtime, "render", lambda: events.append(("render.realtime",)))
+    monkeypatch.setattr(main.video, "render", lambda: events.append(("render.video",)))
+    monkeypatch.setattr(main.face_database, "render", lambda: events.append(("render.face_database",)))
+    monkeypatch.setattr(main.audio_logs, "render", lambda: events.append(("render.audio_logs",)))
+    monkeypatch.setattr(main.attendance, "render", lambda: events.append(("render.attendance",)))
+    monkeypatch.setattr(main.transcripts, "render", lambda: events.append(("render.transcripts",)))
+    monkeypatch.setattr(main.voice_enrollment, "render", lambda: events.append(("render.voice_enrollment",)))
     monkeypatch.setattr(
         main,
         "get_runtime_status",
@@ -47,31 +91,40 @@ def test_main_renders_tabs_in_expected_order_with_startup_sequence(monkeypatch):
 
     main.main()
 
-    assert calls == [
-        "init_paths",
-        "init_db",
-        "realtime",
-        "video",
-        "face_database",
-        "audio_logs",
-        "attendance",
-        "transcripts",
-        "voice_enrollment",
+    assert events == [
+        (
+            "st.set_page_config",
+            {
+                "page_title": "AI Face + Audio Recognition",
+                "page_icon": "🎥",
+                "layout": "wide",
+            },
+        ),
+        ("initialize_runtime_paths",),
+        ("init_db",),
+        ("st.Page", "AI Face + Active Speaker Recognition", True),
+        ("st.navigation", 1, "AI Face + Active Speaker Recognition", "hidden"),
+        ("st.navigation.run", 1),
+        ("st.title", "🎥 AI Face + Active Speaker Recognition"),
+        ("st.caption", "Audio models (PyTorch): fake-torch"),
+        ("st.caption", "Face models (ONNX Runtime): fake-face"),
+        (
+            "st.tabs",
+            [
+                "📹 Realtime",
+                "🎬 Video",
+                "👤 Face Database",
+                "🔊 Audio Logs",
+                "✅ Attendance",
+                "📝 Transcripts",
+                "🎙️ Voice Enrollment",
+            ],
+        ),
+        ("render.realtime",),
+        ("render.video",),
+        ("render.face_database",),
+        ("render.audio_logs",),
+        ("render.attendance",),
+        ("render.transcripts",),
+        ("render.voice_enrollment",),
     ]
-
-    assert fake_st.calls[0][0] == "set_page_config"
-    assert fake_st.calls[1] == ("title", "🎥 AI Face + Active Speaker Recognition")
-    assert fake_st.calls[2] == ("caption", "Audio models (PyTorch): fake-torch")
-    assert fake_st.calls[3] == ("caption", "Face models (ONNX Runtime): fake-face")
-    assert fake_st.calls[4] == (
-        "tabs",
-        [
-            "📹 Realtime",
-            "🎬 Video",
-            "👤 Face Database",
-            "🔊 Audio Logs",
-            "✅ Attendance",
-            "📝 Transcripts",
-            "🎙️ Voice Enrollment",
-        ],
-    )

@@ -4,15 +4,6 @@ from PIL import Image
 
 import numpy as np
 
-# NumPy 1.26 removes some legacy aliases used by older third-party code.
-# Keep a compatibility layer in place before importing pandas/streamlit.
-if not hasattr(np, "long"):
-    np.long = np.int_
-if not hasattr(np, "float"):
-    np.float = float
-if not hasattr(np, "complex"):
-    np.complex = complex
-
 import pandas as pd
 import streamlit as st
 
