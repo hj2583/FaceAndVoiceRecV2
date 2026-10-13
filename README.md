@@ -88,7 +88,7 @@ ollama pull qwen2.5:7b
 $env:TRANSCRIPT_REFINEMENT_ENABLED = "1"
 $env:TRANSCRIPT_REFINEMENT_URL = "http://localhost:11434"
 $env:TRANSCRIPT_REFINEMENT_MODEL = "qwen2.5:7b"
-streamlit run app.py
+streamlit run app/main.py
 ```
 
 The URL and model can be changed for another Ollama endpoint or model. Only
@@ -150,7 +150,8 @@ python -m pip install --upgrade pip
 2. Install the CPU requirements:
 
 ```powershell
-pip install -r requirements.txt
+python -m pip install -r requirements.txt
+python -m pip install -e .
 ```
 
 3. Verify FFmpeg is installed:
@@ -162,7 +163,7 @@ ffmpeg -version
 4. Launch the app:
 
 ```powershell
-streamlit run app.py
+streamlit run app/main.py
 ```
 
 ## Optional GPU setup
@@ -170,7 +171,8 @@ streamlit run app.py
 If your machine has NVIDIA CUDA support and you want to use the GPU-accelerated path, install the GPU variant instead:
 
 ```powershell
-pip install -r requirements-gpu.txt
+python -m pip install -r requirements-gpu.txt
+python -m pip install -e .
 ```
 
 The project prefers CUDA automatically when it is available. If CUDA is missing or unavailable, it falls back to CPU mode. GPU acceleration covers both face recognition (ONNX Runtime) and the torch-based audio models (Whisper, Silero VAD, SpeechBrain voice embeddings) — `requirements-gpu.txt` pulls a CUDA-enabled build of `torch` from PyTorch's own package index for this reason. If you already have a CPU-only `torch` installed from `requirements.txt`, re-run `pip install -r requirements-gpu.txt` to replace it with the CUDA build.
@@ -185,6 +187,9 @@ FaceAndVoiceRecV2/
 │   ├── pages/
 │   │   ├── realtime.py
 │   │   ├── video.py
+│   │   ├── face_database.py
+│   │   ├── audio_logs.py
+│   │   ├── attendance.py
 │   │   ├── transcripts.py
 │   │   └── voice_enrollment.py
 │   └── ui/
@@ -199,6 +204,7 @@ FaceAndVoiceRecV2/
 │       │   ├── __init__.py
 │       │   ├── settings.py
 │       │   ├── paths.py
+│       │   ├── migration.py
 │       │   └── constants.py
 │       │
 │       ├── domain/
@@ -221,10 +227,7 @@ FaceAndVoiceRecV2/
 │       │   │   ├── transcript_refiner.py
 │       │   │   ├── subtitle_renderer.py
 │       │   │   └── speaker_introductions.py
-│       │   │
-│       │   └── attendance/
-│       │       ├── __init__.py
-│       │       └── attendance_service.py
+│       │   └── __init__.py
 │       │
 │       ├── pipelines/
 │       │   ├── __init__.py
@@ -232,33 +235,22 @@ FaceAndVoiceRecV2/
 │       │   │   ├── __init__.py
 │       │   │   ├── realtime.py
 │       │   │   ├── realtime_launcher.py
-│       │   │   └── realtime_runtime.py
+│       │   │   ├── realtime_runtime.py
+│       │   │   └── frame_pipeline.py
 │       │   ├── video/
 │       │   │   ├── __init__.py
 │       │   │   ├── video_workflow.py
 │       │   │   ├── video_processor.py
 │       │   │   └── ffmpeg_utils.py
-│       │   └── workflow/
-│       │       └── pipeline_orchestration.py
 │       │
 │       ├── storage/
 │       │   ├── __init__.py
-│       │   ├── database.py
-│       │   ├── sqlite_utils.py
-│       │   └── repositories.py
-│       │
-│       ├── services/
-│       │   ├── __init__.py
-│       │   ├── identity_service.py
-│       │   ├── recognition_service.py
-│       │   ├── speaker_service.py
-│       │   └── meeting_service.py
-│       │
-│       └── utils/
-│           ├── __init__.py
-│           ├── time_utils.py
-│           ├── text_processing.py
-│           └── file_utils.py
+│       │   └── database.py
+│       └── __init__.py
+│
+├── scripts/
+│   ├── evaluate_speaker_recognition.py
+│   └── fix_unknown_images.py
 │
 ├── data/
 │   ├── db/
@@ -266,6 +258,7 @@ FaceAndVoiceRecV2/
 │   ├── artifacts/
 │   │   ├── face_index.npz
 │   │   ├── known_faces/
+│   │   ├── known_voices/
 │   │   ├── unknown_faces/
 │   │   ├── unknown_voices/
 │   │   ├── trackedVideo/
@@ -274,6 +267,7 @@ FaceAndVoiceRecV2/
 │   │   └── logs/
 │   ├── transcripts/
 │   └── temp/
+│       └── workflow/
 │
 ├── tests/
 │   ├── unit/
@@ -301,15 +295,25 @@ FaceAndVoiceRecV2/
 
 ## Important data folders
 
-- `known_faces/`: label/reference face images
-- `known_voices/`: enrolled voice embeddings and their saved audio samples
-- `unknown_faces/`: unresolved face samples
-- `unknown_voices/`: unresolved voice embeddings and representative audio clips
-- `transcripts/`: generated transcription outputs
-- `trackedVideo/`: processed output videos
-- `logs/`: runtime logs
-- `faces.db`: SQLite database with identities and logs
-- `face_index.npz`: cached embedding index
+- `data/db/faces.db`: SQLite database with identities, attendance records, and transcript metadata
+- `data/artifacts/face_index.npz`: cached face embedding index
+- `data/artifacts/known_faces/`: enrolled face image samples
+- `data/artifacts/known_voices/`: enrolled voice embeddings and representative audio samples
+- `data/artifacts/unknown_faces/`: unresolved face samples
+- `data/artifacts/unknown_voices/`: unresolved voice embeddings and representative clips
+- `data/artifacts/initialVideo/`: uploaded source videos copied for processing
+- `data/artifacts/trackedVideo/`: rendered/annotated output videos
+- `data/artifacts/live/`: realtime capture artifacts
+- `data/artifacts/logs/`: runtime logs and speaker diagnostics
+- `data/transcripts/`: per-meeting transcript exports
+- `data/temp/workflow/`: intermediate workflow scratch files
+
+## Legacy data migration on first run
+
+- On first runtime initialization, legacy top-level paths (for example `faces.db`, `known_faces/`, `logs/`, and `.workflow-temp/`) are moved into `data/`.
+- A completion marker file (`data/.legacy_migration_v1_complete`) is written only after a full successful migration pass.
+- If any destination conflict is detected, migration fails before moving additional content and reports all conflicts in one error.
+- After a partial failure (for example, interrupted move), rerunning startup resumes migration for the remaining legacy files and writes the marker when finished.
 
 ## Development and testing
 
@@ -335,5 +339,5 @@ python -m pip check
 ## Troubleshooting
 
 - FFmpeg is taken from PATH when available; otherwise the `imageio-ffmpeg` dependency supplies a bundled executable.
-- If realtime startup fails, inspect the latest log file under `logs/`.
+- If realtime startup fails, inspect the latest log file under `data/artifacts/logs/`.
 - If CUDA is unavailable, do not worry; CPU mode is supported.
