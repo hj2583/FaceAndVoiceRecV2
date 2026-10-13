@@ -1,8 +1,8 @@
-import numpy as np
+﻿import numpy as np
 import cv2
 
-import face_core
-from face_core import face_quality, preprocess_face_for_recognition
+from face_voice_rec.domain.face import face_core
+from face_voice_rec.domain.face.face_core import face_quality, preprocess_face_for_recognition
 
 
 def test_face_quality_scores_small_nonempty_crop_instead_of_zero():
@@ -56,3 +56,4 @@ def test_load_or_extract_embedding_repairs_invalid_saved_embedding(tmp_path, mon
     np.testing.assert_allclose(result, expected)
     repaired = np.load(embedding_path)
     np.testing.assert_allclose(repaired, expected)
+

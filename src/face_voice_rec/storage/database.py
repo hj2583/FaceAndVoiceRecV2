@@ -1,4 +1,4 @@
-import logging
+﻿import logging
 import json
 import math
 import sqlite3
@@ -1332,7 +1332,7 @@ def confirm_meeting_introduction(introduction_id, person_id):
             reassign_voice_embedding(int(profile[0]), person_id)
 
     if face_unknown_id is not None:
-        from face_core import enroll_unknown_face_track
+        from face_voice_rec.domain.face.face_core import enroll_unknown_face_track
 
         enroll_unknown_face_track(face_unknown_id, person_id)
 

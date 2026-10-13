@@ -1,9 +1,9 @@
-import sqlite3
+﻿import sqlite3
 from pathlib import Path
 
 import pytest
 
-import database
+from face_voice_rec.storage import database
 
 
 def _setup_database(tmp_path, monkeypatch):
@@ -480,3 +480,4 @@ def test_fetch_attendance_filters_inclusive_period_and_video_path(tmp_path, monk
             observed_from_utc="2026-10-06T11:00:00+00:00",
             observed_to_utc="2026-10-06T10:00:00+00:00",
         )
+

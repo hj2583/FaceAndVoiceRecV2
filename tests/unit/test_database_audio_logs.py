@@ -1,4 +1,4 @@
-import database
+﻿from face_voice_rec.storage import database
 
 
 def _setup_database(tmp_path, monkeypatch):
@@ -27,3 +27,4 @@ def test_log_audio_defaults_track_id_to_none(tmp_path, monkeypatch):
 
     rows = database.fetch_audio_logs()
     assert rows[0][-1] is None
+

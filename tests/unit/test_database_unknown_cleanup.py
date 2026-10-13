@@ -1,6 +1,6 @@
-from pathlib import Path
+﻿from pathlib import Path
 
-import database
+from face_voice_rec.storage import database
 
 
 def _setup_database(tmp_path, monkeypatch):
@@ -62,3 +62,4 @@ def test_delete_low_quality_unknowns_only_removes_unresolved_records(tmp_path, m
         good_id,
         labeled_id,
     }
+

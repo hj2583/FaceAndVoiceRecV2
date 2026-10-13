@@ -1,4 +1,4 @@
-import logging
+﻿import logging
 import os
 import threading
 from pathlib import Path
@@ -15,7 +15,7 @@ from face_voice_rec.config import (
     RECOGNITION_THRESHOLD,
     UNKNOWN_MATCH_THRESHOLD,
 )
-from database import (
+from face_voice_rec.storage.database import (
     add_embedding,
     create_person,
     create_unknown,
@@ -23,7 +23,7 @@ from database import (
     list_embeddings,
     list_unknown_samples_with_embeddings,
 )
-from face_backend import get_face_backend
+from face_voice_rec.domain.face.face_backend import get_face_backend
 
 logging.basicConfig(
     level=logging.INFO,
@@ -351,7 +351,7 @@ def save_embedding_for_person(person_name, embedding, image_path=None, quality=0
     os.replace(path, final_path)
 
     # Repair DB path after the embedding ID is known.
-    from database import get_conn
+    from face_voice_rec.storage.database import get_conn
     with get_conn() as conn:
         conn.execute(
             "UPDATE face_embeddings SET embedding_path=? WHERE embedding_id=?",
@@ -495,7 +495,7 @@ def register_unknown(
 
 def enroll_unknown_face_track(unknown_id, person_id):
     """Enroll the saved samples for one unknown face track to an existing person."""
-    from database import (
+    from face_voice_rec.storage.database import (
         list_embeddings,
         list_persons,
         list_unknown_samples,
@@ -575,3 +575,4 @@ def enroll_unknown_face_track(unknown_id, person_id):
         )
     resolve_unknown(unknown_id, person_id)
     return embeddings_added
+

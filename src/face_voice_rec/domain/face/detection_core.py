@@ -1,4 +1,4 @@
-"""Long-range face detection helpers.
+﻿"""Long-range face detection helpers.
 
 The geometry and NMS functions are dependency-light so they can be tested
 without loading the RetinaFace model.  Model inference is lazy and failures
@@ -247,7 +247,7 @@ def _detect_faces_uniface(tile: np.ndarray) -> List[Detection]:
     Falls back to OpenCV cascade if UniFace fails.
     """
     try:
-        from face_backend import get_face_backend
+        from face_voice_rec.domain.face.face_backend import get_face_backend
 
         detections = get_face_backend().detect_faces(tile)
     except Exception as error:

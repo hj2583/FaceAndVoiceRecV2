@@ -1,9 +1,9 @@
-import sys
+﻿import sys
 from unittest.mock import Mock
 
 import numpy as np
 
-import face_backend
+from face_voice_rec.domain.face import face_backend
 
 
 def _make_backend(detector, recognizer):

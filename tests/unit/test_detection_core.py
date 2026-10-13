@@ -1,9 +1,9 @@
-from unittest.mock import patch, Mock
+﻿from unittest.mock import patch, Mock
 
 import numpy as np
 import pytest
 
-from detection_core import (
+from face_voice_rec.domain.face.detection_core import (
     _calculate_iou,
     _detect_faces_uniface,
     detect_faces_opencv,
@@ -79,7 +79,7 @@ def test_detect_faces_tiled_runs_a_full_frame_pass_in_addition_to_tiles():
         seen_shapes.append(image.shape[:2])
         return []
 
-    with patch("detection_core._detect_faces_uniface", side_effect=fake_detect):
+    with patch("face_voice_rec.domain.face.detection_core._detect_faces_uniface", side_effect=fake_detect):
         detect_faces_tiled(frame, (3, 2), 0.2, 2.0, 0.4)
 
     assert len(seen_shapes) == 7
@@ -97,7 +97,7 @@ def test_detect_faces_filters_low_confidence_detections():
 
     fake_backend = Mock()
     fake_backend.detect_faces.return_value = fake_detections
-    with patch("face_backend.get_face_backend", return_value=fake_backend):
+    with patch("face_voice_rec.domain.face.face_backend.get_face_backend", return_value=fake_backend):
         detections = _detect_faces_uniface(tile)
 
     # Only the high-confidence detection should be returned
@@ -111,17 +111,17 @@ def test_detect_faces_falls_back_to_opencv_when_uniface_fails():
     # Draw a simple white rectangle to simulate a face region
     tile[20:80, 20:80] = 255
 
-    from detection_core import _detect_faces_opencv
+    from face_voice_rec.domain.face.detection_core import _detect_faces_opencv
 
     # Provide a simple cascade that doesn't error for fallback
     cascade = Mock()
     cascade.empty.return_value = False
     cascade.detectMultiScale.return_value = []
 
-    with patch("detection_core._get_opencv_cascade", return_value=cascade):
+    with patch("face_voice_rec.domain.face.detection_core._get_opencv_cascade", return_value=cascade):
         fake_backend = Mock()
         fake_backend.detect_faces.side_effect = RuntimeError("ONNX runtime error")
-        with patch("face_backend.get_face_backend", return_value=fake_backend):
+        with patch("face_voice_rec.domain.face.face_backend.get_face_backend", return_value=fake_backend):
             detections = _detect_faces_uniface(tile)
 
     # Fallback should return OpenCV results (might be empty on blank test image)
@@ -135,14 +135,14 @@ def test_detect_faces_opencv_returns_detection_contract():
     cascade.empty.return_value = False
     cascade.detectMultiScale.return_value = [(4, 6, 20, 24)]
 
-    with patch("detection_core._get_opencv_cascade", return_value=cascade):
+    with patch("face_voice_rec.domain.face.detection_core._get_opencv_cascade", return_value=cascade):
         detections = detect_faces_opencv(frame)
 
     assert detections == [(4.0, 6.0, 20.0, 24.0, 0.7)]
 
 
 def test_detect_faces_opencv_reuses_cached_cascade():
-    import detection_core
+    from face_voice_rec.domain.face import detection_core
 
     # Preserve and restore any existing cache
     old = getattr(detection_core, "_OPENCV_CASCADE", None)
@@ -158,7 +158,7 @@ def test_detect_faces_opencv_reuses_cached_cascade():
         # Ensure .data.haarcascades is a string so _get_opencv_cascade can build the path
         fake_cv2.data = Mock()
         fake_cv2.data.haarcascades = ""
-        with patch("detection_core.cv2", new=fake_cv2):
+        with patch("face_voice_rec.domain.face.detection_core.cv2", new=fake_cv2):
             detect_faces_opencv(np.zeros((40, 40, 3), dtype=np.uint8))
             detect_faces_opencv(np.zeros((40, 40, 3), dtype=np.uint8))
 
@@ -174,7 +174,7 @@ def test_get_opencv_cascade_handles_none_haarcascades(monkeypatch):
     None; ensure our function normalizes that to an empty string and still
     constructs a CascadeClassifier safely.
     """
-    import detection_core
+    from face_voice_rec.domain.face import detection_core
 
     # Reset cache
     old = getattr(detection_core, "_OPENCV_CASCADE", None)
@@ -191,7 +191,7 @@ def test_get_opencv_cascade_handles_none_haarcascades(monkeypatch):
         cascade.empty.return_value = False
         fake_cv2.CascadeClassifier = Mock(return_value=cascade)
 
-        with patch("detection_core.cv2", new=fake_cv2):
+        with patch("face_voice_rec.domain.face.detection_core.cv2", new=fake_cv2):
             got = detection_core._get_opencv_cascade()
 
         # Should return our mocked cascade and not raise
@@ -215,7 +215,7 @@ def test_detect_faces_opencv_contains_detection_failure():
     cascade.empty.return_value = False
     cascade.detectMultiScale.side_effect = RuntimeError("cascade failed")
 
-    with patch("detection_core._get_opencv_cascade", return_value=cascade):
+    with patch("face_voice_rec.domain.face.detection_core._get_opencv_cascade", return_value=cascade):
         assert detect_faces_opencv(np.zeros((40, 40, 3), dtype=np.uint8)) == []
 
 
@@ -223,7 +223,7 @@ def test_ensure_opencv_face_detector_available_rejects_missing_cascade():
     cascade = Mock()
     cascade.empty.return_value = True
 
-    with patch("detection_core._get_opencv_cascade", return_value=cascade):
+    with patch("face_voice_rec.domain.face.detection_core._get_opencv_cascade", return_value=cascade):
         with pytest.raises(RuntimeError, match="Haar cascade data is unavailable"):
             ensure_opencv_face_detector_available()
 
@@ -239,7 +239,7 @@ def test_detect_faces_tiled_with_confidence_filtering():
         (40.0, 40.0, 30.0, 30.0, 0.8),  # High confidence
     ]
     
-    with patch("detection_core._detect_faces_uniface", return_value=mixed_detections):
+    with patch("face_voice_rec.domain.face.detection_core._detect_faces_uniface", return_value=mixed_detections):
         detections = detect_faces_tiled(
             frame,
             tile_grid=(1, 1),
@@ -249,3 +249,4 @@ def test_detect_faces_tiled_with_confidence_filtering():
     
     # Should filter out low-confidence detection
     assert all(d[4] >= 0.5 for d in detections)
+

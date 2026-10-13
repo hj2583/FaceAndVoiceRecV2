@@ -1,9 +1,9 @@
-import sqlite3
+﻿import sqlite3
 
 import pytest
 
 from face_voice_rec import config
-import database
+from face_voice_rec.storage import database
 
 
 def _setup_database(tmp_path, monkeypatch):
@@ -541,3 +541,4 @@ def test_rename_person_regenerates_meeting_transcript_files(tmp_path, monkeypatc
     assert sorted(path.name for path in meeting_dir.glob("*.txt")) == ["new_name.txt"]
     assert (meeting_dir / "new_name.txt").read_text(encoding="utf-8") == "[01:01] hi there\n"
     assert (meeting_dir / "audio.wav").exists()
+
