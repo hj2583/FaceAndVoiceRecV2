@@ -45,6 +45,7 @@ from face_voice_rec.config import (
     TRANSCRIPTS_DIR,
     UNKNOWN_VOICES_DIR,
     UNKNOWN_FACES_DIR,
+    initialize_runtime_paths,
 )
 from face_voice_rec.storage.database import (
     add_voice_embedding,
@@ -93,6 +94,7 @@ st.set_page_config(
     layout="wide",
 )
 
+initialize_runtime_paths()
 init_db()
 
 
