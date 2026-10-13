@@ -1,4 +1,4 @@
-import json
+﻿import json
 import logging
 import os
 import shutil
@@ -7,7 +7,7 @@ from pathlib import Path
 from typing import Callable
 
 from face_voice_rec import config
-import database
+from face_voice_rec.storage import database
 from subtitle_renderer import (
     SubtitleWord,
     VideoMuxError,
@@ -220,7 +220,7 @@ def process_video_and_transcribe(
                     speech_events,
                 )
                 if any(update.get("face_enrolled") for update in identity_updates):
-                    from face_core import FaceIndex
+                    from face_voice_rec.domain.face.face_core import FaceIndex
 
                     FaceIndex().rebuild()
                 _apply_introduction_identity_updates(
@@ -307,3 +307,4 @@ def process_video_and_transcribe(
         return meeting_id
     finally:
         shutil.rmtree(temp_dir, ignore_errors=True)
+

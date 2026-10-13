@@ -1,7 +1,7 @@
-import numpy as np
+﻿import numpy as np
 
 from face_voice_rec import config
-import database
+from face_voice_rec.storage import database
 from speaker_introductions import (
     extract_self_introductions,
     process_meeting_introductions,
@@ -53,7 +53,7 @@ def test_extracts_common_and_multilingual_self_introductions():
         ("You can call me David.", "David", None),
         ("Nama saya Aisyah dan saya bekerja sebagai pengurus.", "Aisyah", "pengurus"),
         ("Me llamo Ana y soy directora.", "Ana", "directora"),
-        ("Je m'appelle Jean et je suis ingénieur.", "Jean", "ingénieur"),
+        ("Je m'appelle Jean et je suis ingÃ©nieur.", "Jean", "ingÃ©nieur"),
     )
 
     for text, expected_name, expected_title in cases:
@@ -487,3 +487,4 @@ def test_manual_confirmation_enrolls_linked_unknown_face_track(
     assert database.list_meeting_introductions(meeting_id)[0][12] == (
         "manually_confirmed"
     )
+

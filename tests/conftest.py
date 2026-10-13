@@ -1,4 +1,4 @@
-import sys
+﻿import sys
 from pathlib import Path
 
 import cv2
@@ -38,7 +38,7 @@ def _isolate_voice_and_transcript_dirs(tmp_path, monkeypatch):
 @pytest.fixture(autouse=True)
 def _isolate_database_path(tmp_path, monkeypatch):
     """Ensure tests never open the default project database path."""
-    import database
+    from face_voice_rec.storage import database
     from face_voice_rec import config
 
     db_path = tmp_path / "db" / "faces.db"

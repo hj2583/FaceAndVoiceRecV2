@@ -1,9 +1,9 @@
-import json
+﻿import json
 import numpy as np
 from pathlib import Path
 
 from face_voice_rec import config
-import database
+from face_voice_rec.storage import database
 import voice_core
 
 
@@ -677,3 +677,4 @@ def test_unknown_voice_lifecycle_is_scoped_by_globally_unique_labels(tmp_path, m
     assert (meeting_2_dir / "zed.txt").read_text(encoding="utf-8") == "[00:00] y in meeting two\n"
     meeting_1_dir = config.TRANSCRIPTS_DIR / str(meeting_1)
     assert [path.name for path in meeting_1_dir.glob("*.txt")] == [f"unknown_speaker_{x_id}.txt"]
+

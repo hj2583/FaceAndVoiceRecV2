@@ -1,4 +1,4 @@
-#!/usr/bin/env python
+﻿#!/usr/bin/env python
 """Focused test to verify detection quality improvements work correctly."""
 
 import inspect
@@ -6,7 +6,7 @@ from unittest.mock import MagicMock, patch
 
 import numpy as np
 
-from detection_core import (
+from face_voice_rec.domain.face.detection_core import (
     _detect_faces_opencv,
     detect_faces_tiled,
 )
@@ -39,7 +39,7 @@ def test_video_processor_timestamp_fix():
 
 def test_uniface_has_fallback():
     """Verify _detect_faces_uniface has fallback logic to OpenCV."""
-    with open("detection_core.py", "r") as f:
+    with open("src/face_voice_rec/domain/face/detection_core.py", "r") as f:
         content = f.read()
 
     # Check that both functions exist
@@ -56,7 +56,7 @@ def test_uniface_has_fallback():
 
 def test_confidence_filtering_in_tiled():
     """Verify detect_faces_tiled filters by min_confidence."""
-    with open("detection_core.py", "r") as f:
+    with open("src/face_voice_rec/domain/face/detection_core.py", "r") as f:
         content = f.read()
 
     # Check that filtering is implemented

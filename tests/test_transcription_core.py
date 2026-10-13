@@ -1,11 +1,11 @@
-from pathlib import Path
+﻿from pathlib import Path
 import json
 import sqlite3
 
 import pytest
 
 from face_voice_rec import config
-import database
+from face_voice_rec.storage import database
 import transcription_core
 
 from transcription_core import (

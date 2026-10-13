@@ -1,4 +1,4 @@
-"""Speaker-embedding extraction and voiceprint matching.
+﻿"""Speaker-embedding extraction and voiceprint matching.
 
 Mirrors face_core.py's shape: extract a fixed-size, L2-normalized
 embedding, then match it against enrolled voiceprints by cosine similarity.
@@ -15,7 +15,7 @@ from pathlib import Path
 import numpy as np
 
 from face_voice_rec import config
-from database import (
+from face_voice_rec.storage.database import (
     get_conn,
     list_resolved_unknown_voice_samples_for_source,
     list_voice_embeddings,
@@ -281,7 +281,7 @@ from scipy.cluster.hierarchy import fcluster, linkage
 from scipy.spatial.distance import pdist
 
 from audio_core import read_wav_pcm, SAMPLE_RATE, SAMPLE_WIDTH
-from database import (
+from face_voice_rec.storage.database import (
     add_unknown_voice_sample,
     create_unknown_voice,
     delete_unknown_voice,
@@ -933,3 +933,4 @@ def _known_face_cluster_label(windows, known_speaker_events):
         "person_id": person_id,
         "person_name": entry["person_name"],
     }
+

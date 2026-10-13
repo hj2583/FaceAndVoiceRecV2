@@ -1,4 +1,4 @@
-import threading
+﻿import threading
 import time
 import uuid
 from datetime import datetime, timezone
@@ -744,7 +744,7 @@ def test_run_quits_cleanly_on_q_keypress(monkeypatch):
 
 
 def _voice_fallback_track():
-    from tracking import Track
+    from face_voice_rec.domain.face.tracking import Track
 
     return Track(track_id=1, center_x=60, center_y=60, area=100)
 
@@ -788,7 +788,7 @@ def test_voice_fallback_is_throttled_per_track_and_leaves_face_identity_untouche
 
 def test_run_uses_voice_identity_for_display_and_log_without_mutating_track(monkeypatch):
     import realtime
-    from tracking import Track
+    from face_voice_rec.domain.face.tracking import Track
 
     frame = np.zeros((120, 160, 3), dtype=np.uint8)
 
@@ -909,7 +909,7 @@ def test_run_uses_voice_identity_for_display_and_log_without_mutating_track(monk
 
 def test_run_low_confidence_named_face_uses_voice_fallback_for_display_and_log(monkeypatch):
     import realtime
-    from tracking import Track
+    from face_voice_rec.domain.face.tracking import Track
 
     frame = np.zeros((120, 160, 3), dtype=np.uint8)
 
@@ -1200,7 +1200,7 @@ def test_run_logs_unknown_speaking_track(monkeypatch):
         def release(self):
             return None
 
-    from tracking import Track
+    from face_voice_rec.domain.face.tracking import Track
 
     track = Track(track_id=9, center_x=60, center_y=60, area=2500)
     track.lip_open = 1.0

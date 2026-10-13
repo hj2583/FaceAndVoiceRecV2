@@ -1,4 +1,4 @@
-def get_runtime_status(torch_module=None, face_provider_getter=None):
+﻿def get_runtime_status(torch_module=None, face_provider_getter=None):
     status = {
         "torch": "Unavailable",
         "face": "Unavailable",
@@ -19,7 +19,7 @@ def get_runtime_status(torch_module=None, face_provider_getter=None):
     # Detect ONNX Runtime provider availability independently from PyTorch.
     try:
         if face_provider_getter is None:
-            from face_backend import get_cuda_providers
+            from face_voice_rec.domain.face.face_backend import get_cuda_providers
 
             face_provider_getter = get_cuda_providers
 

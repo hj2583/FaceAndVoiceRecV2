@@ -1,4 +1,4 @@
-import argparse
+﻿import argparse
 from collections import deque
 import logging
 import sqlite3
@@ -42,7 +42,7 @@ from face_voice_rec.config import (
     LIVE_VIDEO_DIR,
 )
 
-from database import (
+from face_voice_rec.storage.database import (
     add_unknown_sample,
     init_db,
     update_unknown_image,
@@ -51,7 +51,7 @@ from database import (
     record_attendance_event,
 )
 
-from face_core import (
+from face_voice_rec.domain.face.face_core import (
     FaceIndex,
     extract_embedding,
     face_quality,
@@ -59,12 +59,12 @@ from face_core import (
     find_matching_unknown,
 )
 
-from tracking import (
+from face_voice_rec.domain.face.tracking import (
     CentroidTracker,
 )
 
-from detection_core import ensure_opencv_face_detector_available
-from face_backend import get_face_backend
+from face_voice_rec.domain.face.detection_core import ensure_opencv_face_detector_available
+from face_voice_rec.domain.face.face_backend import get_face_backend
 from frame_pipeline import PipelineStop, run_threaded_pipeline
 from realtime_runtime import DetectionScheduler, RollingFps
 from speaker_attribution import FaceObservation, SpeakerAttributor
@@ -699,7 +699,7 @@ def run(
                                 >= RECOGNITION_THRESHOLD
                             ):
 
-                                from database import (
+                                from face_voice_rec.storage.database import (
                                     get_conn,
                                 )
 
@@ -1455,3 +1455,4 @@ if __name__ == "__main__":
     except Exception:
         logging.exception("Realtime recognition failed")
         raise SystemExit(1)
+

@@ -1,4 +1,4 @@
-import json
+﻿import json
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -149,7 +149,7 @@ def test_process_video_pipeline_logs_unknown_speaker_events(tmp_path, monkeypatc
 
     monkeypatch.setattr(video_processor, "create_face_landmarker", lambda: _Landmarker())
 
-    from tracking import Track
+    from face_voice_rec.domain.face.tracking import Track
 
     track = Track(track_id=1, center_x=30, center_y=30, area=3600)
     monkeypatch.setattr(
@@ -205,7 +205,7 @@ def test_process_video_pipeline_logs_recognized_speaker_with_evicted_track(tmp_p
 
     monkeypatch.setattr(video_processor, "create_face_landmarker", lambda: _Landmarker())
 
-    from tracking import Track
+    from face_voice_rec.domain.face.tracking import Track
 
     track = Track(
         track_id=2, center_x=30, center_y=30, area=3600,
@@ -250,7 +250,7 @@ def test_process_video_pipeline_attendance_candidates_first_seen_per_track_perso
 
     monkeypatch.setattr(video_processor, "create_face_landmarker", lambda: _Landmarker())
 
-    from tracking import Track
+    from face_voice_rec.domain.face.tracking import Track
 
     known_primary = Track(track_id=1, center_x=30, center_y=30, area=3600)
     known_primary.person_id = 101

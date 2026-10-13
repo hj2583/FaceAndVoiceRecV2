@@ -1,4 +1,4 @@
-import gc
+﻿import gc
 import json
 import logging
 import os
@@ -12,7 +12,7 @@ import cv2
 import numpy as np
 
 from audio_core import detect_speech_segments
-from detection_core import detect_faces_tiled
+from face_voice_rec.domain.face.detection_core import detect_faces_tiled
 
 from face_voice_rec.config import (
     ENABLE_TRANSCRIPTION,
@@ -41,19 +41,19 @@ from face_voice_rec.config import (
     TILED_DETECTION_INTERVAL,
 )
 
-from database import (
+from face_voice_rec.storage.database import (
     log_audio,
     log_recognition,
 )
 
-from face_core import (
+from face_voice_rec.domain.face.face_core import (
     FaceIndex,
     extract_embedding,
     register_unknown,
     face_quality,
 )
 
-from tracking import CentroidTracker
+from face_voice_rec.domain.face.tracking import CentroidTracker
 from frame_pipeline import run_threaded_pipeline
 from speaker_attribution import FaceObservation, SpeakerAttributor
 from ffmpeg_utils import find_ffmpeg
@@ -236,7 +236,7 @@ def create_face_landmarker():
     from uniface.constants import SCRFDWeights
     from uniface.detection import SCRFD
     from uniface.landmark import FaceMesh
-    from face_backend import _require_cuda_session, get_cuda_providers
+    from face_voice_rec.domain.face.face_backend import _require_cuda_session, get_cuda_providers
 
     providers = get_cuda_providers()
     detector = SCRFD(
@@ -549,7 +549,7 @@ def process_video_pipeline(
         tiled_detections = last_tiled_detections
 
         # =================================================
-        # BGR → RGB for landmark enrichment
+        # BGR â†’ RGB for landmark enrichment
         # =================================================
 
         rgb = cv2.cvtColor(
@@ -747,7 +747,7 @@ def process_video_pipeline(
                             >= RECOGNITION_THRESHOLD
                         ):
 
-                            from database import (
+                            from face_voice_rec.storage.database import (
                                 get_conn,
                             )
 
@@ -1184,3 +1184,4 @@ def process_video_pipeline(
         )
 
     return True
+
