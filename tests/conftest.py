@@ -1,10 +1,5 @@
-import sys
-from pathlib import Path
-
 import cv2
 import pytest
-
-sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 
 class _NullVideoWriter:
