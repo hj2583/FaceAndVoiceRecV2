@@ -1,7 +1,7 @@
 from pathlib import Path
 import sqlite3
 
-from face_voice_rec.config import DB_PATH, UNKNOWN_FACES_DIR
+from face_voice_rec.config import DB_PATH, UNKNOWN_FACES_DIR, initialize_runtime_paths
 
 
 def find_best_image(label):
@@ -49,6 +49,8 @@ def find_best_image(label):
 
 
 def main():
+    initialize_runtime_paths()
+
     print("Scanning unknown face records...")
     print(f"Unknown faces directory: {UNKNOWN_FACES_DIR}")
     print()

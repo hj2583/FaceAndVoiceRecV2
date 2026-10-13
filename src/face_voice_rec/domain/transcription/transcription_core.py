@@ -19,7 +19,7 @@ from face_voice_rec import config
 from face_voice_rec.domain.transcription.subtitle_renderer import SubtitleWord
 from face_voice_rec.domain.voice import voice_core
 from face_voice_rec.domain.voice.audio_core import detect_speech_segments
-from ffmpeg_utils import find_ffmpeg
+from face_voice_rec.pipelines.video.ffmpeg_utils import find_ffmpeg
 
 
 logger = logging.getLogger(__name__)

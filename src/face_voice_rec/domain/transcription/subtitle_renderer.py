@@ -7,7 +7,7 @@ import subprocess
 import tempfile
 import uuid
 from face_voice_rec import config
-from ffmpeg_utils import find_ffmpeg
+from face_voice_rec.pipelines.video.ffmpeg_utils import find_ffmpeg
 
 
 _WORD_JOINER = chr(0x2060)

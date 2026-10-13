@@ -9,7 +9,7 @@ import cv2
 import numpy as np
 import pytest
 
-from realtime import start_realtime_vad
+from face_voice_rec.pipelines.realtime.realtime import start_realtime_vad
 
 
 def test_start_realtime_vad_returns_available_started_instance():
@@ -34,7 +34,7 @@ def test_start_realtime_vad_contains_startup_failure():
 
 
 def test_run_detects_vad_becoming_unavailable(monkeypatch):
-    import realtime
+    import face_voice_rec.pipelines.realtime.realtime as realtime
 
     frame = np.zeros((120, 160, 3), dtype=np.uint8)
 
@@ -132,9 +132,9 @@ def test_run_detects_vad_becoming_unavailable(monkeypatch):
         Image=lambda image_format, data: data,
     )
     import sys
-    fake_video_processor = ModuleType("video_processor")
+    fake_video_processor = ModuleType("face_voice_rec.pipelines.video.video_processor")
     fake_video_processor.lip_open_ratio = lambda _landmarks: 0.0
-    monkeypatch.setitem(sys.modules, "video_processor", fake_video_processor)
+    monkeypatch.setitem(sys.modules, "face_voice_rec.pipelines.video.video_processor", fake_video_processor)
     monkeypatch.setitem(sys.modules, "mediapipe", dummy_mp)
 
     realtime.run(camera=0, width=160, height=120)
@@ -143,7 +143,7 @@ def test_run_detects_vad_becoming_unavailable(monkeypatch):
 
 
 def test_run_continues_cleanup_when_vad_stop_raises(monkeypatch):
-    import realtime
+    import face_voice_rec.pipelines.realtime.realtime as realtime
 
     frame = np.zeros((120, 160, 3), dtype=np.uint8)
 
@@ -252,9 +252,9 @@ def test_run_continues_cleanup_when_vad_stop_raises(monkeypatch):
         Image=lambda image_format, data: data,
     )
     import sys
-    fake_video_processor = ModuleType("video_processor")
+    fake_video_processor = ModuleType("face_voice_rec.pipelines.video.video_processor")
     fake_video_processor.lip_open_ratio = lambda _landmarks: 0.0
-    monkeypatch.setitem(sys.modules, "video_processor", fake_video_processor)
+    monkeypatch.setitem(sys.modules, "face_voice_rec.pipelines.video.video_processor", fake_video_processor)
     monkeypatch.setitem(sys.modules, "mediapipe", dummy_mp)
 
     realtime.run(camera=0, width=160, height=120)
@@ -265,7 +265,7 @@ def test_run_continues_cleanup_when_vad_stop_raises(monkeypatch):
 
 
 def test_speaking_banner_drawn_below_fps_line(monkeypatch):
-    import realtime
+    import face_voice_rec.pipelines.realtime.realtime as realtime
 
     frame = np.zeros((120, 160, 3), dtype=np.uint8)
 
@@ -362,10 +362,10 @@ def test_speaking_banner_drawn_below_fps_line(monkeypatch):
         Image=lambda image_format, data: data,
     )
     import sys
-    fake_video_processor = ModuleType("video_processor")
+    fake_video_processor = ModuleType("face_voice_rec.pipelines.video.video_processor")
     lip_ratios = iter((0.0, 0.06, 0.0))
     fake_video_processor.lip_open_ratio = lambda _landmarks: next(lip_ratios, 0.0)
-    monkeypatch.setitem(sys.modules, "video_processor", fake_video_processor)
+    monkeypatch.setitem(sys.modules, "face_voice_rec.pipelines.video.video_processor", fake_video_processor)
     monkeypatch.setitem(sys.modules, "mediapipe", dummy_mp)
 
     realtime.run(camera=0, width=160, height=120)
@@ -378,7 +378,7 @@ def test_speaking_banner_drawn_below_fps_line(monkeypatch):
 def test_run_detection_scheduler_calls_detector_twice_for_four_frames_interval_three(monkeypatch):
     import time
 
-    import realtime
+    import face_voice_rec.pipelines.realtime.realtime as realtime
 
     frame = np.zeros((120, 160, 3), dtype=np.uint8)
 
@@ -469,9 +469,9 @@ def test_run_detection_scheduler_calls_detector_twice_for_four_frames_interval_t
         Image=lambda image_format, data: data,
     )
     import sys
-    fake_video_processor = ModuleType("video_processor")
+    fake_video_processor = ModuleType("face_voice_rec.pipelines.video.video_processor")
     fake_video_processor.lip_open_ratio = lambda _landmarks: 0.0
-    monkeypatch.setitem(sys.modules, "video_processor", fake_video_processor)
+    monkeypatch.setitem(sys.modules, "face_voice_rec.pipelines.video.video_processor", fake_video_processor)
     monkeypatch.setitem(sys.modules, "mediapipe", dummy_mp)
 
     realtime.run(camera=0, width=160, height=120)
@@ -480,7 +480,7 @@ def test_run_detection_scheduler_calls_detector_twice_for_four_frames_interval_t
 
 
 def test_run_uses_increasing_landmark_timestamps_for_multiple_faces(monkeypatch):
-    import realtime
+    import face_voice_rec.pipelines.realtime.realtime as realtime
 
     frame = np.zeros((160, 240, 3), dtype=np.uint8)
 
@@ -561,9 +561,9 @@ def test_run_uses_increasing_landmark_timestamps_for_multiple_faces(monkeypatch)
         Image=lambda image_format, data: data,
     )
     import sys
-    fake_video_processor = ModuleType("video_processor")
+    fake_video_processor = ModuleType("face_voice_rec.pipelines.video.video_processor")
     fake_video_processor.lip_open_ratio = lambda _landmarks: 0.0
-    monkeypatch.setitem(sys.modules, "video_processor", fake_video_processor)
+    monkeypatch.setitem(sys.modules, "face_voice_rec.pipelines.video.video_processor", fake_video_processor)
     monkeypatch.setitem(sys.modules, "mediapipe", dummy_mp)
 
     realtime.run(camera=0, width=240, height=160)
@@ -573,7 +573,7 @@ def test_run_uses_increasing_landmark_timestamps_for_multiple_faces(monkeypatch)
 
 
 def test_run_processes_every_captured_frame_via_threaded_pipeline(monkeypatch):
-    import realtime
+    import face_voice_rec.pipelines.realtime.realtime as realtime
 
     frame = np.zeros((120, 160, 3), dtype=np.uint8)
 
@@ -638,9 +638,9 @@ def test_run_processes_every_captured_frame_via_threaded_pipeline(monkeypatch):
     monkeypatch.setattr(realtime.cv2, "destroyAllWindows", lambda: None)
 
     import sys
-    fake_video_processor = ModuleType("video_processor")
+    fake_video_processor = ModuleType("face_voice_rec.pipelines.video.video_processor")
     fake_video_processor.lip_open_ratio = lambda _landmarks: 0.0
-    monkeypatch.setitem(sys.modules, "video_processor", fake_video_processor)
+    monkeypatch.setitem(sys.modules, "face_voice_rec.pipelines.video.video_processor", fake_video_processor)
     monkeypatch.setitem(
         sys.modules,
         "mediapipe",
@@ -655,7 +655,7 @@ def test_run_processes_every_captured_frame_via_threaded_pipeline(monkeypatch):
 def test_run_quits_cleanly_on_q_keypress(monkeypatch):
     """The q/Esc quit path must return normally (PipelineStop), release the
     camera, and leave no frame-pipeline-* threads running afterward."""
-    import realtime
+    import face_voice_rec.pipelines.realtime.realtime as realtime
 
     frame = np.zeros((120, 160, 3), dtype=np.uint8)
 
@@ -724,9 +724,9 @@ def test_run_quits_cleanly_on_q_keypress(monkeypatch):
     monkeypatch.setattr(realtime.cv2, "destroyAllWindows", lambda: None)
 
     import sys
-    fake_video_processor = ModuleType("video_processor")
+    fake_video_processor = ModuleType("face_voice_rec.pipelines.video.video_processor")
     fake_video_processor.lip_open_ratio = lambda _landmarks: 0.0
-    monkeypatch.setitem(sys.modules, "video_processor", fake_video_processor)
+    monkeypatch.setitem(sys.modules, "face_voice_rec.pipelines.video.video_processor", fake_video_processor)
     monkeypatch.setitem(
         sys.modules,
         "mediapipe",
@@ -755,7 +755,7 @@ class _PcmVad:
 
 
 def test_voice_fallback_skips_embedding_when_no_voiceprints_enrolled(monkeypatch):
-    import realtime
+    import face_voice_rec.pipelines.realtime.realtime as realtime
 
     extract = Mock()
     monkeypatch.setattr(realtime.voice_core, "has_enrolled_voiceprints", lambda: False)
@@ -766,7 +766,7 @@ def test_voice_fallback_skips_embedding_when_no_voiceprints_enrolled(monkeypatch
 
 
 def test_voice_fallback_is_throttled_per_track_and_leaves_face_identity_untouched(monkeypatch):
-    import realtime
+    import face_voice_rec.pipelines.realtime.realtime as realtime
 
     match = {"person_id": 5, "person_name": "Vera", "similarity": 0.8}
     extract = Mock(return_value=np.ones(4, dtype=np.float32))
@@ -787,7 +787,7 @@ def test_voice_fallback_is_throttled_per_track_and_leaves_face_identity_untouche
 
 
 def test_run_uses_voice_identity_for_display_and_log_without_mutating_track(monkeypatch):
-    import realtime
+    import face_voice_rec.pipelines.realtime.realtime as realtime
     from face_voice_rec.domain.face.tracking import Track
 
     frame = np.zeros((120, 160, 3), dtype=np.uint8)
@@ -887,10 +887,10 @@ def test_run_uses_voice_identity_for_display_and_log_without_mutating_track(monk
     monkeypatch.setattr(realtime.cv2, "destroyAllWindows", lambda: None)
 
     import sys
-    fake_video_processor = ModuleType("video_processor")
+    fake_video_processor = ModuleType("face_voice_rec.pipelines.video.video_processor")
     lip_ratios = iter((0.0, 0.06, 0.0))
     fake_video_processor.lip_open_ratio = lambda _landmarks: next(lip_ratios, 0.0)
-    monkeypatch.setitem(sys.modules, "video_processor", fake_video_processor)
+    monkeypatch.setitem(sys.modules, "face_voice_rec.pipelines.video.video_processor", fake_video_processor)
     monkeypatch.setitem(
         sys.modules,
         "mediapipe",
@@ -908,7 +908,7 @@ def test_run_uses_voice_identity_for_display_and_log_without_mutating_track(monk
 
 
 def test_run_low_confidence_named_face_uses_voice_fallback_for_display_and_log(monkeypatch):
-    import realtime
+    import face_voice_rec.pipelines.realtime.realtime as realtime
     from face_voice_rec.domain.face.tracking import Track
 
     frame = np.zeros((120, 160, 3), dtype=np.uint8)
@@ -1008,10 +1008,10 @@ def test_run_low_confidence_named_face_uses_voice_fallback_for_display_and_log(m
     monkeypatch.setattr(realtime.cv2, "destroyAllWindows", lambda: None)
 
     import sys
-    fake_video_processor = ModuleType("video_processor")
+    fake_video_processor = ModuleType("face_voice_rec.pipelines.video.video_processor")
     lip_ratios = iter((0.0, 0.06, 0.0))
     fake_video_processor.lip_open_ratio = lambda _landmarks: next(lip_ratios, 0.0)
-    monkeypatch.setitem(sys.modules, "video_processor", fake_video_processor)
+    monkeypatch.setitem(sys.modules, "face_voice_rec.pipelines.video.video_processor", fake_video_processor)
     monkeypatch.setitem(
         sys.modules,
         "mediapipe",
@@ -1031,7 +1031,7 @@ def test_run_low_confidence_named_face_uses_voice_fallback_for_display_and_log(m
 
 
 def test_run_uses_callback_monotonic_audio_samples_and_logs_wall_clock_event_times(monkeypatch):
-    import realtime
+    import face_voice_rec.pipelines.realtime.realtime as realtime
 
     frame = np.zeros((120, 160, 3), dtype=np.uint8)
 
@@ -1142,9 +1142,9 @@ def test_run_uses_callback_monotonic_audio_samples_and_logs_wall_clock_event_tim
     monkeypatch.setattr(realtime, "start_realtime_vad", _start_realtime_vad)
 
     import sys
-    fake_video_processor = ModuleType("video_processor")
+    fake_video_processor = ModuleType("face_voice_rec.pipelines.video.video_processor")
     fake_video_processor.lip_open_ratio = lambda _landmarks: 0.0
-    monkeypatch.setitem(sys.modules, "video_processor", fake_video_processor)
+    monkeypatch.setitem(sys.modules, "face_voice_rec.pipelines.video.video_processor", fake_video_processor)
     monkeypatch.setitem(
         sys.modules,
         "mediapipe",
@@ -1168,7 +1168,7 @@ def test_run_uses_callback_monotonic_audio_samples_and_logs_wall_clock_event_tim
 def test_run_logs_unknown_speaking_track(monkeypatch):
     """Mirrors test_speaking_banner_drawn_below_fps_line but with an
     unresolved track, asserting the new code path still logs it."""
-    import realtime
+    import face_voice_rec.pipelines.realtime.realtime as realtime
 
     frame = np.zeros((120, 160, 3), dtype=np.uint8)
 
@@ -1294,9 +1294,9 @@ def test_run_logs_unknown_speaking_track(monkeypatch):
 
     dummy_mp = SimpleNamespace(ImageFormat=SimpleNamespace(SRGB=1), Image=lambda image_format, data: data)
     import sys
-    fake_video_processor = ModuleType("video_processor")
+    fake_video_processor = ModuleType("face_voice_rec.pipelines.video.video_processor")
     fake_video_processor.lip_open_ratio = lambda _landmarks: 1.0
-    monkeypatch.setitem(sys.modules, "video_processor", fake_video_processor)
+    monkeypatch.setitem(sys.modules, "face_voice_rec.pipelines.video.video_processor", fake_video_processor)
     monkeypatch.setitem(sys.modules, "mediapipe", dummy_mp)
 
     realtime.run(camera=0, width=160, height=120)
@@ -1311,7 +1311,7 @@ def test_run_logs_unknown_speaking_track(monkeypatch):
 
 
 def test_run_records_realtime_attendance_once_per_track_person_pair(monkeypatch):
-    import realtime
+    import face_voice_rec.pipelines.realtime.realtime as realtime
 
     frame = np.zeros((120, 160, 3), dtype=np.uint8)
 
@@ -1439,9 +1439,9 @@ def test_run_records_realtime_attendance_once_per_track_person_pair(monkeypatch)
         Image=lambda image_format, data: data,
     )
     import sys
-    fake_video_processor = ModuleType("video_processor")
+    fake_video_processor = ModuleType("face_voice_rec.pipelines.video.video_processor")
     fake_video_processor.lip_open_ratio = lambda _landmarks: 0.0
-    monkeypatch.setitem(sys.modules, "video_processor", fake_video_processor)
+    monkeypatch.setitem(sys.modules, "face_voice_rec.pipelines.video.video_processor", fake_video_processor)
     monkeypatch.setitem(sys.modules, "mediapipe", dummy_mp)
 
     realtime.run(camera=0, width=160, height=120)
@@ -1467,7 +1467,7 @@ def test_run_records_realtime_attendance_once_per_track_person_pair(monkeypatch)
 
 
 def test_run_retries_transient_attendance_failure_with_throttle(monkeypatch):
-    import realtime
+    import face_voice_rec.pipelines.realtime.realtime as realtime
 
     frame = np.zeros((120, 160, 3), dtype=np.uint8)
 
@@ -1575,9 +1575,9 @@ def test_run_retries_transient_attendance_failure_with_throttle(monkeypatch):
         Image=lambda image_format, data: data,
     )
     import sys
-    fake_video_processor = ModuleType("video_processor")
+    fake_video_processor = ModuleType("face_voice_rec.pipelines.video.video_processor")
     fake_video_processor.lip_open_ratio = lambda _landmarks: 0.0
-    monkeypatch.setitem(sys.modules, "video_processor", fake_video_processor)
+    monkeypatch.setitem(sys.modules, "face_voice_rec.pipelines.video.video_processor", fake_video_processor)
     monkeypatch.setitem(sys.modules, "mediapipe", dummy_mp)
 
     realtime.run(camera=0, width=160, height=120)
@@ -1589,7 +1589,7 @@ def test_run_retries_transient_attendance_failure_with_throttle(monkeypatch):
 
 
 def test_run_clamps_attendance_confidence_to_one(monkeypatch):
-    import realtime
+    import face_voice_rec.pipelines.realtime.realtime as realtime
 
     frame = np.zeros((120, 160, 3), dtype=np.uint8)
 
@@ -1678,9 +1678,9 @@ def test_run_clamps_attendance_confidence_to_one(monkeypatch):
         Image=lambda image_format, data: data,
     )
     import sys
-    fake_video_processor = ModuleType("video_processor")
+    fake_video_processor = ModuleType("face_voice_rec.pipelines.video.video_processor")
     fake_video_processor.lip_open_ratio = lambda _landmarks: 0.0
-    monkeypatch.setitem(sys.modules, "video_processor", fake_video_processor)
+    monkeypatch.setitem(sys.modules, "face_voice_rec.pipelines.video.video_processor", fake_video_processor)
     monkeypatch.setitem(sys.modules, "mediapipe", dummy_mp)
 
     realtime.run(camera=0, width=160, height=120)
@@ -1690,7 +1690,7 @@ def test_run_clamps_attendance_confidence_to_one(monkeypatch):
 
 
 def test_run_initializes_database_before_processing(monkeypatch):
-    import realtime
+    import face_voice_rec.pipelines.realtime.realtime as realtime
 
     frame = np.zeros((120, 160, 3), dtype=np.uint8)
 
@@ -1760,9 +1760,9 @@ def test_run_initializes_database_before_processing(monkeypatch):
         Image=lambda image_format, data: data,
     )
     import sys
-    fake_video_processor = ModuleType("video_processor")
+    fake_video_processor = ModuleType("face_voice_rec.pipelines.video.video_processor")
     fake_video_processor.lip_open_ratio = lambda _landmarks: 0.0
-    monkeypatch.setitem(sys.modules, "video_processor", fake_video_processor)
+    monkeypatch.setitem(sys.modules, "face_voice_rec.pipelines.video.video_processor", fake_video_processor)
     monkeypatch.setitem(sys.modules, "mediapipe", dummy_mp)
 
     realtime.run(camera=0, width=160, height=120)
@@ -1771,7 +1771,7 @@ def test_run_initializes_database_before_processing(monkeypatch):
 
 
 def test_run_raises_when_database_initialization_fails(monkeypatch):
-    import realtime
+    import face_voice_rec.pipelines.realtime.realtime as realtime
 
     class _Cap:
         def isOpened(self):

@@ -54,9 +54,9 @@ from face_voice_rec.domain.face.face_core import (
 )
 
 from face_voice_rec.domain.face.tracking import CentroidTracker
-from frame_pipeline import run_threaded_pipeline
+from face_voice_rec.pipelines.realtime.frame_pipeline import run_threaded_pipeline
 from face_voice_rec.domain.voice.speaker_attribution import FaceObservation, SpeakerAttributor
-from ffmpeg_utils import find_ffmpeg
+from face_voice_rec.pipelines.video.ffmpeg_utils import find_ffmpeg
 
 
 # ============================================================

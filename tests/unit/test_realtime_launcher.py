@@ -3,24 +3,38 @@ import re
 import subprocess
 from unittest.mock import Mock
 
-from realtime_launcher import launch_realtime
+from face_voice_rec.pipelines.realtime.realtime_launcher import launch_realtime
 
 
 def test_launch_realtime_reports_running_child(tmp_path):
     process = Mock(pid=1234)
     process.wait.side_effect = subprocess.TimeoutExpired(
-        cmd=["python", "realtime.py"],
+        cmd=["python", "-m", "face_voice_rec.pipelines.realtime.realtime"],
         timeout=1.0,
     )
     popen = Mock(return_value=process)
 
     result = launch_realtime(
-        Path("realtime.py"), 0, tmp_path, tmp_path, popen=popen
+        0,
+        tmp_path,
+        tmp_path,
+        popen=popen,
     )
 
     assert result.started is True
     assert result.pid == 1234
     assert result.error is None
+    assert result.log_path.parent == tmp_path
+
+    args, kwargs = popen.call_args
+    assert args[0] == [
+        __import__("sys").executable,
+        "-m",
+        "face_voice_rec.pipelines.realtime.realtime",
+        "--camera",
+        "0",
+    ]
+    assert kwargs["cwd"] == str(tmp_path)
 
 
 def test_launch_realtime_returns_tail_for_immediate_failure(tmp_path):
@@ -33,7 +47,10 @@ def test_launch_realtime_returns_tail_for_immediate_failure(tmp_path):
         return process
 
     result = launch_realtime(
-        Path("realtime.py"), 9, tmp_path, tmp_path, popen=fake_popen
+        9,
+        tmp_path,
+        tmp_path,
+        popen=fake_popen,
     )
 
     assert result.started is False
@@ -50,7 +67,10 @@ def test_launch_realtime_includes_exit_code_when_tail_is_empty(tmp_path):
         return process
 
     result = launch_realtime(
-        Path("realtime.py"), 0, tmp_path, tmp_path, popen=fake_popen
+        0,
+        tmp_path,
+        tmp_path,
+        popen=fake_popen,
     )
 
     assert result.started is False
@@ -68,7 +88,7 @@ def test_launch_realtime_returns_actionable_error_when_tail_unreadable(tmp_path,
         kwargs["stdout"].flush()
         return process
 
-    import realtime_launcher
+    import face_voice_rec.pipelines.realtime.realtime_launcher as realtime_launcher
     monkeypatch.setattr(
         realtime_launcher,
         "_read_tail",
@@ -76,7 +96,10 @@ def test_launch_realtime_returns_actionable_error_when_tail_unreadable(tmp_path,
     )
 
     result = launch_realtime(
-        Path("realtime.py"), 0, tmp_path, tmp_path, popen=fake_popen
+        0,
+        tmp_path,
+        tmp_path,
+        popen=fake_popen,
     )
 
     assert result.started is False
@@ -91,7 +114,6 @@ def test_launch_realtime_returns_error_when_popen_raises_oserror(tmp_path):
         raise OSError("spawn failed")
 
     result = launch_realtime(
-        Path("realtime.py"),
         0,
         tmp_path,
         tmp_path,
@@ -114,7 +136,6 @@ def test_launch_realtime_returns_error_when_log_dir_creation_fails(tmp_path, mon
     monkeypatch.setattr(Path, "mkdir", fail_mkdir)
 
     result = launch_realtime(
-        Path("realtime.py"),
         0,
         tmp_path,
         log_dir,
@@ -128,20 +149,18 @@ def test_launch_realtime_returns_error_when_log_dir_creation_fails(tmp_path, mon
 def test_launch_realtime_log_filename_has_utc_prefix_and_unique_suffix(tmp_path):
     process = Mock(pid=9876)
     process.wait.side_effect = subprocess.TimeoutExpired(
-        cmd=["python", "realtime.py"],
+        cmd=["python", "-m", "face_voice_rec.pipelines.realtime.realtime"],
         timeout=1.0,
     )
     popen = Mock(return_value=process)
 
     first = launch_realtime(
-        Path("realtime.py"),
         0,
         tmp_path,
         tmp_path,
         popen=popen,
     )
     second = launch_realtime(
-        Path("realtime.py"),
         0,
         tmp_path,
         tmp_path,

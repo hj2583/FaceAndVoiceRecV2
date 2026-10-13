@@ -24,6 +24,8 @@ def _duration(regions):
 
 
 def main():
+    config.initialize_runtime_paths()
+
     parser = argparse.ArgumentParser(description="Report speaker-recognition diagnostics")
     parser.add_argument("video", type=Path, help="meeting video to analyze")
     args = parser.parse_args()

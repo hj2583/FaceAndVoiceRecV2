@@ -6,7 +6,7 @@ import cv2
 import numpy as np
 import pytest
 
-import video_processor
+from face_voice_rec.pipelines.video import video_processor
 
 
 class _FakeCapture:

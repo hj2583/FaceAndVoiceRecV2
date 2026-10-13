@@ -1,6 +1,6 @@
 import logging
 import pytest
-from realtime_runtime import DetectionScheduler, RollingFps
+from face_voice_rec.pipelines.realtime.realtime_runtime import DetectionScheduler, RollingFps
 
 
 class DummyDetector:

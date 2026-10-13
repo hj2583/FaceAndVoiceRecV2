@@ -1,6 +1,6 @@
 from types import SimpleNamespace
 
-import ffmpeg_utils
+from face_voice_rec.pipelines.video import ffmpeg_utils
 
 
 def test_find_ffmpeg_prefers_system_path(monkeypatch):

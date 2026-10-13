@@ -4,7 +4,12 @@ import time
 
 import pytest
 
-from frame_pipeline import PipelineStop, _dequeue, _enqueue, run_threaded_pipeline
+from face_voice_rec.pipelines.realtime.frame_pipeline import (
+    PipelineStop,
+    _dequeue,
+    _enqueue,
+    run_threaded_pipeline,
+)
 
 
 def _assert_no_pipeline_threads_running():

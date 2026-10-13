@@ -16,7 +16,7 @@ from face_voice_rec.domain.transcription.subtitle_renderer import (
     write_ass_subtitles,
 )
 from face_voice_rec.domain.transcription.transcription_core import build_face_event_diarizer, process_meeting_transcription
-from video_processor import process_video_pipeline
+from face_voice_rec.pipelines.video.video_processor import process_video_pipeline
 from face_voice_rec.domain.voice import voice_core
 
 

@@ -70,9 +70,12 @@ from face_voice_rec.storage.database import (
     update_transcription_segments,
 )
 from face_voice_rec.domain.face.face_core import FaceIndex
-from realtime_launcher import launch_realtime
+from face_voice_rec.pipelines.realtime.realtime_launcher import launch_realtime
 from runtime_status import get_runtime_status
-from video_workflow import TranscriptStageError, process_video_and_transcribe
+from face_voice_rec.pipelines.video.video_workflow import (
+    TranscriptStageError,
+    process_video_and_transcribe,
+)
 from face_voice_rec.domain.transcription.transcription_core import (
     SENTENCE_TYPES,
     TranscriptionSegment,
@@ -129,7 +132,6 @@ def render_realtime():
     if st.button("▶ Start Realtime Recognition", type="primary"):
         with st.spinner("Starting realtime recognition..."):
             result = launch_realtime(
-                script=Path(__file__).parent / "realtime.py",
                 camera=int(camera),
                 cwd=Path(__file__).parent,
                 log_dir=LOG_DIR,

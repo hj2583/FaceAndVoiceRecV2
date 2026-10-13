@@ -29,7 +29,7 @@ def test_detect_faces_tiled_has_min_confidence_param():
 def test_video_processor_timestamp_fix():
     """Verify video_processor.py calculates timestamp_ms correctly."""
     # Read the file and check that timestamp_ms is calculated
-    with open("video_processor.py", "r") as f:
+    with open("src/face_voice_rec/pipelines/video/video_processor.py", "r") as f:
         content = f.read()
 
     # Check that timestamp_ms is defined

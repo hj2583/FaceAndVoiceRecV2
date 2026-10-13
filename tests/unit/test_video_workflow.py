@@ -5,7 +5,7 @@ import pytest
 
 from face_voice_rec import config
 from face_voice_rec.domain.transcription.subtitle_renderer import SubtitleWord, VideoMuxError
-import video_workflow
+from face_voice_rec.pipelines.video import video_workflow
 from face_voice_rec.domain.voice import voice_core
 
 

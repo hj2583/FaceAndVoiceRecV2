@@ -24,7 +24,6 @@ def _read_tail(path: Path, max_bytes: int = 4096) -> str:
 
 
 def launch_realtime(
-    script: Path,
     camera: int,
     cwd: Path,
     log_dir: Path,
@@ -36,7 +35,13 @@ def launch_realtime(
     unique = uuid.uuid4().hex
     log_path = Path(log_dir) / f"realtime-{stamp}-{unique}.log"
 
-    command = [sys.executable, str(script), "--camera", str(camera)]
+    command = [
+        sys.executable,
+        "-m",
+        "face_voice_rec.pipelines.realtime.realtime",
+        "--camera",
+        str(camera),
+    ]
     popen_kwargs = {
         "cwd": str(cwd),
         "stdout": None,

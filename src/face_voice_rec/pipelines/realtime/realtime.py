@@ -65,8 +65,8 @@ from face_voice_rec.domain.face.tracking import (
 
 from face_voice_rec.domain.face.detection_core import ensure_opencv_face_detector_available
 from face_voice_rec.domain.face.face_backend import get_face_backend
-from frame_pipeline import PipelineStop, run_threaded_pipeline
-from realtime_runtime import DetectionScheduler, RollingFps
+from face_voice_rec.pipelines.realtime.frame_pipeline import PipelineStop, run_threaded_pipeline
+from face_voice_rec.pipelines.realtime.realtime_runtime import DetectionScheduler, RollingFps
 from face_voice_rec.domain.voice.speaker_attribution import FaceObservation, SpeakerAttributor
 
 
@@ -153,7 +153,7 @@ def voice_fallback_match(track, frame_no, vad):
 # ============================================================
 
 def create_face_landmarker():
-    from video_processor import create_face_landmarker as _create_face_landmarker
+    from face_voice_rec.pipelines.video.video_processor import create_face_landmarker as _create_face_landmarker
 
     return _create_face_landmarker()
 
@@ -411,7 +411,7 @@ def run(
         # ========================================================
 
         mesh = create_face_landmarker()
-        from video_processor import lip_open_ratio
+        from face_voice_rec.pipelines.video.video_processor import lip_open_ratio
 
         # ========================================================
         # Runtime state
