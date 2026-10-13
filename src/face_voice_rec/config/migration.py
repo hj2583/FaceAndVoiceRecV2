@@ -167,8 +167,28 @@ def _rewrite_legacy_path(value: str, replacements: tuple[tuple[Path, Path], ...]
     for source_prefix, destination_prefix in replacements:
         relative_suffix = _relative_if_under(candidate, source_prefix)
         if relative_suffix is not None:
-            return str(destination_prefix / relative_suffix)
+            rewritten_path = destination_prefix / relative_suffix
+            return _render_with_original_separators(rewritten_path, value)
     return value
+
+
+def _render_with_original_separators(path: Path, original_value: str) -> str:
+    has_forward_slash = "/" in original_value
+    has_backslash = "\\" in original_value
+
+    if has_forward_slash and not has_backslash:
+        return path.as_posix()
+    if has_backslash and not has_forward_slash:
+        return str(path)
+    if has_forward_slash and has_backslash:
+        first_forward_index = original_value.find("/")
+        first_backslash_index = original_value.find("\\")
+        if first_forward_index != -1 and (
+            first_backslash_index == -1 or first_forward_index < first_backslash_index
+        ):
+            return path.as_posix()
+
+    return str(path)
 
 
 def _relative_if_under(candidate: Path, prefix: Path) -> Path | None:

@@ -400,3 +400,35 @@ def test_path_reference_migration_sqlite_error_does_not_write_marker(runtime_tre
         migrate_legacy_data(runtime_tree.project_root, runtime_tree.data_root)
 
     assert not runtime_tree.data_path(PATH_REFERENCE_MIGRATION_MARKER).exists()
+
+
+def test_path_reference_migration_preserves_posix_separator_style_for_attendance_source_ref(
+    runtime_tree: RuntimeTree,
+) -> None:
+    runtime_tree.write_data(".legacy_migration_v1_complete", b"done\n")
+    db_path = runtime_tree.data_path("db/faces.db")
+    _create_path_reference_test_db(db_path)
+
+    legacy_posix_attendance_ref = (
+        f"{runtime_tree.project_root.as_posix()}/initialVideo/source.mp4"
+    )
+
+    connection = sqlite3.connect(db_path)
+    try:
+        connection.execute(
+            "INSERT INTO attendance_events(id, source_ref) VALUES (1, ?)",
+            (legacy_posix_attendance_ref,),
+        )
+        connection.commit()
+    finally:
+        connection.close()
+
+    migrate_legacy_data(runtime_tree.project_root, runtime_tree.data_root)
+
+    connection = sqlite3.connect(db_path)
+    try:
+        assert _read_table(connection, "attendance_events", "source_ref") == [
+            (runtime_tree.data_path("artifacts/initialVideo/source.mp4").as_posix(),)
+        ]
+    finally:
+        connection.close()
