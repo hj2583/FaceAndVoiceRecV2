@@ -1,6 +1,6 @@
 import pyarrow as pa
 
-from audio_log_utils import build_audio_log_frame
+from app.ui.renderers import build_audio_log_frame
 
 
 def test_track_column_uses_nullable_integer_dtype_for_arrow():

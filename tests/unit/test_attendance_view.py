@@ -4,7 +4,7 @@ from pathlib import Path
 from face_voice_rec.storage import database
 import pytest
 
-from attendance_view import (
+from app.ui.attendance_view import (
     attendance_frame_to_csv,
     build_attendance_frame,
     build_realtime_attendance_range,

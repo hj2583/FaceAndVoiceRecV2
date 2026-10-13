@@ -25,8 +25,8 @@ if not hasattr(np, "complex"):
 import pandas as pd
 import streamlit as st
 
-from audio_log_utils import build_audio_log_frame
-from attendance_view import (
+from app.ui.renderers import build_audio_log_frame
+from app.ui.attendance_view import (
     attendance_frame_to_csv,
     build_attendance_frame,
     build_realtime_attendance_range,
@@ -71,7 +71,7 @@ from face_voice_rec.storage.database import (
 )
 from face_voice_rec.domain.face.face_core import FaceIndex
 from face_voice_rec.pipelines.realtime.realtime_launcher import launch_realtime
-from runtime_status import get_runtime_status
+from app.ui.status import get_runtime_status
 from face_voice_rec.pipelines.video.video_workflow import (
     TranscriptStageError,
     process_video_and_transcribe,
