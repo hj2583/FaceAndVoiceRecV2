@@ -179,31 +179,111 @@ The project prefers CUDA automatically when it is available. If CUDA is missing 
 
 ```text
 FaceAndVoiceRecV2/
-├── app.py
-├── audio_core.py
-├── config.py
-├── database.py
-├── detection_core.py
-├── face_backend.py
-├── face_core.py
-├── face_index.npz
-├── faces.db
-├── README.md
-├── realtime.py
-├── realtime_launcher.py
+├── app/
+│   ├── __init__.py
+│   ├── main.py                  # streamlit app entry
+│   ├── pages/
+│   │   ├── realtime.py
+│   │   ├── video.py
+│   │   ├── transcripts.py
+│   │   └── voice_enrollment.py
+│   └── ui/
+│       ├── attendance_view.py
+│       ├── renderers.py
+│       └── status.py
+│
+├── src/
+│   └── face_voice_rec/
+│       ├── __init__.py
+│       ├── config/
+│       │   ├── __init__.py
+│       │   ├── settings.py
+│       │   ├── paths.py
+│       │   └── constants.py
+│       │
+│       ├── domain/
+│       │   ├── face/
+│       │   │   ├── __init__.py
+│       │   │   ├── face_core.py
+│       │   │   ├── face_backend.py
+│       │   │   ├── detection_core.py
+│       │   │   └── tracking.py
+│       │   │
+│       │   ├── voice/
+│       │   │   ├── __init__.py
+│       │   │   ├── voice_core.py
+│       │   │   ├── audio_core.py
+│       │   │   └── speaker_attribution.py
+│       │   │
+│       │   ├── transcription/
+│       │   │   ├── __init__.py
+│       │   │   ├── transcription_core.py
+│       │   │   ├── transcript_refiner.py
+│       │   │   ├── subtitle_renderer.py
+│       │   │   └── speaker_introductions.py
+│       │   │
+│       │   └── attendance/
+│       │       ├── __init__.py
+│       │       └── attendance_service.py
+│       │
+│       ├── pipelines/
+│       │   ├── __init__.py
+│       │   ├── realtime/
+│       │   │   ├── __init__.py
+│       │   │   ├── realtime.py
+│       │   │   ├── realtime_launcher.py
+│       │   │   └── realtime_runtime.py
+│       │   ├── video/
+│       │   │   ├── __init__.py
+│       │   │   ├── video_workflow.py
+│       │   │   ├── video_processor.py
+│       │   │   └── ffmpeg_utils.py
+│       │   └── workflow/
+│       │       └── pipeline_orchestration.py
+│       │
+│       ├── storage/
+│       │   ├── __init__.py
+│       │   ├── database.py
+│       │   ├── sqlite_utils.py
+│       │   └── repositories.py
+│       │
+│       ├── services/
+│       │   ├── __init__.py
+│       │   ├── identity_service.py
+│       │   ├── recognition_service.py
+│       │   ├── speaker_service.py
+│       │   └── meeting_service.py
+│       │
+│       └── utils/
+│           ├── __init__.py
+│           ├── time_utils.py
+│           ├── text_processing.py
+│           └── file_utils.py
+│
+├── data/
+│   ├── db/
+│   │   └── faces.db
+│   ├── artifacts/
+│   │   ├── face_index.npz
+│   │   ├── known_faces/
+│   │   ├── unknown_faces/
+│   │   ├── unknown_voices/
+│   │   ├── trackedVideo/
+│   │   ├── initialVideo/
+│   │   ├── live/
+│   │   └── logs/
+│   ├── transcripts/
+│   └── temp/
+│
+├── tests/
+│   ├── unit/
+│   ├── integration/
+│   └── fixtures/
+│
 ├── requirements.txt
 ├── requirements-gpu.txt
-├── tracking.py
-├── transcription_core.py
-├── transcript_refiner.py
-├── video_processor.py
-├── known_faces/
-├── unknown_faces/
-├── transcripts/
-├── trackedVideo/
-├── initialVideo/
-├── logs/
-├── tests/
+├── pyproject.toml
+├── README.md
 └── .gitignore
 ```
 
