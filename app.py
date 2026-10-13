@@ -38,6 +38,7 @@ from audio_core import read_wav_pcm
 from face_voice_rec.config import (
     DB_PATH,
     INITIAL_VIDEO_DIR,
+    initialize_runtime_paths,
     KNOWN_FACES_DIR,
     LOG_DIR,
     TRANSCRIPT_REFINEMENT_ENABLED,
@@ -93,6 +94,7 @@ st.set_page_config(
     layout="wide",
 )
 
+initialize_runtime_paths()
 init_db()
 
 

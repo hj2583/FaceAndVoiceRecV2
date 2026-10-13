@@ -15,6 +15,7 @@ import voice_core
 
 from face_voice_rec.config import (
     LIP_OPEN_THRESHOLD,
+    initialize_runtime_paths,
 
     RECOGNITION_INTERVAL,
     RECOGNITION_THRESHOLD,
@@ -1447,6 +1448,7 @@ if __name__ == "__main__":
     args = parser.parse_args()
 
     try:
+        initialize_runtime_paths()
         run(
             camera=args.camera
         )
