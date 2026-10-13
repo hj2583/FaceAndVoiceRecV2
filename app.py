@@ -1,4 +1,4 @@
-﻿import html
+import html
 import io
 import json
 import os
@@ -38,7 +38,6 @@ from audio_core import read_wav_pcm
 from face_voice_rec.config import (
     DB_PATH,
     INITIAL_VIDEO_DIR,
-    initialize_runtime_paths,
     KNOWN_FACES_DIR,
     LOG_DIR,
     TRANSCRIPT_REFINEMENT_ENABLED,
@@ -90,11 +89,10 @@ LOW_CONFIDENCE_BAD = 0.5
 
 st.set_page_config(
     page_title="AI Face + Audio Recognition",
-    page_icon="ðŸŽ¥",
+    page_icon="🎥",
     layout="wide",
 )
 
-initialize_runtime_paths()
 init_db()
 
 
@@ -111,7 +109,7 @@ def fmt_time(seconds):
 
 
 def render_realtime():
-    st.header("ðŸ“¹ Realtime Face Recognition")
+    st.header("📹 Realtime Face Recognition")
 
     st.info(
         "Realtime mode runs the local webcam and microphone in a separate process. "
@@ -126,7 +124,7 @@ def render_realtime():
         step=1,
     )
 
-    if st.button("â–¶ Start Realtime Recognition", type="primary"):
+    if st.button("▶ Start Realtime Recognition", type="primary"):
         with st.spinner("Starting realtime recognition..."):
             result = launch_realtime(
                 script=Path(__file__).parent / "realtime.py",
@@ -171,7 +169,7 @@ def render_realtime():
 
 
 def render_video():
-    st.header("ðŸŽ¬ Upload Video Recognition")
+    st.header("🎬 Upload Video Recognition")
 
     uploaded = st.file_uploader(
         "Upload a video or MP3 audio file",
@@ -206,7 +204,7 @@ def render_video():
             "MP3 files use voice recognition and transcription only. "
             "Face detection and tracked-video output require a video file."
         )
-        if st.button("ðŸŽ™ï¸ Recognize Speakers & Transcribe Audio", type="primary"):
+        if st.button("🎙️ Recognize Speakers & Transcribe Audio", type="primary"):
             with st.spinner("Recognizing speakers and transcribing audio..."):
                 try:
                     meeting_id = process_meeting_transcription(input_path)
@@ -221,7 +219,7 @@ def render_video():
     output_path = TRACKED_VIDEO_DIR / f"tracked_{input_path.stem}.mp4"
     log_path = LOG_DIR / f"{input_path.stem}.json"
 
-    if st.button("ðŸš€ Process Video + Transcript", type="primary"):
+    if st.button("🚀 Process Video + Transcript", type="primary"):
         progress = st.progress(0)
         status = st.empty()
 
@@ -252,7 +250,7 @@ def render_video():
             progress.progress(1.0)
             status.success("Processing and transcription completed.")
             st.success(
-                f"âœ… Meeting {meeting_id} processed successfully.\n"
+                f"✅ Meeting {meeting_id} processed successfully.\n"
                 f"Tracked video: {output_path}\n"
                 f"Includes source audio when present and burned-in subtitles."
             )
@@ -324,7 +322,7 @@ def render_video():
 
 
 def render_database():
-    st.header("ðŸ‘¤ Face Database")
+    st.header("👤 Face Database")
 
     index = get_face_index()
 
@@ -364,7 +362,7 @@ def render_database():
     # ============================================================
 
     st.markdown("---")
-    st.subheader("âž• Add a Person")
+    st.subheader("➕ Add a Person")
 
     with st.form("add_person"):
         name = st.text_input("Person name")
@@ -383,7 +381,7 @@ def render_database():
     # ============================================================
 
     st.markdown("---")
-    st.subheader("â“ Pending Unknown People")
+    st.subheader("❓ Pending Unknown People")
 
     unknowns = list_unknowns()
 
@@ -398,7 +396,7 @@ def render_database():
     )
 
     if st.button(
-        "ðŸ—‘ï¸ Delete Unknown Faces Below 40% Quality",
+        "🗑️ Delete Unknown Faces Below 40% Quality",
         key="delete_low_quality_unknowns",
         help="Permanently removes unresolved unknown faces whose best sample quality is below 0.40.",
     ):
@@ -515,7 +513,7 @@ def render_database():
         with st.container(border=True):
 
             st.markdown(
-                f"### â“ Unknown #{unknown_id}"
+                f"### ❓ Unknown #{unknown_id}"
             )
 
             st.caption(
@@ -525,11 +523,11 @@ def render_database():
             st.caption(
                 f"Captured: {sample_count} sample"
                 f"{'s' if sample_count != 1 else ''}"
-                f"  â€¢  Created: {created}"
+                f"  •  Created: {created}"
             )
 
             if st.button(
-                "ðŸ—‘ï¸ Delete Unknown",
+                "🗑️ Delete Unknown",
                 key=f"delete_unknown_{unknown_id}",
                 help="Permanently delete this unresolved unknown face and its saved samples.",
             ):
@@ -547,7 +545,7 @@ def render_database():
 
                 st.image(
                     best_image,
-                    caption=f"Best sample â€¢ Quality {best_quality:.2f}",
+                    caption=f"Best sample • Quality {best_quality:.2f}",
                     width=300,
                 )
 
@@ -601,7 +599,7 @@ def render_database():
                                 )
 
                                 st.caption(
-                                    f"#{i + 1} â€¢ Quality: "
+                                    f"#{i + 1} • Quality: "
                                     f"{sample['quality']:.2f}"
                                 )
 
@@ -625,7 +623,7 @@ def render_database():
 
             if options:
 
-                st.markdown("#### ðŸ‘¤ Assign to Existing Person")
+                st.markdown("#### 👤 Assign to Existing Person")
 
                 selected_name = st.selectbox(
                     "Select person",
@@ -634,7 +632,7 @@ def render_database():
                 )
 
                 if st.button(
-                    "âœ… Assign Existing Person",
+                    "✅ Assign Existing Person",
                     key=f"assign_{unknown_id}",
                     type="primary",
                 ):
@@ -768,7 +766,7 @@ def render_database():
             # CREATE NEW PERSON
             # ====================================================
 
-            st.markdown("#### ðŸ†• Create New Person")
+            st.markdown("#### 🆕 Create New Person")
 
             new_name = st.text_input(
                 "New person's name",
@@ -776,7 +774,7 @@ def render_database():
             )
 
             if st.button(
-                "âž• Create New Person",
+                "➕ Create New Person",
                 key=f"create_person_{unknown_id}",
             ):
 
@@ -895,7 +893,7 @@ def render_database():
 
 
 def render_audio_logs():
-    st.header("ðŸ”Š Audio Logs")
+    st.header("🔊 Audio Logs")
 
     rows = fetch_audio_logs()
 
@@ -931,7 +929,7 @@ def render_audio_logs():
 
 
 def render_attendance():
-    st.header("âœ… Attendance")
+    st.header("✅ Attendance")
 
     source_mode = st.selectbox(
         "Attendance source",
@@ -1032,7 +1030,7 @@ def render_attendance():
 
     st.dataframe(frame, width="stretch")
     st.download_button(
-        "â¬‡ï¸ Export CSV",
+        "⬇️ Export CSV",
         data=attendance_frame_to_csv(frame),
         file_name="attendance.csv",
         mime="text/csv",
@@ -1040,7 +1038,7 @@ def render_attendance():
 
 
 def render_transcripts():
-    st.header("ðŸ“ Meeting Transcripts")
+    st.header("📝 Meeting Transcripts")
     with sqlite3.connect(DB_PATH) as connection:
         meetings = connection.execute(
             """
@@ -1115,24 +1113,24 @@ def render_transcripts():
         reason,
         face_unknown_id,
     ) in introductions:
-        title_text = f" â€” {job_title}" if job_title else ""
+        title_text = f" — {job_title}" if job_title else ""
         track_text = (
-            f" Â· face track {face_track_id}"
+            f" · face track {face_track_id}"
             if face_track_id is not None
             else ""
         )
         if face_unknown_id is not None:
-            track_text += f" Â· saved face record {face_unknown_id}"
-        person_text = f" Â· person ID {person_id}" if person_id is not None else ""
+            track_text += f" · saved face record {face_unknown_id}"
+        person_text = f" · person ID {person_id}" if person_id is not None else ""
         match_text = (
-            f" Â· face activity score {float(match_confidence):.2f} (heuristic)"
+            f" · face activity score {float(match_confidence):.2f} (heuristic)"
             if match_confidence is not None
             else ""
         )
         st.caption(
-            f"{fmt_time(start_ms / 1000)}â€“{fmt_time(end_ms / 1000)} Â· "
-            f"{name}{title_text} Â· voice label {speaker_label} Â· "
-            f"{status}{person_text}{track_text}{match_text} Â· "
+            f"{fmt_time(start_ms / 1000)}–{fmt_time(end_ms / 1000)} · "
+            f"{name}{title_text} · voice label {speaker_label} · "
+            f"{status}{person_text}{track_text}{match_text} · "
             f"introduction parser score {float(parser_confidence):.2f} (heuristic)"
         )
         if reason:
@@ -1207,7 +1205,7 @@ def render_transcripts():
             if status == "disabled"
             else status
         )
-        st.caption(f"Readable version: {status_label} Â· {method}")
+        st.caption(f"Readable version: {status_label} · {method}")
         if status == "fallback" and refinement_error:
             st.warning(
                 f"LLM refinement failed; the deterministic version is shown. "
@@ -1307,7 +1305,7 @@ def render_transcripts():
                         if len(paragraph.speaker_labels) == 1
                         else "Mixed/uncertain attribution"
                     ),
-                    "Speaker labels": " Â· ".join(paragraph.speaker_labels),
+                    "Speaker labels": " · ".join(paragraph.speaker_labels),
                     "Start": fmt_time(paragraph.start_ms / 1000),
                     "End": fmt_time(paragraph.end_ms / 1000),
                     "Type": classify_sentence(paragraph.text),
@@ -1367,19 +1365,19 @@ def render_transcripts():
                     )
                 except (TypeError, json.JSONDecodeError):
                     source_ids = "unavailable"
-                source_label = f" Â· Source detailed segments {source_ids}"
+                source_label = f" · Source detailed segments {source_ids}"
                 speaker_labels = record["Speaker labels"]
                 speaker_label_text = (
-                    f"{record['Speaker']} Â· Source speaker labels: {speaker_labels}"
+                    f"{record['Speaker']} · Source speaker labels: {speaker_labels}"
                     if record["Speaker"] == "Mixed/uncertain attribution"
                     else record["Speaker"]
                 )
             else:
-                source_label = f" Â· Detailed segment #{record['segment_id']}"
+                source_label = f" · Detailed segment #{record['segment_id']}"
                 speaker_label_text = record["Speaker"]
             st.caption(
-                f"{speaker_label_text} Â· {record['Start']}â€“{record['End']} Â· "
-                f"{record['Type'] or 'Unclassified'} Â· {score_label}{source_label}"
+                f"{speaker_label_text} · {record['Start']}–{record['End']} · "
+                f"{record['Type'] or 'Unclassified'} · {score_label}{source_label}"
             )
             st.markdown(
                 f'<div style="background-color:{background};color:{text_color};padding:0.2rem 0.35rem;'
@@ -1453,7 +1451,7 @@ def render_transcripts():
         )
         if readable_rows:
             readable_lines = [
-                f"[{fmt_time(start_ms / 1000)}â€“{fmt_time(end_ms / 1000)}] "
+                f"[{fmt_time(start_ms / 1000)}–{fmt_time(end_ms / 1000)}] "
                 f"{speaker}: {text}"
                 for (
                     speaker, start_ms, end_ms, text, _source_ids,
@@ -1469,7 +1467,7 @@ def render_transcripts():
             )
 
 def render_voice_enrollment():
-    st.header("ðŸŽ™ï¸ Voice Enrollment")
+    st.header("🎙️ Voice Enrollment")
 
     enrollment_generation = st.session_state.setdefault(
         "voice_enrollment_generation",
@@ -1521,11 +1519,11 @@ def render_voice_enrollment():
     st.subheader("Enroll a clean voice sample")
     selected_name = st.selectbox(
         "Person",
-        ["-- Select --", "âž• Create a new person"] + list(persons.keys()),
+        ["-- Select --", "➕ Create a new person"] + list(persons.keys()),
         key="voice_enroll_person",
     )
     new_person_name = None
-    if selected_name == "âž• Create a new person":
+    if selected_name == "➕ Create a new person":
         new_person_name = st.text_input(
             "New person's name",
             key="voice_enroll_new_person",
@@ -1547,7 +1545,7 @@ def render_voice_enrollment():
         sample_mime = "audio/mpeg"
     if sample_payload:
         if st.button(
-            "â–¶ Play uploaded/recorded sample",
+            "▶ Play uploaded/recorded sample",
             key=f"preview_voice_enrollment_{enrollment_generation}",
         ):
             select_audio(
@@ -1562,7 +1560,7 @@ def render_voice_enrollment():
         key=f"confirm_voice_enrollment_{enrollment_generation}",
     )
     if st.button(
-        "âž• Add Voice Sample",
+        "➕ Add Voice Sample",
         key=f"add_voice_sample_{enrollment_generation}",
     ):
         if selected_name == "-- Select --":
@@ -1572,7 +1570,7 @@ def render_voice_enrollment():
         elif uploaded is None and recorded is None:
             st.warning("Please upload or record a voice sample first.")
         elif (
-            selected_name == "âž• Create a new person"
+            selected_name == "➕ Create a new person"
             and not (new_person_name or "").strip()
         ):
             st.warning("Enter a name for the new person.")
@@ -1602,7 +1600,7 @@ def render_voice_enrollment():
                     try:
                         person_id = (
                             persons[selected_name]
-                            if selected_name != "âž• Create a new person"
+                            if selected_name != "➕ Create a new person"
                             else create_person(new_person_name.strip())
                         )
                         embedding_dir = known_voice_root / str(person_id)
@@ -1636,7 +1634,7 @@ def render_voice_enrollment():
                     else:
                         saved_name = (
                             new_person_name.strip()
-                            if selected_name == "âž• Create a new person"
+                            if selected_name == "➕ Create a new person"
                             else selected_name
                         )
                         st.success(f"Voice sample added for {saved_name}.")
@@ -1656,21 +1654,21 @@ def render_voice_enrollment():
         else:
             for embedding_id, person_id, person_name, _embedding_path, audio_path, quality, created_at in voice_enrollments:
                 with st.container(border=True):
-                    st.markdown(f"**Sample #{embedding_id} Â· {person_name}**")
+                    st.markdown(f"**Sample #{embedding_id} · {person_name}**")
                     st.caption(
-                        f"Person ID: {person_id} Â· Status: Enrolled Â· "
-                        f"Quality: {float(quality or 0.0):.2f} Â· Added: {created_at}"
+                        f"Person ID: {person_id} · Status: Enrolled · "
+                        f"Quality: {float(quality or 0.0):.2f} · Added: {created_at}"
                     )
                     if audio_path:
                         try:
                             audio_bytes, duration = load_audio(audio_path)
                             st.caption(f"Duration: {fmt_time(duration)}")
                             if st.button(
-                                f"â–¶ Play sample #{embedding_id}",
+                                f"▶ Play sample #{embedding_id}",
                                 key=f"play_enrolled_voice_{embedding_id}",
                             ):
                                 select_audio(
-                                    f"Enrolled sample #{embedding_id} Â· {person_name}",
+                                    f"Enrolled sample #{embedding_id} · {person_name}",
                                     audio_bytes,
                                     duration=duration,
                                 )
@@ -1684,7 +1682,7 @@ def render_voice_enrollment():
                         )
                     edit_key = f"edit_enrolled_voice_{embedding_id}"
                     if st.button(
-                        "âœï¸ Edit person",
+                        "✏️ Edit person",
                         key=f"edit_enrolled_voice_button_{embedding_id}",
                     ):
                         st.session_state["editing_voice_enrollment_id"] = embedding_id
@@ -1754,10 +1752,10 @@ def render_voice_enrollment():
     else:
         for unknown_voice_id, label, embedding_path, created_at, resolved_person_id in unknown_voices:
             with st.container(border=True):
-                st.markdown(f"### â“ {label} (Unknown voice #{unknown_voice_id})")
+                st.markdown(f"### ❓ {label} (Unknown voice #{unknown_voice_id})")
                 sample_rows = list_unknown_voice_samples(unknown_voice_id)
                 st.caption(
-                    f"Samples: {len(sample_rows)} Â· Created: {created_at} Â· "
+                    f"Samples: {len(sample_rows)} · Created: {created_at} · "
                     f"Status: {'Resolved' if resolved_person_id else 'Unresolved'}"
                 )
                 if not sample_rows and embedding_path:
@@ -1771,7 +1769,7 @@ def render_voice_enrollment():
                     if start_ms is not None and end_ms is not None:
                         duration_text = f"Duration: {fmt_time((end_ms - start_ms) / 1000)}"
                     st.caption(
-                        f"{duration_text} Â· Quality: {float(quality or 0.0):.2f} Â· "
+                        f"{duration_text} · Quality: {float(quality or 0.0):.2f} · "
                         f"Recorded: {sample_created}"
                     )
                     if sample_audio:
@@ -1779,11 +1777,11 @@ def render_voice_enrollment():
                             audio_bytes, duration = load_audio(sample_audio)
                             st.caption(f"Audio duration: {fmt_time(duration)}")
                             if st.button(
-                                f"â–¶ Play sample #{sample_id}",
+                                f"▶ Play sample #{sample_id}",
                                 key=f"play_unknown_voice_{sample_id}",
                             ):
                                 select_audio(
-                                    f"{label} Â· sample #{sample_id}",
+                                    f"{label} · sample #{sample_id}",
                                     audio_bytes,
                                     duration=duration,
                                 )
@@ -1797,7 +1795,7 @@ def render_voice_enrollment():
                         )
 
                 if st.button(
-                    "ðŸ—‘ï¸ Delete unresolved voice",
+                    "🗑️ Delete unresolved voice",
                     key=f"delete_unknown_voice_{unknown_voice_id}",
                 ):
                     if delete_unknown_voice(unknown_voice_id):
@@ -1832,7 +1830,7 @@ def render_voice_enrollment():
                         "I listened to this sample and confirm the speaker's identity.",
                         key=f"confirm_unknown_voice_{unknown_voice_id}",
                     )
-                    submitted = st.form_submit_button("âœ… Confirm and save voice profile")
+                    submitted = st.form_submit_button("✅ Confirm and save voice profile")
                 if submitted:
                     if not confirmed:
                         st.warning("Confirm the speaker identity before saving.")
@@ -1859,7 +1857,7 @@ def render_voice_enrollment():
 
 
 def main():
-    st.title("ðŸŽ¥ AI Face + Active Speaker Recognition")
+    st.title("🎥 AI Face + Active Speaker Recognition")
 
     runtime_status = get_runtime_status()
     st.caption(f"Audio models (PyTorch): {runtime_status['torch']}")
@@ -1872,13 +1870,13 @@ def main():
 
     tabs = st.tabs(
         [
-            "ðŸ“¹ Realtime",
-            "ðŸŽ¬ Video",
-            "ðŸ‘¤ Face Database",
-            "ðŸ”Š Audio Logs",
-            "âœ… Attendance",
-            "ðŸ“ Transcripts",
-            "ðŸŽ™ï¸ Voice Enrollment",
+            "📹 Realtime",
+            "🎬 Video",
+            "👤 Face Database",
+            "🔊 Audio Logs",
+            "✅ Attendance",
+            "📝 Transcripts",
+            "🎙️ Voice Enrollment",
         ]
     )
 
@@ -1906,5 +1904,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-
-

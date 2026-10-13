@@ -1,4 +1,4 @@
-﻿def get_runtime_status(torch_module=None, face_provider_getter=None):
+def get_runtime_status(torch_module=None, face_provider_getter=None):
     status = {
         "torch": "Unavailable",
         "face": "Unavailable",

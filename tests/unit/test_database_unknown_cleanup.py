@@ -1,4 +1,4 @@
-﻿from pathlib import Path
+from pathlib import Path
 
 from face_voice_rec.storage import database
 

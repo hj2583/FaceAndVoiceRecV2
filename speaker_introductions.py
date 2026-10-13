@@ -1,4 +1,4 @@
-﻿"""Extract and safely associate participant self-introductions."""
+"""Extract and safely associate participant self-introductions."""
 
 from dataclasses import dataclass
 import logging
@@ -11,17 +11,17 @@ from face_voice_rec.storage import database
 
 logger = logging.getLogger(__name__)
 
-_WORD = r"[^\W\d_][\wâ€™'-]*"
+_WORD = r"[^\W\d_][\w’'-]*"
 _NAME = rf"(?P<name>{_WORD}(?:\s+{_WORD}){{0,2}}?)"
-_NAME_END = r"(?=\s*(?:,|[.!?;:]|and\b|dan\b|y\b|et\b|i['â€™]m\b|i am\b|saya\b|soy\b|je suis\b|$))"
+_NAME_END = r"(?=\s*(?:,|[.!?;:]|and\b|dan\b|y\b|et\b|i['’]m\b|i am\b|saya\b|soy\b|je suis\b|$))"
 _INTRODUCTIONS = (
     re.compile(
         rf"\b(?:hi|hello|hey|good morning|good afternoon)\b[\s,!-]*"
-        rf"(?:my name is|i am|i['â€™]m|you can call me)\s+{_NAME}{_NAME_END}",
+        rf"(?:my name is|i am|i['’]m|you can call me)\s+{_NAME}{_NAME_END}",
         re.IGNORECASE,
     ),
     re.compile(
-        rf"\b(?:my name is|i am|i['â€™]m|you can call me)\s+{_NAME}{_NAME_END}",
+        rf"\b(?:my name is|i am|i['’]m|you can call me)\s+{_NAME}{_NAME_END}",
         re.IGNORECASE,
     ),
     re.compile(
@@ -33,7 +33,7 @@ _INTRODUCTIONS = (
         re.IGNORECASE,
     ),
     re.compile(
-        rf"\b(?:je m['â€™]appelle|mon nom est|appelez-moi)\s+{_NAME}{_NAME_END}",
+        rf"\b(?:je m['’]appelle|mon nom est|appelez-moi)\s+{_NAME}{_NAME_END}",
         re.IGNORECASE,
     ),
 )
@@ -58,7 +58,7 @@ _INVALID_NAMES = {
 _TITLE_PATTERNS = (
     re.compile(
         r"(?:,\s*|(?:and|dan|y|et)\s+)"
-        r"(?:(?:i['â€™]m|i am|i work as|i work in|my role is|"
+        r"(?:(?:i['’]m|i am|i work as|i work in|my role is|"
         r"saya bekerja sebagai|soy|je suis)\s+)?"
         r"(?P<title>[^.!?;]+)",
         re.IGNORECASE,
@@ -98,7 +98,7 @@ def _extract_job_title(text: str, match_end: int) -> str | None:
             continue
         title = match.group("title").strip(" ,.-")
         title = re.split(
-            r"\s+(?:and i['â€™]d|and i would|dan saya|y yo|et je)\b",
+            r"\s+(?:and i['’]d|and i would|dan saya|y yo|et je)\b",
             title,
             maxsplit=1,
             flags=re.IGNORECASE,
@@ -150,7 +150,7 @@ def _collect_utterances(rows: list[tuple]) -> list[dict]:
             and current["speaker_label"] == speaker
             and 0 <= int(start_ms) - current["end_ms"] <= 900
             and current["end_ms"] - current["start_ms"] < 6000
-            and not current["text"].rstrip().endswith((".", "?", "!", "ã€‚", "ï¼", "ï¼Ÿ"))
+            and not current["text"].rstrip().endswith((".", "?", "!", "。", "！", "？"))
         ):
             current["text"] = f"{current['text']} {text}"
             current["end_ms"] = int(end_ms)
@@ -553,4 +553,3 @@ def process_meeting_introductions(
 
         transcription_core.refresh_readable_transcript(meeting_id, use_llm=False)
     return identity_updates
-

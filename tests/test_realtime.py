@@ -1,4 +1,4 @@
-﻿import threading
+import threading
 import time
 import uuid
 from datetime import datetime, timezone

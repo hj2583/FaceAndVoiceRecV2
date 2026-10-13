@@ -1,4 +1,4 @@
-﻿"""Speaker-embedding extraction and voiceprint matching.
+"""Speaker-embedding extraction and voiceprint matching.
 
 Mirrors face_core.py's shape: extract a fixed-size, L2-normalized
 embedding, then match it against enrolled voiceprints by cosine similarity.

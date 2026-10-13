@@ -1,4 +1,4 @@
-﻿import sys
+import sys
 from unittest.mock import Mock
 
 import numpy as np

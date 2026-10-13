@@ -1,4 +1,4 @@
-﻿"""Long-range face detection helpers.
+"""Long-range face detection helpers.
 
 The geometry and NMS functions are dependency-light so they can be tested
 without loading the RetinaFace model.  Model inference is lazy and failures

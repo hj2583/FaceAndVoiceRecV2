@@ -1,4 +1,4 @@
-﻿import gc
+import gc
 import json
 import logging
 import os
@@ -549,7 +549,7 @@ def process_video_pipeline(
         tiled_detections = last_tiled_detections
 
         # =================================================
-        # BGR â†’ RGB for landmark enrichment
+        # BGR → RGB for landmark enrichment
         # =================================================
 
         rgb = cv2.cvtColor(
@@ -1184,4 +1184,3 @@ def process_video_pipeline(
         )
 
     return True
-

@@ -1,4 +1,4 @@
-﻿from face_voice_rec.storage import database
+from face_voice_rec.storage import database
 
 
 def _setup_database(tmp_path, monkeypatch):

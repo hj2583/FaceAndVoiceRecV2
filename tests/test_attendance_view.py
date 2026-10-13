@@ -1,4 +1,4 @@
-﻿from datetime import date, datetime, time, timedelta, timezone
+from datetime import date, datetime, time, timedelta, timezone
 from pathlib import Path
 
 from face_voice_rec.storage import database

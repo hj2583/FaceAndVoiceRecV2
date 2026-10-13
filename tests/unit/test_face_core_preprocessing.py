@@ -1,4 +1,4 @@
-﻿import numpy as np
+import numpy as np
 import cv2
 
 from face_voice_rec.domain.face import face_core
