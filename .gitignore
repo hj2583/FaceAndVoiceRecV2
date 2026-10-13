@@ -18,6 +18,28 @@ __pycache__/
 
 *.egg-info/
 
+# Legacy root data paths (pre-data/ migration)
+faces.db
+face_index.npz
+known_faces/*
+known_voices/*
+unknown_faces/*
+unknown_voices/*
+initialVideo/*
+trackedVideo/*
+transcripts/*
+live/*
+logs/*
+!known_faces/.gitkeep
+!known_voices/.gitkeep
+!unknown_faces/.gitkeep
+!unknown_voices/.gitkeep
+!initialVideo/.gitkeep
+!trackedVideo/.gitkeep
+!live/.gitkeep
+!logs/.gitkeep
+.workflow-temp/
+
 # Runtime-generated data outputs
 data/db/faces.db
 data/db/faces.db-wal
@@ -34,6 +56,7 @@ data/artifacts/logs/**
 data/transcripts/**
 data/temp/workflow/**
 data/.legacy_migration_v1_complete
+data/.legacy_path_references_v1_complete
 
 *.db-shm
 *.db-wal

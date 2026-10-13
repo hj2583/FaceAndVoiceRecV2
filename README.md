@@ -175,7 +175,7 @@ python -m pip install -r requirements-gpu.txt
 python -m pip install -e .
 ```
 
-The project prefers CUDA automatically when it is available. If CUDA is missing or unavailable, it falls back to CPU mode. GPU acceleration covers both face recognition (ONNX Runtime) and the torch-based audio models (Whisper, Silero VAD, SpeechBrain voice embeddings) — `requirements-gpu.txt` pulls a CUDA-enabled build of `torch` from PyTorch's own package index for this reason. If you already have a CPU-only `torch` installed from `requirements.txt`, re-run `pip install -r requirements-gpu.txt` to replace it with the CUDA build.
+The project prefers CUDA automatically when it is available. If CUDA is missing or unavailable, it falls back to CPU mode. GPU acceleration covers both face recognition (ONNX Runtime) and the torch-based audio models (Whisper, Silero VAD, SpeechBrain voice embeddings) — `requirements-gpu.txt` pulls a CUDA-enabled build of `torch` from PyTorch's own package index for this reason. If you already have a CPU-only `torch` installed from `requirements.txt`, re-run `python -m pip install -r requirements-gpu.txt` to replace it with the CUDA build.
 
 ## Project structure
 
@@ -208,6 +208,7 @@ FaceAndVoiceRecV2/
 │       │   └── constants.py
 │       │
 │       ├── domain/
+│       │   ├── __init__.py
 │       │   ├── face/
 │       │   │   ├── __init__.py
 │       │   │   ├── face_core.py
@@ -227,7 +228,6 @@ FaceAndVoiceRecV2/
 │       │   │   ├── transcript_refiner.py
 │       │   │   ├── subtitle_renderer.py
 │       │   │   └── speaker_introductions.py
-│       │   └── __init__.py
 │       │
 │       ├── pipelines/
 │       │   ├── __init__.py

@@ -28,6 +28,7 @@ def _isolate_voice_and_transcript_dirs(tmp_path, monkeypatch):
 
     monkeypatch.setattr(config, "TRANSCRIPTS_DIR", tmp_path / "transcripts")
     monkeypatch.setattr(config, "UNKNOWN_VOICES_DIR", tmp_path / "unknown_voices")
+    monkeypatch.setattr(config, "WORKFLOW_TEMP_DIR", tmp_path)
 
 
 @pytest.fixture(autouse=True)
