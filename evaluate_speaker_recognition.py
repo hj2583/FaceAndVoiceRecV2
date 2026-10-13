@@ -14,9 +14,9 @@ import wave
 from pathlib import Path
 
 from face_voice_rec import config
-from audio_core import detect_speech_segments
-from transcription_core import extract_audio_from_video
-from voice_core import diarize_meeting_audio
+from face_voice_rec.domain.voice.audio_core import detect_speech_segments
+from face_voice_rec.domain.transcription.transcription_core import extract_audio_from_video
+from face_voice_rec.domain.voice.voice_core import diarize_meeting_audio
 
 
 def _duration(regions):

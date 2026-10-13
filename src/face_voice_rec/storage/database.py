@@ -411,7 +411,7 @@ def update_transcription_segments(meeting_id, updates):
             ],
         )
     _regenerate_meeting_transcripts([meeting_id])
-    import transcription_core
+    from face_voice_rec.domain.transcription import transcription_core
 
     transcription_core.refresh_readable_transcript(meeting_id, use_llm=False)
 
@@ -421,7 +421,7 @@ def _regenerate_meeting_transcripts(meeting_ids):
     if not meeting_ids:
         return
     # Lazy import: transcription_core -> voice_core -> database.
-    import transcription_core
+    from face_voice_rec.domain.transcription import transcription_core
 
     for meeting_id in meeting_ids:
         try:
@@ -795,7 +795,7 @@ def reassign_voice_embedding(embedding_id, person_id):
 
     if affected_meetings:
         _regenerate_meeting_transcripts(sorted(affected_meetings))
-        import transcription_core
+        from face_voice_rec.domain.transcription import transcription_core
 
         for meeting_id in sorted(affected_meetings):
             transcription_core.refresh_readable_transcript(
@@ -1356,7 +1356,7 @@ def confirm_meeting_introduction(introduction_id, person_id):
             (person_id, utc_now(), introduction_id),
         )
     _regenerate_meeting_transcripts([meeting_id])
-    import transcription_core
+    from face_voice_rec.domain.transcription import transcription_core
 
     transcription_core.refresh_readable_transcript(meeting_id, use_llm=False)
     return person_id

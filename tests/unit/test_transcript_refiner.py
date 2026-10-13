@@ -1,8 +1,8 @@
 import pytest
 
 from face_voice_rec import config
-import transcript_refiner
-from transcript_refiner import TranscriptRefinementError
+from face_voice_rec.domain.transcription import transcript_refiner
+from face_voice_rec.domain.transcription.transcript_refiner import TranscriptRefinementError
 
 
 def _segments(*items):

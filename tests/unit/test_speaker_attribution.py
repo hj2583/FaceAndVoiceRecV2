@@ -1,5 +1,5 @@
 from face_voice_rec import config
-from speaker_attribution import FaceObservation, SpeakerAttributor
+from face_voice_rec.domain.voice.speaker_attribution import FaceObservation, SpeakerAttributor
 
 
 def _observation(track_id, person_id=1, person_name="Alice", face_confidence=0.9, lip_open_ratio=0.05):

@@ -1,4 +1,4 @@
-from subtitle_renderer import (
+from face_voice_rec.domain.transcription.subtitle_renderer import (
     SubtitleCue,
     SubtitleWord,
     VideoMuxError,
@@ -239,7 +239,7 @@ def test_mux_tracked_video_resolves_relative_paths_and_retries_only_for_codec_co
         Path(args[-1]).write_bytes(b"muxed")
         return SimpleNamespace(returncode=0, stdout=b"", stderr=b"")
 
-    monkeypatch.setattr("subtitle_renderer.subprocess.run", fake_run)
+    monkeypatch.setattr("face_voice_rec.domain.transcription.subtitle_renderer.subprocess.run", fake_run)
 
     result = mux_tracked_video(
         annotated_video=rel_annotated,
@@ -297,7 +297,7 @@ def test_mux_tracked_video_does_not_retry_aac_for_non_codec_failures(tmp_path, m
         calls.append(list(args))
         return SimpleNamespace(returncode=1, stdout=b"", stderr=b"No such file or directory")
 
-    monkeypatch.setattr("subtitle_renderer.subprocess.run", fake_run)
+    monkeypatch.setattr("face_voice_rec.domain.transcription.subtitle_renderer.subprocess.run", fake_run)
 
     with pytest.raises(VideoMuxError, match="No such file or directory"):
         mux_tracked_video(
@@ -326,7 +326,7 @@ def test_mux_tracked_video_wraps_subprocess_oserror_and_cleans_temp_dir(tmp_path
         temp_path.write_bytes(b"partial")
         raise FileNotFoundError("ffmpeg executable missing")
 
-    monkeypatch.setattr("subtitle_renderer.subprocess.run", fake_run)
+    monkeypatch.setattr("face_voice_rec.domain.transcription.subtitle_renderer.subprocess.run", fake_run)
 
     with pytest.raises(VideoMuxError, match="ffmpeg executable missing"):
         mux_tracked_video(annotated_video, source_video, output_path, ffmpeg="ffmpeg")
@@ -355,8 +355,8 @@ def test_mux_tracked_video_wraps_replace_oserror_and_preserves_existing_output(t
     def fake_replace(_src, _dst):
         raise PermissionError("destination file is in use")
 
-    monkeypatch.setattr("subtitle_renderer.subprocess.run", fake_run)
-    monkeypatch.setattr("subtitle_renderer.os.replace", fake_replace)
+    monkeypatch.setattr("face_voice_rec.domain.transcription.subtitle_renderer.subprocess.run", fake_run)
+    monkeypatch.setattr("face_voice_rec.domain.transcription.subtitle_renderer.os.replace", fake_replace)
 
     with pytest.raises(VideoMuxError, match="destination file is in use"):
         mux_tracked_video(annotated_video, source_video, output_path, ffmpeg="ffmpeg")
@@ -379,7 +379,7 @@ def test_mux_tracked_video_configures_binary_stderr_capture_and_decodes_utf8_rep
         kwargs_seen.update(kwargs)
         return SimpleNamespace(returncode=1, stdout=b"", stderr=b"invalid:\xff")
 
-    monkeypatch.setattr("subtitle_renderer.subprocess.run", fake_run)
+    monkeypatch.setattr("face_voice_rec.domain.transcription.subtitle_renderer.subprocess.run", fake_run)
 
     with pytest.raises(VideoMuxError, match="invalid") as excinfo:
         mux_tracked_video(annotated_video, source_video, output_path, ffmpeg="ffmpeg")
@@ -399,7 +399,7 @@ def test_mux_tracked_video_missing_ffmpeg_raises(tmp_path, monkeypatch):
     annotated_video.write_bytes(b"annotated")
     source_video.write_bytes(b"source")
 
-    monkeypatch.setattr("subtitle_renderer.find_ffmpeg", lambda: None)
+    monkeypatch.setattr("face_voice_rec.domain.transcription.subtitle_renderer.find_ffmpeg", lambda: None)
 
     with pytest.raises(VideoMuxError, match="FFmpeg was not found"):
         mux_tracked_video(annotated_video, source_video, output_path)
@@ -415,7 +415,7 @@ def test_mux_tracked_video_success_without_output_file_raises(tmp_path, monkeypa
     def fake_run(args, **kwargs):
         return SimpleNamespace(returncode=0, stdout=b"", stderr=b"")
 
-    monkeypatch.setattr("subtitle_renderer.subprocess.run", fake_run)
+    monkeypatch.setattr("face_voice_rec.domain.transcription.subtitle_renderer.subprocess.run", fake_run)
 
     with pytest.raises(VideoMuxError, match="did not create a valid output file"):
         mux_tracked_video(annotated_video, source_video, output_path, ffmpeg="ffmpeg")
@@ -435,7 +435,7 @@ def test_mux_tracked_video_without_subtitles_omits_vf_and_maps_optional_audio(tm
         Path(args[-1]).write_bytes(b"muxed")
         return SimpleNamespace(returncode=0, stdout=b"", stderr=b"")
 
-    monkeypatch.setattr("subtitle_renderer.subprocess.run", fake_run)
+    monkeypatch.setattr("face_voice_rec.domain.transcription.subtitle_renderer.subprocess.run", fake_run)
 
     mux_tracked_video(
         annotated_video=annotated_video,
@@ -477,7 +477,7 @@ def test_mux_tracked_video_double_failure_preserves_existing_output_and_cleans_t
             )
         return SimpleNamespace(returncode=1, stdout=b"", stderr=b"aac encode failed")
 
-    monkeypatch.setattr("subtitle_renderer.subprocess.run", fake_run)
+    monkeypatch.setattr("face_voice_rec.domain.transcription.subtitle_renderer.subprocess.run", fake_run)
 
     with pytest.raises(VideoMuxError, match="aac encode failed"):
         mux_tracked_video(annotated_video, source_video, output_path, ffmpeg="ffmpeg")
@@ -507,7 +507,7 @@ def test_mux_tracked_video_replaces_existing_output_only_after_successful_temp_r
         temp_path.write_bytes(b"complete-new-output")
         return SimpleNamespace(returncode=0, stdout=b"", stderr=b"")
 
-    monkeypatch.setattr("subtitle_renderer.subprocess.run", fake_run)
+    monkeypatch.setattr("face_voice_rec.domain.transcription.subtitle_renderer.subprocess.run", fake_run)
 
     result = mux_tracked_video(annotated_video, source_video, output_path, ffmpeg="ffmpeg")
 
@@ -530,7 +530,7 @@ def test_mux_tracked_video_wraps_output_directory_creation_oserror(tmp_path, mon
             raise PermissionError("cannot create output directory")
         return real_mkdir(self, *args, **kwargs)
 
-    monkeypatch.setattr("subtitle_renderer.Path.mkdir", fake_mkdir)
+    monkeypatch.setattr("face_voice_rec.domain.transcription.subtitle_renderer.Path.mkdir", fake_mkdir)
 
     with pytest.raises(VideoMuxError, match="cannot create output directory"):
         mux_tracked_video(annotated_video, source_video, output_path, ffmpeg="ffmpeg")

@@ -8,16 +8,16 @@ from typing import Callable
 
 from face_voice_rec import config
 from face_voice_rec.storage import database
-from subtitle_renderer import (
+from face_voice_rec.domain.transcription.subtitle_renderer import (
     SubtitleWord,
     VideoMuxError,
     build_subtitle_cues,
     mux_tracked_video,
     write_ass_subtitles,
 )
-from transcription_core import build_face_event_diarizer, process_meeting_transcription
+from face_voice_rec.domain.transcription.transcription_core import build_face_event_diarizer, process_meeting_transcription
 from video_processor import process_video_pipeline
-import voice_core
+from face_voice_rec.domain.voice import voice_core
 
 
 logger = logging.getLogger(__name__)
@@ -213,7 +213,7 @@ def process_video_and_transcribe(
                 subtitle_word_callback=subtitle_words.append,
             )
             try:
-                from speaker_introductions import process_meeting_introductions
+                from face_voice_rec.domain.transcription.speaker_introductions import process_meeting_introductions
 
                 identity_updates = process_meeting_introductions(
                     meeting_id,

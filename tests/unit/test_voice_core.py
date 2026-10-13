@@ -4,7 +4,7 @@ from pathlib import Path
 
 from face_voice_rec import config
 from face_voice_rec.storage import database
-import voice_core
+from face_voice_rec.domain.voice import voice_core
 
 
 def _setup_database(tmp_path, monkeypatch):
@@ -608,7 +608,7 @@ def _insert_meeting(video_path):
 
 
 def test_unknown_voice_lifecycle_is_scoped_by_globally_unique_labels(tmp_path, monkeypatch):
-    import transcription_core
+    from face_voice_rec.domain.transcription import transcription_core
 
     db_path = tmp_path / "faces.db"
     monkeypatch.setattr(database, "DB_PATH", db_path)

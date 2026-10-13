@@ -6,7 +6,7 @@ from unittest.mock import Mock, patch
 
 import pytest
 
-from audio_core import FRAME_SAMPLES, RealtimeVAD, read_wav_pcm
+from face_voice_rec.domain.voice.audio_core import FRAME_SAMPLES, RealtimeVAD, read_wav_pcm
 
 
 def _wav_bytes(rate=16000, channels=1, width=2, frames=b"\x01\x00" * 100):
@@ -50,8 +50,8 @@ def test_realtime_vad_start_waits_for_open_stream():
 
     fake_sd = SimpleNamespace(RawInputStream=Mock(return_value=stream))
 
-    with patch("audio_core.sd", new=fake_sd):
-        with patch("audio_core.load_silero_vad", new=Mock(return_value=lambda *_a, **_k: 0.0)):
+    with patch("face_voice_rec.domain.voice.audio_core.sd", new=fake_sd):
+        with patch("face_voice_rec.domain.voice.audio_core.load_silero_vad", new=Mock(return_value=lambda *_a, **_k: 0.0)):
             vad = RealtimeVAD()
             vad.start(startup_timeout=1.0)
             assert vad.startup_succeeded is True
@@ -63,8 +63,8 @@ def test_realtime_vad_start_waits_for_open_stream():
 def test_realtime_vad_start_raises_when_input_stream_cannot_open():
     fake_sd = SimpleNamespace(RawInputStream=Mock(side_effect=OSError("no microphone")))
 
-    with patch("audio_core.sd", new=fake_sd):
-        with patch("audio_core.load_silero_vad", new=Mock(return_value=lambda *_a, **_k: 0.0)):
+    with patch("face_voice_rec.domain.voice.audio_core.sd", new=fake_sd):
+        with patch("face_voice_rec.domain.voice.audio_core.load_silero_vad", new=Mock(return_value=lambda *_a, **_k: 0.0)):
             vad = RealtimeVAD()
             with pytest.raises(RuntimeError, match="no microphone"):
                 vad.start(startup_timeout=1.0)
@@ -73,8 +73,8 @@ def test_realtime_vad_start_raises_when_input_stream_cannot_open():
 def test_realtime_vad_start_raises_when_model_fails_to_load():
     fake_sd = SimpleNamespace(RawInputStream=Mock())
 
-    with patch("audio_core.sd", new=fake_sd):
-        with patch("audio_core.load_silero_vad", new=Mock(side_effect=OSError("model load failed"))):
+    with patch("face_voice_rec.domain.voice.audio_core.sd", new=fake_sd):
+        with patch("face_voice_rec.domain.voice.audio_core.load_silero_vad", new=Mock(side_effect=OSError("model load failed"))):
             vad = RealtimeVAD()
             with pytest.raises(RuntimeError, match="model load failed"):
                 vad.start(startup_timeout=1.0)
@@ -110,9 +110,9 @@ def test_realtime_vad_worker_exit_emits_terminal_false_after_speaking():
 
     fake_sd = SimpleNamespace(RawInputStream=Mock(return_value=stream))
 
-    with patch("audio_core.REALTIME_SPEECH_CONFIRM_FRAMES", 1):
-        with patch("audio_core.sd", new=fake_sd):
-            with patch("audio_core.load_silero_vad", new=Mock(return_value=_TwoStepModel())):
+    with patch("face_voice_rec.domain.voice.audio_core.REALTIME_SPEECH_CONFIRM_FRAMES", 1):
+        with patch("face_voice_rec.domain.voice.audio_core.sd", new=fake_sd):
+            with patch("face_voice_rec.domain.voice.audio_core.load_silero_vad", new=Mock(return_value=_TwoStepModel())):
                 vad = RealtimeVAD(callback=_callback)
                 vad.start(startup_timeout=1.0)
                 assert speaking_emitted.wait(timeout=1.0)
@@ -133,8 +133,8 @@ def test_realtime_vad_start_raises_when_worker_is_already_alive():
 
     fake_sd = SimpleNamespace(RawInputStream=Mock())
 
-    with patch("audio_core.sd", new=fake_sd):
-        with patch("audio_core.load_silero_vad", new=Mock(return_value=lambda *_a, **_k: 0.0)):
+    with patch("face_voice_rec.domain.voice.audio_core.sd", new=fake_sd):
+        with patch("face_voice_rec.domain.voice.audio_core.load_silero_vad", new=Mock(return_value=lambda *_a, **_k: 0.0)):
             with pytest.raises(RuntimeError, match="already running"):
                 vad.start(startup_timeout=1.0)
 
@@ -146,7 +146,7 @@ def test_realtime_vad_stop_keeps_thread_when_join_times_out():
     vad = RealtimeVAD()
     vad.thread = thread
 
-    with patch("audio_core.logging.warning") as warning:
+    with patch("face_voice_rec.domain.voice.audio_core.logging.warning") as warning:
         vad.stop()
 
     thread.join.assert_called_once_with(timeout=2)
@@ -155,7 +155,7 @@ def test_realtime_vad_stop_keeps_thread_when_join_times_out():
 
 
 def test_realtime_vad_get_recent_pcm_returns_trailing_buffer():
-    from audio_core import RealtimeVAD, FRAME_BYTES
+    from face_voice_rec.domain.voice.audio_core import RealtimeVAD, FRAME_BYTES
 
     vad = RealtimeVAD()
     vad._pcm_buffer = bytearray(FRAME_BYTES * 100)

@@ -6,9 +6,9 @@ import pytest
 
 from face_voice_rec import config
 from face_voice_rec.storage import database
-import transcription_core
+from face_voice_rec.domain.transcription import transcription_core
 
-from transcription_core import (
+from face_voice_rec.domain.transcription.transcription_core import (
     TranscriptionSegment,
     absorb_minor_speakers,
     apply_text_cleanup,
@@ -269,7 +269,7 @@ def test_face_event_diarizer_fills_uncovered_speech_with_unknown():
 
 
 def test_speaker_interval_requires_minimum_overlap_coverage():
-    from transcription_core import _speaker_for_interval
+    from face_voice_rec.domain.transcription.transcription_core import _speaker_for_interval
 
     events = [("Alice", 0.0, 0.6), ("Bob", 0.6, 1.0)]
 
@@ -278,7 +278,7 @@ def test_speaker_interval_requires_minimum_overlap_coverage():
 
 
 def test_empty_face_diarization_with_threshold_is_unknown():
-    from transcription_core import _speaker_for_interval
+    from face_voice_rec.domain.transcription.transcription_core import _speaker_for_interval
 
     assert _speaker_for_interval(3.0, 4.0, [], 0.8) == "UNKNOWN"
 
@@ -288,7 +288,7 @@ def test_transcribe_with_diarization_only_transcribes_vad_speech_regions(tmp_pat
     wav_path.write_bytes(b"fake wav")
 
     monkeypatch.setattr(
-        "transcription_core.detect_speech_segments",
+        "face_voice_rec.domain.transcription.transcription_core.detect_speech_segments",
         lambda *_a, **_k: [(0.0, 2.0), (5.0, 7.0)],
     )
 
@@ -306,7 +306,7 @@ def test_transcribe_with_diarization_only_transcribes_vad_speech_regions(tmp_pat
     fake_whisper = type("FakeWhisperModule", (), {"load_model": staticmethod(lambda *_a, **_k: FakeModel())})
     monkeypatch.setitem(__import__("sys").modules, "whisper", fake_whisper)
 
-    from transcription_core import transcribe_with_diarization
+    from face_voice_rec.domain.transcription.transcription_core import transcribe_with_diarization
 
     segments = transcribe_with_diarization(wav_path)
 
@@ -319,7 +319,7 @@ def test_transcribe_with_diarization_only_transcribes_vad_speech_regions(tmp_pat
 def test_fixed_language_mode_passes_configured_language(tmp_path, monkeypatch):
     wav_path = tmp_path / "audio.wav"
     wav_path.write_bytes(b"fake wav")
-    monkeypatch.setattr("transcription_core.detect_speech_segments", lambda *_a, **_k: [(0.0, 2.0)])
+    monkeypatch.setattr("face_voice_rec.domain.transcription.transcription_core.detect_speech_segments", lambda *_a, **_k: [(0.0, 2.0)])
     monkeypatch.setattr(config, "WHISPER_LANGUAGE_MODE", "fixed")
     monkeypatch.setattr(config, "WHISPER_LANGUAGE", "en")
 
@@ -333,7 +333,7 @@ def test_fixed_language_mode_passes_configured_language(tmp_path, monkeypatch):
     fake_whisper = type("FakeWhisperModule", (), {"load_model": staticmethod(lambda *_a, **_k: FakeModel())})
     monkeypatch.setitem(__import__("sys").modules, "whisper", fake_whisper)
 
-    from transcription_core import transcribe_with_diarization
+    from face_voice_rec.domain.transcription.transcription_core import transcribe_with_diarization
 
     transcribe_with_diarization(wav_path, diarize=lambda *_a: [])
 
@@ -343,11 +343,11 @@ def test_fixed_language_mode_passes_configured_language(tmp_path, monkeypatch):
 def test_auto_language_mode_uses_detected_language_without_translation(tmp_path, monkeypatch):
     wav_path = tmp_path / "audio.wav"
     wav_path.write_bytes(b"fake wav")
-    monkeypatch.setattr("transcription_core.detect_speech_segments", lambda *_a, **_k: [(0.0, 2.0)])
+    monkeypatch.setattr("face_voice_rec.domain.transcription.transcription_core.detect_speech_segments", lambda *_a, **_k: [(0.0, 2.0)])
     monkeypatch.setattr(config, "WHISPER_LANGUAGE_MODE", "auto")
     monkeypatch.setattr(config, "WHISPER_TASK", "transcribe")
     monkeypatch.setattr(
-        "transcription_core._detect_meeting_language",
+        "face_voice_rec.domain.transcription.transcription_core._detect_meeting_language",
         lambda *_args: "ms",
     )
 
@@ -365,7 +365,7 @@ def test_auto_language_mode_uses_detected_language_without_translation(tmp_path,
     )
     monkeypatch.setitem(__import__("sys").modules, "whisper", fake_whisper)
 
-    from transcription_core import transcribe_with_diarization
+    from face_voice_rec.domain.transcription.transcription_core import transcribe_with_diarization
 
     segments = transcribe_with_diarization(
         wav_path,
@@ -384,7 +384,7 @@ def test_transcribe_with_diarization_degrades_gracefully_when_vad_fails(tmp_path
     def _raise(*_a, **_k):
         raise RuntimeError("silero-vad unavailable")
 
-    monkeypatch.setattr("transcription_core.detect_speech_segments", _raise)
+    monkeypatch.setattr("face_voice_rec.domain.transcription.transcription_core.detect_speech_segments", _raise)
 
     class FakeModel:
         def transcribe(self, path, verbose=False, **kwargs):
@@ -397,7 +397,7 @@ def test_transcribe_with_diarization_degrades_gracefully_when_vad_fails(tmp_path
     fake_whisper = type("FakeWhisperModule", (), {"load_model": staticmethod(lambda *_a, **_k: FakeModel())})
     monkeypatch.setitem(__import__("sys").modules, "whisper", fake_whisper)
 
-    from transcription_core import transcribe_with_diarization
+    from face_voice_rec.domain.transcription.transcription_core import transcribe_with_diarization
 
     segments = transcribe_with_diarization(wav_path)
 
@@ -409,7 +409,7 @@ def test_transcribe_with_diarization_degrades_gracefully_when_vad_fails(tmp_path
 def test_transcribe_with_diarization_picks_speaker_with_most_total_overlap(tmp_path, monkeypatch):
     wav_path = tmp_path / "audio.wav"
     wav_path.write_bytes(b"fake wav")
-    monkeypatch.setattr("transcription_core.detect_speech_segments", lambda *_a, **_k: [(0.0, 3.0)])
+    monkeypatch.setattr("face_voice_rec.domain.transcription.transcription_core.detect_speech_segments", lambda *_a, **_k: [(0.0, 3.0)])
 
     class FakeModel:
         def transcribe(self, path, verbose=False, **kwargs):
@@ -418,7 +418,7 @@ def test_transcribe_with_diarization_picks_speaker_with_most_total_overlap(tmp_p
     fake_whisper = type("FakeWhisperModule", (), {"load_model": staticmethod(lambda *_a, **_k: FakeModel())})
     monkeypatch.setitem(__import__("sys").modules, "whisper", fake_whisper)
 
-    from transcription_core import transcribe_with_diarization
+    from face_voice_rec.domain.transcription.transcription_core import transcribe_with_diarization
 
     # Overlapping sliding windows: each overlaps the segment by 1.5s, but B covers more in total.
     segments = transcribe_with_diarization(
@@ -432,7 +432,7 @@ def test_transcribe_with_diarization_picks_speaker_with_most_total_overlap(tmp_p
 def test_transcribe_with_diarization_splits_word_timestamps_at_speaker_change(tmp_path, monkeypatch):
     wav_path = tmp_path / "audio.wav"
     wav_path.write_bytes(b"fake wav")
-    monkeypatch.setattr("transcription_core.detect_speech_segments", lambda *_a, **_k: [(0.0, 4.0)])
+    monkeypatch.setattr("face_voice_rec.domain.transcription.transcription_core.detect_speech_segments", lambda *_a, **_k: [(0.0, 4.0)])
 
     class FakeModel:
         def transcribe(self, path, verbose=False, **kwargs):
@@ -452,7 +452,7 @@ def test_transcribe_with_diarization_splits_word_timestamps_at_speaker_change(tm
     fake_whisper = type("FakeWhisperModule", (), {"load_model": staticmethod(lambda *_a, **_k: FakeModel())})
     monkeypatch.setitem(__import__("sys").modules, "whisper", fake_whisper)
 
-    from transcription_core import transcribe_with_diarization
+    from face_voice_rec.domain.transcription.transcription_core import transcribe_with_diarization
 
     segments = transcribe_with_diarization(
         wav_path,
@@ -468,7 +468,7 @@ def test_transcribe_with_diarization_splits_word_timestamps_at_speaker_change(tm
 def test_transcribe_with_diarization_preserves_segment_when_words_have_single_speaker_consensus(tmp_path, monkeypatch):
     wav_path = tmp_path / "audio.wav"
     wav_path.write_bytes(b"fake wav")
-    monkeypatch.setattr("transcription_core.detect_speech_segments", lambda *_a, **_k: [(0.0, 10.0)])
+    monkeypatch.setattr("face_voice_rec.domain.transcription.transcription_core.detect_speech_segments", lambda *_a, **_k: [(0.0, 10.0)])
 
     class FakeModel:
         def transcribe(self, path, verbose=False, **kwargs):
@@ -488,7 +488,7 @@ def test_transcribe_with_diarization_preserves_segment_when_words_have_single_sp
     fake_whisper = type("FakeWhisperModule", (), {"load_model": staticmethod(lambda *_a, **_k: FakeModel())})
     monkeypatch.setitem(__import__("sys").modules, "whisper", fake_whisper)
 
-    from transcription_core import transcribe_with_diarization
+    from face_voice_rec.domain.transcription.transcription_core import transcribe_with_diarization
 
     segments = transcribe_with_diarization(
         wav_path,
@@ -518,9 +518,9 @@ def test_update_transcription_segments_saves_corrections_and_rewrites_files(tmp_
         output_path.write_bytes(b"audio")
         return output_path
 
-    monkeypatch.setattr("transcription_core.extract_audio_from_video", fake_extract)
+    monkeypatch.setattr("face_voice_rec.domain.transcription.transcription_core.extract_audio_from_video", fake_extract)
     monkeypatch.setattr(
-        "transcription_core.transcribe_with_diarization",
+        "face_voice_rec.domain.transcription.transcription_core.transcribe_with_diarization",
         lambda *_a, **_k: [TranscriptionSegment("Ivy", 0, 1000, "helo wrld.", 0.4)],
     )
     meeting_id = process_meeting_transcription(video_path)
@@ -603,7 +603,7 @@ def test_reanalyze_meeting_segments_merges_and_classifies_old_rows(tmp_path, mon
     monkeypatch.setattr(config, "TRANSCRIPTS_DIR", tmp_path / "transcripts")
     database.init_db()
 
-    from transcription_core import reanalyze_meeting_segments
+    from face_voice_rec.domain.transcription.transcription_core import reanalyze_meeting_segments
 
     with database.get_conn() as connection:
         connection.execute(
@@ -676,11 +676,11 @@ def test_process_meeting_transcription_persists_completed_segments(
         return output_path
 
     monkeypatch.setattr(
-        "transcription_core.extract_audio_from_video",
+        "face_voice_rec.domain.transcription.transcription_core.extract_audio_from_video",
         fake_extract,
     )
     monkeypatch.setattr(
-        "transcription_core.transcribe_with_diarization",
+        "face_voice_rec.domain.transcription.transcription_core.transcribe_with_diarization",
         lambda *_args, **_kwargs: [
             TranscriptionSegment(
                 "Speaker A",
@@ -728,9 +728,9 @@ def test_reprocessing_replaces_detailed_and_readable_rows_without_duplicates(
         output_path.write_bytes(b"audio")
         return output_path
 
-    monkeypatch.setattr("transcription_core.extract_audio_from_video", fake_extract)
+    monkeypatch.setattr("face_voice_rec.domain.transcription.transcription_core.extract_audio_from_video", fake_extract)
     monkeypatch.setattr(
-        "transcription_core.transcribe_with_diarization",
+        "face_voice_rec.domain.transcription.transcription_core.transcribe_with_diarization",
         lambda *_args, **_kwargs: [
             TranscriptionSegment("Alice", 0, 500, "Good"),
             TranscriptionSegment("Alice", 600, 1200, "morning."),
@@ -773,7 +773,7 @@ def test_reprocessing_replaces_detailed_and_readable_rows_without_duplicates(
 
 
 def test_ollama_failure_falls_back_without_losing_detailed_transcript(tmp_path, monkeypatch):
-    import transcript_refiner
+    from face_voice_rec.domain.transcription import transcript_refiner
 
     db_path = tmp_path / "meeting.db"
     monkeypatch.setattr(config, "DB_PATH", db_path)
@@ -794,9 +794,9 @@ def test_ollama_failure_falls_back_without_losing_detailed_transcript(tmp_path, 
             "Ollama unavailable"
         )
 
-    monkeypatch.setattr("transcription_core.extract_audio_from_video", fake_extract)
+    monkeypatch.setattr("face_voice_rec.domain.transcription.transcription_core.extract_audio_from_video", fake_extract)
     monkeypatch.setattr(
-        "transcription_core.transcribe_with_diarization",
+        "face_voice_rec.domain.transcription.transcription_core.transcribe_with_diarization",
         lambda *_args, **_kwargs: [
             TranscriptionSegment("Alice", 0, 1000, "Hello there.", 0.9),
         ],
@@ -842,7 +842,7 @@ def test_process_meeting_transcription_does_not_run_english_translation(
         output_path.write_bytes(b"audio")
         return output_path
 
-    monkeypatch.setattr("transcription_core.extract_audio_from_video", fake_extract)
+    monkeypatch.setattr("face_voice_rec.domain.transcription.transcription_core.extract_audio_from_video", fake_extract)
     calls = []
 
     def fake_transcribe(*_args, **kwargs):
@@ -850,7 +850,7 @@ def test_process_meeting_transcription_does_not_run_english_translation(
         text = "Hello" if kwargs.get("task") == "translate" else "Hola"
         return [TranscriptionSegment("Alice", 0, 1000, text, 0.9)]
 
-    monkeypatch.setattr("transcription_core.transcribe_with_diarization", fake_transcribe)
+    monkeypatch.setattr("face_voice_rec.domain.transcription.transcription_core.transcribe_with_diarization", fake_transcribe)
 
     meeting_id = process_meeting_transcription(video_path)
 
@@ -875,8 +875,8 @@ def test_process_meeting_transcription_uses_voice_core_diarizer_by_default(tmp_p
         output_path.write_bytes(b"audio")
         return output_path
 
-    monkeypatch.setattr("transcription_core.extract_audio_from_video", fake_extract)
-    monkeypatch.setattr("transcription_core.detect_speech_segments", lambda *_a, **_k: [(0.0, 1.5)])
+    monkeypatch.setattr("face_voice_rec.domain.transcription.transcription_core.extract_audio_from_video", fake_extract)
+    monkeypatch.setattr("face_voice_rec.domain.transcription.transcription_core.detect_speech_segments", lambda *_a, **_k: [(0.0, 1.5)])
 
     diarize_calls = []
 
@@ -884,7 +884,7 @@ def test_process_meeting_transcription_uses_voice_core_diarizer_by_default(tmp_p
         diarize_calls.append((wav_path, speech_regions))
         return [("Gina", 0.0, 1.5)]
 
-    monkeypatch.setattr("voice_core.diarize_meeting_audio", fake_diarize)
+    monkeypatch.setattr("face_voice_rec.domain.transcription.transcription_core.voice_core.diarize_meeting_audio", fake_diarize)
 
     class FakeModel:
         def transcribe(self, path, verbose=False, **kwargs):
@@ -914,7 +914,7 @@ def test_voice_diarization_runs_before_whisper_model_load(tmp_path, monkeypatch)
         lambda *_args: [(0.0, 1.0)],
     )
     monkeypatch.setattr(
-        "voice_core.diarize_meeting_audio",
+        "face_voice_rec.domain.transcription.transcription_core.voice_core.diarize_meeting_audio",
         lambda *_args: calls.append("diarized") or [("Unknown Speaker 7", 0.0, 1.0)],
     )
     fake_whisper = type(
@@ -948,9 +948,9 @@ def test_process_meeting_transcription_populates_person_id_for_known_speaker(tmp
         output_path.write_bytes(b"audio")
         return output_path
 
-    monkeypatch.setattr("transcription_core.extract_audio_from_video", fake_extract)
+    monkeypatch.setattr("face_voice_rec.domain.transcription.transcription_core.extract_audio_from_video", fake_extract)
     monkeypatch.setattr(
-        "transcription_core.transcribe_with_diarization",
+        "face_voice_rec.domain.transcription.transcription_core.transcribe_with_diarization",
         lambda *_a, **_k: [TranscriptionSegment("Henry", 0, 1000, "hello", 0.9)],
     )
 
@@ -966,11 +966,11 @@ def test_process_meeting_transcription_populates_person_id_for_known_speaker(tmp
 
 
 def test_subtitle_word_callback_receives_face_attributed_word_timestamps(tmp_path, monkeypatch):
-    from transcription_core import SubtitleWord, transcribe_with_diarization
+    from face_voice_rec.domain.transcription.transcription_core import SubtitleWord, transcribe_with_diarization
 
     wav_path = tmp_path / "audio.wav"
     wav_path.write_bytes(b"fake wav")
-    monkeypatch.setattr("transcription_core.detect_speech_segments", lambda *_a: [(0.0, 1.0)])
+    monkeypatch.setattr("face_voice_rec.domain.transcription.transcription_core.detect_speech_segments", lambda *_a: [(0.0, 1.0)])
 
     class FakeModel:
         def transcribe(self, _path, **_kwargs):
@@ -1005,11 +1005,11 @@ def test_subtitle_word_callback_receives_face_attributed_word_timestamps(tmp_pat
 
 
 def test_subtitle_callback_estimates_word_timings_when_word_timings_are_missing(tmp_path, monkeypatch):
-    from transcription_core import SubtitleWord, transcribe_with_diarization
+    from face_voice_rec.domain.transcription.transcription_core import SubtitleWord, transcribe_with_diarization
 
     wav_path = tmp_path / "audio.wav"
     wav_path.write_bytes(b"fake wav")
-    monkeypatch.setattr("transcription_core.detect_speech_segments", lambda *_a: [(0.0, 1.0)])
+    monkeypatch.setattr("face_voice_rec.domain.transcription.transcription_core.detect_speech_segments", lambda *_a: [(0.0, 1.0)])
 
     class FakeModel:
         def transcribe(self, _path, **_kwargs):
@@ -1059,8 +1059,8 @@ def test_process_meeting_transcription_forwards_exact_subtitle_callback(tmp_path
     callback_events = []
     callback = callback_events.append
 
-    monkeypatch.setattr("transcription_core.extract_audio_from_video", fake_extract)
-    monkeypatch.setattr("transcription_core.transcribe_with_diarization", fake_transcribe)
+    monkeypatch.setattr("face_voice_rec.domain.transcription.transcription_core.extract_audio_from_video", fake_extract)
+    monkeypatch.setattr("face_voice_rec.domain.transcription.transcription_core.transcribe_with_diarization", fake_transcribe)
 
     meeting_id = process_meeting_transcription(
         video_path,

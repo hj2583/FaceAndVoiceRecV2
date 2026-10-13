@@ -240,7 +240,7 @@ def test_reassign_voice_embedding_updates_only_its_resolved_source_cluster(
     assert database.list_resolved_unknown_voice_samples_for_source(
         str(audio_path)
     )[0][:2] == (replacement_person_id, "The Centre 1")
-    import voice_core
+    from face_voice_rec.domain.voice import voice_core
 
     assert voice_core._match_resolved_source_identity(
         str(audio_path),
@@ -280,7 +280,7 @@ def test_source_reprocessing_prefers_reassigned_sample_over_stale_cluster_person
         )
 
     assert database.list_unknown_voices(include_resolved=True)[0][4] == original_person_id
-    import voice_core
+    from face_voice_rec.domain.voice import voice_core
 
     assert voice_core._match_resolved_source_identity(
         source_ref,

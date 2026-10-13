@@ -10,8 +10,8 @@ import uuid
 import cv2
 import numpy as np
 
-from audio_core import RealtimeVAD
-import voice_core
+from face_voice_rec.domain.voice.audio_core import RealtimeVAD
+from face_voice_rec.domain.voice import voice_core
 
 from face_voice_rec.config import (
     LIP_OPEN_THRESHOLD,
@@ -67,7 +67,7 @@ from face_voice_rec.domain.face.detection_core import ensure_opencv_face_detecto
 from face_voice_rec.domain.face.face_backend import get_face_backend
 from frame_pipeline import PipelineStop, run_threaded_pipeline
 from realtime_runtime import DetectionScheduler, RollingFps
-from speaker_attribution import FaceObservation, SpeakerAttributor
+from face_voice_rec.domain.voice.speaker_attribution import FaceObservation, SpeakerAttributor
 
 
 # ============================================================

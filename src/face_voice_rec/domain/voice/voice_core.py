@@ -86,7 +86,7 @@ def _load_model():
         if _MODEL is None:
             from speechbrain.inference.speaker import EncoderClassifier
 
-            from audio_core import TORCH_DEVICE
+            from face_voice_rec.domain.voice.audio_core import TORCH_DEVICE
 
             logger.info("Loading SpeechBrain speaker embedding model on %s...", TORCH_DEVICE)
             _MODEL = EncoderClassifier.from_hparams(
@@ -109,7 +109,7 @@ def extract_voice_embedding(pcm_int16_bytes, sample_rate=16000):
     try:
         import torch
 
-        from audio_core import TORCH_DEVICE
+        from face_voice_rec.domain.voice.audio_core import TORCH_DEVICE
 
         model = _load_model()
         with torch.no_grad():
@@ -280,7 +280,7 @@ def match_voice_embedding(query_embedding, threshold=None, ambiguity_margin=None
 from scipy.cluster.hierarchy import fcluster, linkage
 from scipy.spatial.distance import pdist
 
-from audio_core import read_wav_pcm, SAMPLE_RATE, SAMPLE_WIDTH
+from face_voice_rec.domain.voice.audio_core import read_wav_pcm, SAMPLE_RATE, SAMPLE_WIDTH
 from face_voice_rec.storage.database import (
     add_unknown_voice_sample,
     create_unknown_voice,

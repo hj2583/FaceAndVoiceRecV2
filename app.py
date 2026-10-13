@@ -34,7 +34,7 @@ from attendance_view import (
     initialize_realtime_attendance_state,
     video_source_options,
 )
-from audio_core import read_wav_pcm
+from face_voice_rec.domain.voice.audio_core import read_wav_pcm
 from face_voice_rec.config import (
     DB_PATH,
     INITIAL_VIDEO_DIR,
@@ -73,7 +73,7 @@ from face_voice_rec.domain.face.face_core import FaceIndex
 from realtime_launcher import launch_realtime
 from runtime_status import get_runtime_status
 from video_workflow import TranscriptStageError, process_video_and_transcribe
-from transcription_core import (
+from face_voice_rec.domain.transcription.transcription_core import (
     SENTENCE_TYPES,
     TranscriptionSegment,
     classify_sentence,
@@ -82,7 +82,7 @@ from transcription_core import (
     process_meeting_transcription,
     refresh_readable_transcript,
 )
-import voice_core
+from face_voice_rec.domain.voice import voice_core
 
 LOW_CONFIDENCE_WARN = 0.7
 LOW_CONFIDENCE_BAD = 0.5

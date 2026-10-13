@@ -549,7 +549,7 @@ def process_meeting_introductions(
         )
 
     if changed_transcript:
-        import transcription_core
+        from face_voice_rec.domain.transcription import transcription_core
 
         transcription_core.refresh_readable_transcript(meeting_id, use_llm=False)
     return identity_updates

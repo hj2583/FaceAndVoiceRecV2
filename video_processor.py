@@ -11,7 +11,7 @@ from types import SimpleNamespace
 import cv2
 import numpy as np
 
-from audio_core import detect_speech_segments
+from face_voice_rec.domain.voice.audio_core import detect_speech_segments
 from face_voice_rec.domain.face.detection_core import detect_faces_tiled
 
 from face_voice_rec.config import (
@@ -55,7 +55,7 @@ from face_voice_rec.domain.face.face_core import (
 
 from face_voice_rec.domain.face.tracking import CentroidTracker
 from frame_pipeline import run_threaded_pipeline
-from speaker_attribution import FaceObservation, SpeakerAttributor
+from face_voice_rec.domain.voice.speaker_attribution import FaceObservation, SpeakerAttributor
 from ffmpeg_utils import find_ffmpeg
 
 

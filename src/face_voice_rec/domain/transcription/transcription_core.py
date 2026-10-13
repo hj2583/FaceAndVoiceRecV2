@@ -16,9 +16,9 @@ from typing import Callable, Iterable, Optional
 import re
 
 from face_voice_rec import config
-from subtitle_renderer import SubtitleWord
-import voice_core
-from audio_core import detect_speech_segments
+from face_voice_rec.domain.transcription.subtitle_renderer import SubtitleWord
+from face_voice_rec.domain.voice import voice_core
+from face_voice_rec.domain.voice.audio_core import detect_speech_segments
 from ffmpeg_utils import find_ffmpeg
 
 
@@ -584,7 +584,7 @@ def transcribe_with_diarization(
     except ImportError as error:
         raise RuntimeError("Install openai-whisper to transcribe audio") from error
 
-    from audio_core import TORCH_DEVICE
+    from face_voice_rec.domain.voice.audio_core import TORCH_DEVICE
 
     model = whisper.load_model(model_size or config.WHISPER_MODEL, device=TORCH_DEVICE)
 
@@ -957,7 +957,7 @@ def refresh_readable_transcript(meeting_id: int, use_llm: Optional[bool] = None)
     )
     if should_use_llm and detailed:
         try:
-            import transcript_refiner
+            from face_voice_rec.domain.transcription import transcript_refiner
 
             result = transcript_refiner.refine_transcript([
                 {

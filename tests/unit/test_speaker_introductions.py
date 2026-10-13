@@ -2,7 +2,7 @@ import numpy as np
 
 from face_voice_rec import config
 from face_voice_rec.storage import database
-from speaker_introductions import (
+from face_voice_rec.domain.transcription.speaker_introductions import (
     extract_self_introductions,
     process_meeting_introductions,
 )
