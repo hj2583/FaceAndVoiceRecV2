@@ -13,7 +13,7 @@ import numpy as np
 from audio_core import RealtimeVAD
 import voice_core
 
-from config import (
+from face_voice_rec.config import (
     LIP_OPEN_THRESHOLD,
 
     RECOGNITION_INTERVAL,

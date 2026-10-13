@@ -4,7 +4,7 @@ import sqlite3
 
 import pytest
 
-import config
+from face_voice_rec import config
 import database
 import transcription_core
 

@@ -6,7 +6,7 @@ from pathlib import Path
 
 import numpy as np
 
-from config import EMBEDDING_DIM
+from face_voice_rec.config import EMBEDDING_DIM
 
 logger = logging.getLogger(__name__)
 

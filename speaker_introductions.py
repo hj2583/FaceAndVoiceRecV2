@@ -5,7 +5,7 @@ import logging
 import re
 import sqlite3
 
-import config
+from face_voice_rec import config
 import database
 
 

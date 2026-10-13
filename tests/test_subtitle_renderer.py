@@ -10,7 +10,7 @@ from pathlib import Path
 from types import SimpleNamespace
 import subprocess
 import pytest
-import config
+from face_voice_rec import config
 
 
 def test_cues_split_on_speaker_change_and_long_gap():

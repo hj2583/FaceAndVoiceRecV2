@@ -1,7 +1,7 @@
 from pathlib import Path
 import sqlite3
 
-from config import DB_PATH, UNKNOWN_FACES_DIR
+from face_voice_rec.config import DB_PATH, UNKNOWN_FACES_DIR
 
 
 def find_best_image(label):

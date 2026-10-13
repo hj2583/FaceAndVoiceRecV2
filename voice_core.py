@@ -14,7 +14,7 @@ from pathlib import Path
 
 import numpy as np
 
-import config
+from face_voice_rec import config
 from database import (
     get_conn,
     list_resolved_unknown_voice_samples_for_source,

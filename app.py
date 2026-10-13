@@ -35,7 +35,7 @@ from attendance_view import (
     video_source_options,
 )
 from audio_core import read_wav_pcm
-from config import (
+from face_voice_rec.config import (
     DB_PATH,
     INITIAL_VIDEO_DIR,
     KNOWN_FACES_DIR,

@@ -14,7 +14,7 @@ import numpy as np
 from audio_core import detect_speech_segments
 from detection_core import detect_faces_tiled
 
-from config import (
+from face_voice_rec.config import (
     ENABLE_TRANSCRIPTION,
     LIP_OPEN_THRESHOLD,
     OUTPUT_FPS_FALLBACK,

@@ -6,7 +6,7 @@ from pathlib import Path
 import cv2
 import numpy as np
 
-from config import (
+from face_voice_rec.config import (
     AMBIGUITY_MARGIN,
     EMBEDDING_DIM,
     FACE_UPSCALE_TARGET_SIZE,
@@ -325,7 +325,7 @@ def save_embedding_for_person(person_name, embedding, image_path=None, quality=0
     Adds an embedding to the shared database/index.
     Returns (person_id, embedding_id).
     """
-    from config import KNOWN_FACES_DIR
+    from face_voice_rec.config import KNOWN_FACES_DIR
 
     normalized_embedding = _normalize(embedding)
     if normalized_embedding is None or len(normalized_embedding) != EMBEDDING_DIM:
@@ -463,7 +463,7 @@ def register_unknown(
     embedding,
     image_path=None,
 ):
-    from config import UNKNOWN_FACES_DIR
+    from face_voice_rec.config import UNKNOWN_FACES_DIR
 
     UNKNOWN_FACES_DIR.mkdir(
         parents=True,

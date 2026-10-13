@@ -15,7 +15,7 @@ import subprocess
 from typing import Callable, Iterable, Optional
 import re
 
-import config
+from face_voice_rec import config
 from subtitle_renderer import SubtitleWord
 import voice_core
 from audio_core import detect_speech_segments

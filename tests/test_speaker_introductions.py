@@ -1,6 +1,6 @@
 import numpy as np
 
-import config
+from face_voice_rec import config
 import database
 from speaker_introductions import (
     extract_self_introductions,

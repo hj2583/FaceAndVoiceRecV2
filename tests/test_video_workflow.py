@@ -3,7 +3,7 @@ from pathlib import Path
 
 import pytest
 
-import config
+from face_voice_rec import config
 from subtitle_renderer import SubtitleWord, VideoMuxError
 import video_workflow
 import voice_core

@@ -13,7 +13,7 @@ import tempfile
 import wave
 from pathlib import Path
 
-import config
+from face_voice_rec import config
 from audio_core import detect_speech_segments
 from transcription_core import extract_audio_from_video
 from voice_core import diarize_meeting_audio

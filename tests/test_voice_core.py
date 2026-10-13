@@ -2,7 +2,7 @@ import json
 import numpy as np
 from pathlib import Path
 
-import config
+from face_voice_rec import config
 import database
 import voice_core
 

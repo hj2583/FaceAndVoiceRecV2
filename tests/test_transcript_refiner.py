@@ -1,6 +1,6 @@
 import pytest
 
-import config
+from face_voice_rec import config
 import transcript_refiner
 from transcript_refiner import TranscriptRefinementError
 

@@ -1,4 +1,4 @@
-import config
+from face_voice_rec import config
 from speaker_attribution import FaceObservation, SpeakerAttributor
 
 

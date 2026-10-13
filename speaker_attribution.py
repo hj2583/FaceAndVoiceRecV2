@@ -7,7 +7,7 @@ from dataclasses import dataclass, field
 from statistics import stdev
 from typing import Optional
 
-import config
+from face_voice_rec import config
 
 
 @dataclass(frozen=True)

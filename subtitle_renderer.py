@@ -6,7 +6,7 @@ import shutil
 import subprocess
 import tempfile
 import uuid
-import config
+from face_voice_rec import config
 from ffmpeg_utils import find_ffmpeg
 
 

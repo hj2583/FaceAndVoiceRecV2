@@ -8,7 +8,7 @@ from typing import Sequence
 from urllib.error import HTTPError, URLError
 from urllib.request import Request, urlopen
 
-import config
+from face_voice_rec import config
 
 
 logger = logging.getLogger(__name__)

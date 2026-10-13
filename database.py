@@ -9,8 +9,8 @@ from datetime import datetime, timezone
 from numbers import Integral, Real
 from typing import Mapping, Sequence
 
-import config
-from config import DB_PATH
+from face_voice_rec import config
+from face_voice_rec.config import DB_PATH
 
 
 logger = logging.getLogger(__name__)

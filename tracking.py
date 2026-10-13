@@ -3,7 +3,7 @@ from typing import Optional
 
 import numpy as np
 
-from config import TRACK_DISTANCE_PX, TRACK_MAX_MISSED_FRAMES
+from face_voice_rec.config import TRACK_DISTANCE_PX, TRACK_MAX_MISSED_FRAMES
 
 
 @dataclass

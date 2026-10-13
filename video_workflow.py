@@ -6,7 +6,7 @@ import tempfile
 from pathlib import Path
 from typing import Callable
 
-import config
+from face_voice_rec import config
 import database
 from subtitle_renderer import (
     SubtitleWord,
