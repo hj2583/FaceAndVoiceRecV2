@@ -23,11 +23,17 @@ def utc_now():
 
 
 def init_db():
-    with sqlite3.connect(DB_PATH) as conn:
-        conn.execute("PRAGMA journal_mode=WAL")
-        conn.execute("PRAGMA foreign_keys=ON")
+    with _DB_LOCK:
+        conn = sqlite3.connect(DB_PATH, timeout=config.DB_BUSY_TIMEOUT_SECONDS)
+        try:
+            conn.execute(
+                f"PRAGMA busy_timeout={config.DB_BUSY_TIMEOUT_SECONDS * 1000}"
+            )
+            conn.execute("PRAGMA journal_mode=WAL")
+            conn.execute("PRAGMA foreign_keys=ON")
+            conn.execute("BEGIN IMMEDIATE")
 
-        conn.execute("""
+            conn.execute("""
             CREATE TABLE IF NOT EXISTS persons (
                 person_id INTEGER PRIMARY KEY AUTOINCREMENT,
                 name TEXT NOT NULL UNIQUE,
@@ -36,7 +42,7 @@ def init_db():
             )
         """)
 
-        conn.execute("""
+            conn.execute("""
             CREATE TABLE IF NOT EXISTS face_embeddings (
                 embedding_id INTEGER PRIMARY KEY AUTOINCREMENT,
                 person_id INTEGER,
@@ -48,7 +54,7 @@ def init_db():
             )
         """)
 
-        conn.execute("""
+            conn.execute("""
             CREATE TABLE IF NOT EXISTS unknown_tracks (
                 unknown_id INTEGER PRIMARY KEY AUTOINCREMENT,
                 label TEXT NOT NULL,
@@ -60,7 +66,7 @@ def init_db():
             )
         """)
 
-        conn.execute("""
+            conn.execute("""
             CREATE TABLE IF NOT EXISTS unknown_samples (
                 sample_id INTEGER PRIMARY KEY AUTOINCREMENT,
                 unknown_id INTEGER NOT NULL,
@@ -75,7 +81,7 @@ def init_db():
             )
         """)
 
-        conn.execute("""
+            conn.execute("""
             CREATE TABLE IF NOT EXISTS recognition_logs (
                 log_id INTEGER PRIMARY KEY AUTOINCREMENT,
                 timestamp_sec REAL NOT NULL,
@@ -87,7 +93,7 @@ def init_db():
             )
         """)
 
-        conn.execute("""
+            conn.execute("""
             CREATE TABLE IF NOT EXISTS audio_logs (
                 log_id INTEGER PRIMARY KEY AUTOINCREMENT,
                 start_time REAL NOT NULL,
@@ -101,7 +107,7 @@ def init_db():
             )
         """)
 
-        conn.execute("""
+            conn.execute("""
             CREATE TABLE IF NOT EXISTS attendance_events (
                 event_id INTEGER PRIMARY KEY AUTOINCREMENT,
                 person_id INTEGER NOT NULL,
@@ -123,13 +129,13 @@ def init_db():
             )
         """)
 
-        audio_log_columns = {
+            audio_log_columns = {
             row[1] for row in conn.execute("PRAGMA table_info(audio_logs)")
         }
-        if "track_id" not in audio_log_columns:
-            conn.execute("ALTER TABLE audio_logs ADD COLUMN track_id INTEGER")
+            if "track_id" not in audio_log_columns:
+                conn.execute("ALTER TABLE audio_logs ADD COLUMN track_id INTEGER")
 
-        conn.execute("""
+            conn.execute("""
             CREATE TABLE IF NOT EXISTS meetings (
                 meeting_id INTEGER PRIMARY KEY AUTOINCREMENT,
                 video_path TEXT NOT NULL UNIQUE,
@@ -140,7 +146,7 @@ def init_db():
             )
         """)
 
-        conn.execute("""
+            conn.execute("""
             CREATE TABLE IF NOT EXISTS meeting_introductions (
                 introduction_id INTEGER PRIMARY KEY AUTOINCREMENT,
                 meeting_id INTEGER NOT NULL,
@@ -168,26 +174,26 @@ def init_db():
                     REFERENCES unknown_tracks(unknown_id) ON DELETE SET NULL
             )
         """)
-        introduction_columns = {
+            introduction_columns = {
             row[1]
             for row in conn.execute(
                 "PRAGMA table_info(meeting_introductions)"
             ).fetchall()
         }
-        if "face_unknown_id" not in introduction_columns:
-            conn.execute(
+            if "face_unknown_id" not in introduction_columns:
+                conn.execute(
                 "ALTER TABLE meeting_introductions "
                 "ADD COLUMN face_unknown_id INTEGER "
                 "REFERENCES unknown_tracks(unknown_id) ON DELETE SET NULL"
             )
-        conn.execute("""
+            conn.execute("""
             CREATE UNIQUE INDEX IF NOT EXISTS idx_meeting_introduction_source
             ON meeting_introductions(
                 meeting_id, name, start_ms, end_ms
             )
         """)
 
-        conn.execute("""
+            conn.execute("""
             CREATE TABLE IF NOT EXISTS transcription_segments (
                 segment_id INTEGER PRIMARY KEY AUTOINCREMENT,
                 meeting_id INTEGER NOT NULL,
@@ -205,25 +211,25 @@ def init_db():
             )
         """)
 
-        segment_columns = {
+            segment_columns = {
             row[1] for row in conn.execute("PRAGMA table_info(transcription_segments)")
         }
-        if "sentence_type" not in segment_columns:
-            conn.execute("ALTER TABLE transcription_segments ADD COLUMN sentence_type TEXT")
-        if "original_text" not in segment_columns:
-            conn.execute(
+            if "sentence_type" not in segment_columns:
+                conn.execute("ALTER TABLE transcription_segments ADD COLUMN sentence_type TEXT")
+            if "original_text" not in segment_columns:
+                conn.execute(
                 "ALTER TABLE transcription_segments ADD COLUMN original_text TEXT"
             )
-        conn.execute(
+            conn.execute(
             "UPDATE transcription_segments SET original_text=text "
             "WHERE original_text IS NULL"
         )
-        if "word_timestamps" not in segment_columns:
-            conn.execute(
+            if "word_timestamps" not in segment_columns:
+                conn.execute(
                 "ALTER TABLE transcription_segments ADD COLUMN word_timestamps TEXT"
             )
 
-        conn.execute("""
+            conn.execute("""
             CREATE TABLE IF NOT EXISTS refined_transcription_segments (
                 refined_segment_id INTEGER PRIMARY KEY AUTOINCREMENT,
                 meeting_id INTEGER NOT NULL,
@@ -240,11 +246,11 @@ def init_db():
                 FOREIGN KEY(person_id) REFERENCES persons(person_id)
             )
         """)
-        conn.execute("""
+            conn.execute("""
             CREATE INDEX IF NOT EXISTS idx_refined_transcription_meeting
             ON refined_transcription_segments(meeting_id)
         """)
-        conn.execute("""
+            conn.execute("""
             CREATE TABLE IF NOT EXISTS transcript_refinement_runs (
                 meeting_id INTEGER PRIMARY KEY,
                 status TEXT NOT NULL,
@@ -256,12 +262,12 @@ def init_db():
             )
         """)
 
-        conn.execute("""
+            conn.execute("""
             CREATE INDEX IF NOT EXISTS idx_transcription_meeting
             ON transcription_segments(meeting_id)
         """)
 
-        conn.execute("""
+            conn.execute("""
             CREATE TABLE IF NOT EXISTS voice_embeddings (
                 embedding_id INTEGER PRIMARY KEY AUTOINCREMENT,
                 person_id INTEGER NOT NULL,
@@ -273,7 +279,7 @@ def init_db():
             )
         """)
 
-        conn.execute("""
+            conn.execute("""
             CREATE TABLE IF NOT EXISTS unknown_voices (
                 unknown_voice_id INTEGER PRIMARY KEY AUTOINCREMENT,
                 label TEXT NOT NULL,
@@ -284,7 +290,7 @@ def init_db():
             )
         """)
 
-        conn.execute("""
+            conn.execute("""
             CREATE TABLE IF NOT EXISTS unknown_voice_samples (
                 sample_id INTEGER PRIMARY KEY AUTOINCREMENT,
                 unknown_voice_id INTEGER NOT NULL,
@@ -301,32 +307,37 @@ def init_db():
             )
         """)
 
-        voice_embedding_columns = {
+            voice_embedding_columns = {
             row[1] for row in conn.execute("PRAGMA table_info(voice_embeddings)")
         }
-        if "audio_path" not in voice_embedding_columns:
-            conn.execute("ALTER TABLE voice_embeddings ADD COLUMN audio_path TEXT")
+            if "audio_path" not in voice_embedding_columns:
+                conn.execute("ALTER TABLE voice_embeddings ADD COLUMN audio_path TEXT")
 
-        unknown_voice_sample_columns = {
+            unknown_voice_sample_columns = {
             row[1] for row in conn.execute("PRAGMA table_info(unknown_voice_samples)")
         }
-        for column, definition in (
+            for column, definition in (
             ("audio_path", "TEXT"),
             ("source_ref", "TEXT"),
             ("start_ms", "INTEGER"),
             ("end_ms", "INTEGER"),
         ):
-            if column not in unknown_voice_sample_columns:
-                conn.execute(
+                if column not in unknown_voice_sample_columns:
+                    conn.execute(
                     f"ALTER TABLE unknown_voice_samples ADD COLUMN {column} {definition}"
                 )
-        conn.execute("""
+            conn.execute("""
             CREATE UNIQUE INDEX IF NOT EXISTS idx_unknown_voice_sample_source_window
             ON unknown_voice_samples(unknown_voice_id, source_ref, start_ms, end_ms)
             WHERE source_ref IS NOT NULL AND start_ms IS NOT NULL AND end_ms IS NOT NULL
         """)
 
-        conn.commit()
+            conn.commit()
+        except Exception:
+            conn.rollback()
+            raise
+        finally:
+            conn.close()
 
 
 @contextmanager
