@@ -52,12 +52,18 @@ def _render_tab_pages(
     module_paths: Sequence[str],
     *,
     active_only: bool,
+    loaded_module_paths: set[str] | None = None,
     import_module: Callable[[str], object] = importlib.import_module,
 ) -> None:
     for tab_container, module_path in zip(tab_containers, module_paths):
         with tab_container:
-            if active_only and not getattr(tab_container, "open", False):
-                continue
+            if active_only:
+                if loaded_module_paths is None:
+                    should_render = getattr(tab_container, "open", False)
+                else:
+                    should_render = module_path in loaded_module_paths
+                if not should_render:
+                    continue
             page_module = import_module(module_path)
             page_module.render()
 
@@ -108,10 +114,20 @@ def render_application() -> None:
 
     if supports_stateful_tabs(st.tabs):
         tabs = st.tabs(labels, on_change="rerun", key="main-tabs")
+        loaded_tab_modules = session_state.get("_loaded_tab_modules")
+        if not isinstance(loaded_tab_modules, set):
+            loaded_tab_modules = set()
+            session_state["_loaded_tab_modules"] = loaded_tab_modules
+
+        for tab_container, module_path in zip(tabs, module_paths):
+            if getattr(tab_container, "open", False):
+                loaded_tab_modules.add(module_path)
+
         _render_tab_pages(
             tabs,
             module_paths,
             active_only=True,
+            loaded_module_paths=loaded_tab_modules,
             import_module=import_module,
         )
     else:

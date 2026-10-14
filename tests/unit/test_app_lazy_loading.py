@@ -177,7 +177,7 @@ def test_render_application_without_button_api_does_not_probe_runtime(monkeypatc
 
     main.render_application()
 
-    assert fake_st.session_state == {}
+    assert fake_st.session_state == {"_loaded_tab_modules": {"app.pages.video"}}
     assert fake_st.captions == []
 
 
@@ -350,3 +350,53 @@ def test_render_application_runtime_failure_then_retry_success(monkeypatch):
     assert fake_st.captions.count("Audio models (PyTorch): ok") == 1
     assert fake_st.captions.count("Face models (ONNX Runtime): ok") == 1
     assert rendered == ["app.pages.video", "app.pages.video"]
+
+
+def test_render_application_stateful_tabs_preserves_visited_modules(monkeypatch):
+    main = _load_main_with_fake_streamlit(monkeypatch)
+
+    rendered = []
+    imported = []
+
+    class FakeStatefulStreamlit:
+        def __init__(self):
+            self.session_state = {}
+            self._selected_indices = [0, 1]
+
+        def title(self, _value):
+            pass
+
+        def caption(self, _value):
+            pass
+
+        def button(self, _label):
+            return False
+
+        def tabs(self, labels, *, on_change=None, key=None):
+            selected_index = self._selected_indices.pop(0)
+            return [FakeTab(index == selected_index) for index, _ in enumerate(labels)]
+
+    fake_st = FakeStatefulStreamlit()
+
+    def import_module(module_path):
+        if module_path == "app.ui.status":
+            raise AssertionError("runtime status should not load before click")
+        imported.append(module_path)
+        return SimpleNamespace(render=lambda: rendered.append(module_path))
+
+    monkeypatch.setattr(main, "st", fake_st)
+    monkeypatch.setattr(main.importlib, "import_module", import_module)
+
+    main.render_application()
+    main.render_application()
+
+    assert rendered == [
+        "app.pages.realtime",
+        "app.pages.realtime",
+        "app.pages.video",
+    ]
+    assert imported == rendered
+    assert fake_st.session_state["_loaded_tab_modules"] == {
+        "app.pages.realtime",
+        "app.pages.video",
+    }

@@ -4,12 +4,14 @@ from dataclasses import dataclass
 import os
 from pathlib import Path
 import sqlite3
+import uuid
 from typing import Iterable
 
 from .constants import DB_BUSY_TIMEOUT_SECONDS
 
 MIGRATION_MARKER = ".legacy_migration_v1_complete"
 PATH_REFERENCE_MIGRATION_MARKER = ".legacy_path_references_v1_complete"
+MIGRATION_LOCK_DATABASE = ".legacy_migration_lock.sqlite"
 
 _MIGRATION_MAP: tuple[tuple[Path, Path], ...] = (
     (Path("faces.db"), Path("db/faces.db")),
@@ -52,19 +54,40 @@ def migrate_legacy_data(project_root: Path, data_root: Path) -> None:
     data_root = data_root.resolve()
 
     marker = data_root / MIGRATION_MARKER
-    if not marker.exists():
-        conflicts = _collect_conflicts(project_root, data_root)
-        if conflicts:
-            raise DataMigrationConflict(conflicts)
+    lock_connection = _acquire_migration_lock(data_root)
+    try:
+        if not marker.exists():
+            conflicts = _collect_conflicts(project_root, data_root)
+            if conflicts:
+                raise DataMigrationConflict(conflicts)
 
-        for source_relative, destination_relative in _MIGRATION_MAP:
-            source = project_root / source_relative
-            destination = data_root / destination_relative
-            _move_source(source, destination, project_root)
+            for source_relative, destination_relative in _MIGRATION_MAP:
+                source = project_root / source_relative
+                destination = data_root / destination_relative
+                _move_source(source, destination, project_root)
 
-        _write_marker_atomically(marker)
+            _write_marker_atomically(marker)
 
-    _migrate_path_references(project_root, data_root)
+        _migrate_path_references(project_root, data_root)
+        lock_connection.commit()
+    except Exception:
+        lock_connection.rollback()
+        raise
+    finally:
+        lock_connection.close()
+
+
+def _acquire_migration_lock(data_root: Path) -> sqlite3.Connection:
+    data_root.mkdir(parents=True, exist_ok=True)
+    lock_db_path = data_root / MIGRATION_LOCK_DATABASE
+    connection = sqlite3.connect(lock_db_path, timeout=DB_BUSY_TIMEOUT_SECONDS)
+    try:
+        connection.execute(f"PRAGMA busy_timeout={DB_BUSY_TIMEOUT_SECONDS * 1000}")
+        connection.execute("BEGIN IMMEDIATE")
+    except Exception:
+        connection.close()
+        raise
+    return connection
 
 
 def _migrate_path_references(project_root: Path, data_root: Path) -> None:
@@ -230,11 +253,19 @@ def _collect_conflicts_for_path(
     destination_relative: Path,
     conflicts: list[_Conflict],
 ) -> None:
-    if not source.exists():
-        return
-
     if source.is_symlink():
         conflicts.append(_Conflict(source_relative, destination_relative, "symbolic links are not supported"))
+        return
+
+    if _has_existing_symlink_ancestor(source):
+        conflicts.append(_Conflict(source_relative, destination_relative, "source has a symbolic-link ancestor"))
+        return
+
+    if destination.is_symlink() or _has_existing_symlink_ancestor(destination):
+        conflicts.append(_Conflict(source_relative, destination_relative, "destination has a symbolic-link ancestor"))
+        return
+
+    if not source.exists():
         return
 
     if _destination_parent_is_file(destination):
@@ -260,25 +291,18 @@ def _collect_conflicts_for_path(
         return
 
     if source.is_dir():
-        if destination.exists() and destination.is_symlink():
-            conflicts.append(_Conflict(source_relative, destination_relative, "symbolic links are not supported"))
-            return
-
         if destination.exists() and destination.is_file():
             conflicts.append(_Conflict(source_relative, destination_relative, "source is directory but destination is file"))
-            return
-
-        if destination.exists() and destination.is_dir():
-            for child in sorted(source.iterdir(), key=lambda item: item.name):
-                child_source_relative = source_relative / child.name
-                child_destination_relative = destination_relative / child.name
-                _collect_conflicts_for_path(
-                    child,
-                    destination / child.name,
-                    child_source_relative,
-                    child_destination_relative,
-                    conflicts,
-                )
+        for child in sorted(source.iterdir(), key=lambda item: item.name):
+            child_source_relative = source_relative / child.name
+            child_destination_relative = destination_relative / child.name
+            _collect_conflicts_for_path(
+                child,
+                destination / child.name,
+                child_source_relative,
+                child_destination_relative,
+                conflicts,
+            )
 
 
 def _destination_parent_is_file(destination: Path) -> bool:
@@ -293,11 +317,14 @@ def _destination_parent_is_file(destination: Path) -> bool:
 
 
 def _move_source(source: Path, destination: Path, project_root: Path) -> None:
+    if source.is_symlink():
+        raise DataMigrationConflict([_Conflict(source.relative_to(project_root), destination, "symbolic links are not supported")])
+
     if not source.exists():
         return
 
-    if source.is_symlink():
-        raise DataMigrationConflict([_Conflict(source.relative_to(project_root), destination, "symbolic links are not supported")])
+    if destination.is_symlink() or _has_existing_symlink_ancestor(destination):
+        raise DataMigrationConflict([_Conflict(source.relative_to(project_root), destination, "destination has a symbolic-link ancestor")])
 
     if source.is_file():
         destination.parent.mkdir(parents=True, exist_ok=True)
@@ -334,13 +361,35 @@ def _remove_empty_parents(start: Path, stop: Path) -> None:
 
 
 def _write_marker_atomically(marker: Path) -> None:
+    if marker.exists():
+        return
+
     marker.parent.mkdir(parents=True, exist_ok=True)
-    temp_marker = marker.with_name(f"{marker.name}.tmp")
-    temp_marker.write_text("complete\n", encoding="utf-8")
-    temp_marker.replace(marker)
+    temp_marker = marker.with_name(f"{marker.name}.tmp.{uuid.uuid4().hex}")
+
+    fd = os.open(temp_marker, os.O_CREAT | os.O_EXCL | os.O_WRONLY)
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as handle:
+            handle.write("complete\n")
+            handle.flush()
+            os.fsync(handle.fileno())
+
+        try:
+            os.link(temp_marker, marker)
+        except FileExistsError:
+            # Another process published the marker first.
+            pass
+    finally:
+        try:
+            temp_marker.unlink()
+        except FileNotFoundError:
+            pass
 
 
 def _publish_file_no_clobber(source: Path, destination: Path) -> None:
+    if destination.is_symlink() or _has_existing_symlink_ancestor(destination):
+        raise DataMigrationConflict([_Conflict(source, destination, "destination has a symbolic-link ancestor")])
+
     if destination.exists():
         if _is_same_file(source, destination):
             source.unlink()
@@ -373,3 +422,15 @@ def _first_existing_parent(path: Path) -> Path:
             break
         current = parent
     return current
+
+
+def _has_existing_symlink_ancestor(path: Path) -> bool:
+    current = path
+    while True:
+        if current.exists() and current.is_symlink():
+            return True
+
+        parent = current.parent
+        if parent == current:
+            return False
+        current = parent

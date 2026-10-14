@@ -263,6 +263,96 @@ def test_cross_filesystem_rejected_before_any_move(runtime_tree: RuntimeTree, mo
     assert not runtime_tree.data_path(".legacy_migration_v1_complete").exists()
 
 
+def test_nested_source_symlink_conflict_detected_even_when_destination_root_absent(
+    runtime_tree: RuntimeTree,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    source_file = runtime_tree.write_legacy("known_faces/1/sample.jpg", b"face")
+    nested_dangling_source = runtime_tree.write_legacy("known_faces/1/dangling.jpg", b"placeholder")
+
+    import face_voice_rec.config.migration as migration
+
+    original_exists = Path.exists
+    original_is_symlink = Path.is_symlink
+
+    def fake_exists(path: Path) -> bool:
+        if path == nested_dangling_source:
+            return False
+        return original_exists(path)
+
+    def fake_is_symlink(path: Path) -> bool:
+        if path == nested_dangling_source:
+            return True
+        return original_is_symlink(path)
+
+    monkeypatch.setattr(migration.Path, "exists", fake_exists, raising=False)
+    monkeypatch.setattr(migration.Path, "is_symlink", fake_is_symlink, raising=False)
+
+    with pytest.raises(DataMigrationConflict):
+        migrate_legacy_data(runtime_tree.project_root, runtime_tree.data_root)
+
+    assert source_file.read_bytes() == b"face"
+    assert not runtime_tree.data_path("artifacts/known_faces/1/sample.jpg").exists()
+    assert not runtime_tree.data_path(".legacy_migration_v1_complete").exists()
+
+
+def test_data_root_symlink_ancestor_rejected_before_move(
+    runtime_tree: RuntimeTree,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    source_file = runtime_tree.write_legacy("face_index.npz", b"index")
+
+    import face_voice_rec.config.migration as migration
+
+    original_is_symlink = Path.is_symlink
+
+    def fake_is_symlink(path: Path) -> bool:
+        if path == runtime_tree.data_root:
+            return True
+        return original_is_symlink(path)
+
+    monkeypatch.setattr(migration.Path, "is_symlink", fake_is_symlink, raising=False)
+
+    with pytest.raises(DataMigrationConflict):
+        migrate_legacy_data(runtime_tree.project_root, runtime_tree.data_root)
+
+    assert source_file.read_bytes() == b"index"
+    assert not runtime_tree.data_path("artifacts/face_index.npz").exists()
+    assert not runtime_tree.data_path(".legacy_migration_v1_complete").exists()
+
+
+def test_marker_publication_does_not_overwrite_existing_marker(runtime_tree: RuntimeTree) -> None:
+    marker_path = runtime_tree.data_path(".legacy_migration_v1_complete")
+    marker_path.parent.mkdir(parents=True, exist_ok=True)
+    marker_path.write_text("done\n", encoding="utf-8")
+
+    import face_voice_rec.config.migration as migration
+
+    migration._write_marker_atomically(marker_path)
+
+    assert marker_path.read_text(encoding="utf-8") == "done\n"
+
+
+def test_migration_uses_persistent_lock_database(runtime_tree: RuntimeTree, monkeypatch: pytest.MonkeyPatch) -> None:
+    runtime_tree.write_data(".legacy_migration_v1_complete", b"done\n")
+    _create_empty_sqlite_db(runtime_tree.data_path("db/faces.db"))
+
+    import face_voice_rec.config.migration as migration
+
+    original_connect = migration.sqlite3.connect
+    connected_paths: list[Path] = []
+
+    def traced_connect(path, *args, **kwargs):
+        connected_paths.append(Path(path))
+        return original_connect(path, *args, **kwargs)
+
+    monkeypatch.setattr(migration.sqlite3, "connect", traced_connect)
+
+    migrate_legacy_data(runtime_tree.project_root, runtime_tree.data_root)
+
+    assert runtime_tree.data_path(".legacy_migration_lock.sqlite") in connected_paths
+
+
 def test_path_reference_migration_runs_after_v1_marker_and_is_idempotent(runtime_tree: RuntimeTree) -> None:
     runtime_tree.write_data(".legacy_migration_v1_complete", b"done\n")
     db_path = runtime_tree.data_path("db/faces.db")

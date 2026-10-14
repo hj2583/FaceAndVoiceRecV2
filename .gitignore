@@ -57,6 +57,9 @@ data/transcripts/**
 data/temp/workflow/**
 data/.legacy_migration_v1_complete
 data/.legacy_path_references_v1_complete
+data/.legacy_migration_lock.sqlite
+data/.legacy_migration_lock.sqlite-wal
+data/.legacy_migration_lock.sqlite-shm
 
 *.db-shm
 *.db-wal
