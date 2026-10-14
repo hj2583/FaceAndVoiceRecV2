@@ -27,7 +27,7 @@ Reduce Streamlit startup/rerun work by loading only the selected tab's module an
 
 The runtime status panel becomes an explicit **Check runtime** action. Before the action, the UI shows no Torch/ONNX probe result and imports neither provider. On click, it calls the existing `get_runtime_status()` once and stores the result in `st.session_state` for subsequent reruns. The FaceIndex stays behind its existing cached getter and is reached only when the Face Database tab is selected.
 
-The tab event test will assert exact label/order preservation, lazy import/render of only the open tab on the stateful branch, eager fallback behavior for an older API, and that runtime status is not called until the action is activated. UI text and recognition/model thresholds remain unchanged.
+The tab event test will assert exact label/order preservation, lazy import on first selection, retention of active and previously visited pages to preserve widget state, eager fallback behavior for an older API, and that runtime status is not called until the action is activated. Never-visited pages remain unloaded. UI text and recognition/model thresholds remain unchanged.
 
 ## SQLite Initialization Design
 
