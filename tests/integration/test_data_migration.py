@@ -8,6 +8,7 @@ import sys
 import pytest
 
 from face_voice_rec.config.migration import DataMigrationConflict, migrate_legacy_data
+from face_voice_rec.config.constants import DB_BUSY_TIMEOUT_SECONDS
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from fixtures.runtime_tree import RuntimeTree
@@ -432,3 +433,63 @@ def test_path_reference_migration_preserves_posix_separator_style_for_attendance
         ]
     finally:
         connection.close()
+
+
+def test_path_reference_migration_sqlite_write_lock_policy(runtime_tree: RuntimeTree, monkeypatch: pytest.MonkeyPatch) -> None:
+    runtime_tree.write_data(".legacy_migration_v1_complete", b"done\n")
+    db_path = runtime_tree.data_path("db/faces.db")
+    _create_path_reference_test_db(db_path)
+
+    legacy_image_path = str(runtime_tree.project_root / "known_faces" / "1" / "sample.jpg")
+    expected_image_path = str(runtime_tree.data_path("artifacts/known_faces/1/sample.jpg"))
+
+    connection = sqlite3.connect(db_path)
+    try:
+        connection.execute(
+            "INSERT INTO face_embeddings(id, image_path, embedding_path) VALUES (1, ?, NULL)",
+            (legacy_image_path,),
+        )
+        connection.commit()
+    finally:
+        connection.close()
+
+    import face_voice_rec.config.migration as migration
+
+    traced_sql: list[str] = []
+    connect_kwargs: dict[str, object] = {}
+    original_connect = migration.sqlite3.connect
+
+    def traced_connect(*args, **kwargs):
+        connect_kwargs.clear()
+        connect_kwargs.update(kwargs)
+        traced_connection = original_connect(*args, **kwargs)
+        traced_connection.set_trace_callback(traced_sql.append)
+        return traced_connection
+
+    monkeypatch.setattr(migration.sqlite3, "connect", traced_connect)
+
+    migrate_legacy_data(runtime_tree.project_root, runtime_tree.data_root)
+
+    assert connect_kwargs.get("timeout") == DB_BUSY_TIMEOUT_SECONDS
+
+    expected_busy_timeout_sql = f"PRAGMA busy_timeout={DB_BUSY_TIMEOUT_SECONDS * 1000}"
+    assert any(statement.strip() == expected_busy_timeout_sql for statement in traced_sql)
+
+    begin_immediate_index = next(
+        index for index, statement in enumerate(traced_sql) if statement.strip() == "BEGIN IMMEDIATE"
+    )
+    first_path_column_read_index = next(
+        index
+        for index, statement in enumerate(traced_sql)
+        if "SELECT rowid, image_path FROM face_embeddings" in statement
+    )
+    assert begin_immediate_index < first_path_column_read_index
+
+    connection = sqlite3.connect(db_path)
+    try:
+        rows = _read_table(connection, "face_embeddings", "image_path")
+        assert rows == [(expected_image_path,)]
+    finally:
+        connection.close()
+
+    assert runtime_tree.data_path(PATH_REFERENCE_MIGRATION_MARKER).exists()

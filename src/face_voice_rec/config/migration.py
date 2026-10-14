@@ -6,6 +6,8 @@ from pathlib import Path
 import sqlite3
 from typing import Iterable
 
+from .constants import DB_BUSY_TIMEOUT_SECONDS
+
 MIGRATION_MARKER = ".legacy_migration_v1_complete"
 PATH_REFERENCE_MIGRATION_MARKER = ".legacy_path_references_v1_complete"
 
@@ -76,9 +78,10 @@ def _migrate_path_references(project_root: Path, data_root: Path) -> None:
         return
 
     replacements = tuple(_legacy_prefix_replacements(project_root, data_root))
-    connection = sqlite3.connect(db_path)
+    connection = sqlite3.connect(db_path, timeout=DB_BUSY_TIMEOUT_SECONDS)
     try:
-        connection.execute("BEGIN")
+        connection.execute(f"PRAGMA busy_timeout={DB_BUSY_TIMEOUT_SECONDS * 1000}")
+        connection.execute("BEGIN IMMEDIATE")
         for table_name, columns in _path_reference_columns():
             if not _table_exists(connection, table_name):
                 continue
