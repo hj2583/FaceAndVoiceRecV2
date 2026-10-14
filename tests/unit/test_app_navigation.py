@@ -23,8 +23,10 @@ class _FakePage:
 
 
 class _FakeStreamlit:
-    def __init__(self, events):
+    def __init__(self, events, *, button_value=False):
         self._events = events
+        self._button_value = button_value
+        self.session_state = {}
 
     def cache_resource(self, fn=None, **_kwargs):
         if fn is None:
@@ -45,6 +47,10 @@ class _FakeStreamlit:
 
     def title(self, value):
         self._events.append(("st.title", value))
+
+    def button(self, label):
+        self._events.append(("st.button", label))
+        return self._button_value
 
     def caption(self, value):
         self._events.append(("st.caption", value))
@@ -117,7 +123,7 @@ def test_main_renders_tabs_in_expected_order_with_startup_sequence(monkeypatch):
     monkeypatch.setattr(
         main,
         "get_runtime_status",
-        lambda: {"torch": "fake-torch", "face": "fake-face"},
+        lambda: events.append(("get_runtime_status",)),
     )
 
     main.main()
@@ -137,8 +143,7 @@ def test_main_renders_tabs_in_expected_order_with_startup_sequence(monkeypatch):
         ("st.navigation", 1, "AI Face + Active Speaker Recognition", "hidden"),
         ("st.navigation.run", 1),
         ("st.title", "🎥 AI Face + Active Speaker Recognition"),
-        ("st.caption", "Audio models (PyTorch): fake-torch"),
-        ("st.caption", "Face models (ONNX Runtime): fake-face"),
+        ("st.button", "Check runtime"),
         (
             "st.tabs",
             [
