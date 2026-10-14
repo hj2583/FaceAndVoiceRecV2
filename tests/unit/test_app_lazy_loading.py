@@ -27,6 +27,14 @@ def _load_main_with_fake_streamlit(monkeypatch):
     return importlib.import_module("app.main")
 
 
+def test_main_import_does_not_bind_runtime_status_symbol(monkeypatch):
+    monkeypatch.delitem(sys.modules, "app.ui.status", raising=False)
+    main = _load_main_with_fake_streamlit(monkeypatch)
+
+    assert callable(main.get_runtime_status)
+    assert "app.ui.status" not in sys.modules
+
+
 def test_stateful_tabs_import_only_the_open_page(monkeypatch):
     main = _load_main_with_fake_streamlit(monkeypatch)
 
@@ -101,11 +109,17 @@ def test_render_application_stateful_tabs_import_only_open(monkeypatch):
     events = []
 
     class FakeStatefulStreamlit:
+        def __init__(self):
+            self.session_state = {}
+
         def title(self, value):
             events.append(("title", value))
 
         def caption(self, value):
             events.append(("caption", value))
+
+        def button(self, _label):
+            return False
 
         def tabs(self, labels, *, on_change=None, key=None):
             events.append(("tabs", list(labels), on_change, key))
@@ -115,19 +129,21 @@ def test_render_application_stateful_tabs_import_only_open(monkeypatch):
     rendered = []
 
     def import_module(module_path):
+        if module_path == "app.ui.status":
+            raise AssertionError("runtime status should not load before click")
         imported.append(module_path)
         return SimpleNamespace(render=lambda: rendered.append(module_path))
 
     monkeypatch.setattr(main, "st", FakeStatefulStreamlit())
-    monkeypatch.setattr(main, "get_runtime_status", lambda: {"torch": "ok", "face": "ok"})
     monkeypatch.setattr(main.importlib, "import_module", import_module)
 
     main.render_application()
 
     assert events[0] == ("title", "🎥 AI Face + Active Speaker Recognition")
-    assert events[3][0] == "tabs"
-    assert events[3][2] == "rerun"
-    assert events[3][3] == "main-tabs"
+    assert events[1][0] == "tabs"
+    assert events[1][2] == "rerun"
+    assert events[1][3] == "main-tabs"
+    assert all(event[0] != "caption" for event in events)
     assert imported == ["app.pages.video"]
     assert rendered == ["app.pages.video"]
 
@@ -138,11 +154,17 @@ def test_render_application_fallback_renders_all_pages(monkeypatch):
     events = []
 
     class FakeLegacyStreamlit:
+        def __init__(self):
+            self.session_state = {}
+
         def title(self, value):
             events.append(("title", value))
 
         def caption(self, value):
             events.append(("caption", value))
+
+        def button(self, _label):
+            return False
 
         def tabs(self, labels):
             events.append(("tabs", list(labels)))
@@ -151,10 +173,11 @@ def test_render_application_fallback_renders_all_pages(monkeypatch):
     rendered = []
 
     def import_module(module_path):
+        if module_path == "app.ui.status":
+            raise AssertionError("runtime status should not load before click")
         return SimpleNamespace(render=lambda: rendered.append(module_path))
 
     monkeypatch.setattr(main, "st", FakeLegacyStreamlit())
-    monkeypatch.setattr(main, "get_runtime_status", lambda: {"torch": "ok", "face": "ok"})
     monkeypatch.setattr(main.importlib, "import_module", import_module)
 
     main.render_application()
@@ -168,3 +191,57 @@ def test_render_application_fallback_renders_all_pages(monkeypatch):
         "app.pages.transcripts",
         "app.pages.voice_enrollment",
     ]
+    assert all(event[0] != "caption" for event in events)
+
+
+def test_render_application_runtime_check_clicks_once_and_caches(monkeypatch):
+    main = _load_main_with_fake_streamlit(monkeypatch)
+
+    imported = []
+    rendered = []
+    probe_calls = []
+
+    class FakeRuntimeStatusModule:
+        @staticmethod
+        def get_runtime_status():
+            probe_calls.append("called")
+            return {"torch": "ok", "face": "ok"}
+
+    class FakeStatefulStreamlit:
+        def __init__(self):
+            self.session_state = {}
+            self._buttons = [True, False]
+            self.captions = []
+
+        def title(self, _value):
+            pass
+
+        def caption(self, value):
+            self.captions.append(value)
+
+        def button(self, _label):
+            return self._buttons.pop(0)
+
+        def tabs(self, labels, *, on_change=None, key=None):
+            return [FakeTab(index == 1) for index, _ in enumerate(labels)]
+
+    fake_st = FakeStatefulStreamlit()
+
+    def import_module(module_path):
+        imported.append(module_path)
+        if module_path == "app.ui.status":
+            return FakeRuntimeStatusModule()
+        return SimpleNamespace(render=lambda: rendered.append(module_path))
+
+    monkeypatch.setattr(main, "st", fake_st)
+    monkeypatch.setattr(main.importlib, "import_module", import_module)
+
+    main.render_application()
+    main.render_application()
+
+    assert probe_calls == ["called"]
+    assert fake_st.session_state["runtime_status"] == {"torch": "ok", "face": "ok"}
+    assert imported.count("app.ui.status") == 1
+    assert fake_st.captions.count("Audio models (PyTorch): ok") == 2
+    assert fake_st.captions.count("Face models (ONNX Runtime): ok") == 2
+    assert rendered == ["app.pages.video", "app.pages.video"]

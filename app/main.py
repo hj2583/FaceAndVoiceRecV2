@@ -19,7 +19,6 @@ _install_numpy_compat_aliases()
 
 import streamlit as st
 
-from app.ui.status import get_runtime_status
 from face_voice_rec.config import initialize_runtime_paths
 from face_voice_rec.storage.database import init_db
 
@@ -33,6 +32,11 @@ TAB_PAGES: tuple[tuple[str, str], ...] = (
     ("📝 Transcripts", "app.pages.transcripts"),
     ("🎙️ Voice Enrollment", "app.pages.voice_enrollment"),
 )
+
+
+def get_runtime_status() -> dict[str, str]:
+    status_module = importlib.import_module("app.ui.status")
+    return status_module.get_runtime_status()
 
 
 def supports_stateful_tabs(tabs_callable: Callable[..., object]) -> bool:
@@ -66,9 +70,39 @@ def initialize_application_database() -> None:
 def render_application() -> None:
     st.title("🎥 AI Face + Active Speaker Recognition")
 
-    runtime_status = get_runtime_status()
-    st.caption(f"Audio models (PyTorch): {runtime_status['torch']}")
-    st.caption(f"Face models (ONNX Runtime): {runtime_status['face']}")
+    session_state = getattr(st, "session_state", None)
+    if session_state is None:
+        session_state = {}
+
+    runtime_status = session_state.get("runtime_status")
+    runtime_status_error = session_state.get("runtime_status_error")
+
+    check_runtime_button = getattr(st, "button", None)
+    should_probe_runtime = False
+    if runtime_status is None:
+        if callable(check_runtime_button):
+            should_probe_runtime = check_runtime_button("Check runtime")
+        else:
+            should_probe_runtime = True
+
+    if runtime_status is None and should_probe_runtime:
+        try:
+            runtime_status = get_runtime_status()
+            session_state["runtime_status"] = runtime_status
+            session_state.pop("runtime_status_error", None)
+            runtime_status_error = None
+        except Exception as exc:
+            runtime_status = None
+            runtime_status_error = str(exc)
+            session_state["runtime_status_error"] = runtime_status_error
+
+    if runtime_status is not None:
+        st.caption(f"Audio models (PyTorch): {runtime_status['torch']}")
+        st.caption(f"Face models (ONNX Runtime): {runtime_status['face']}")
+    elif runtime_status_error:
+        st.caption("Audio models (PyTorch): unavailable")
+        st.caption("Face models (ONNX Runtime): unavailable")
+        st.caption(f"Runtime status error: {runtime_status_error}")
 
     labels = [label for label, _module_path in TAB_PAGES]
     module_paths = [module_path for _label, module_path in TAB_PAGES]
