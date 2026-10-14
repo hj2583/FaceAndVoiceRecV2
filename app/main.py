@@ -82,8 +82,6 @@ def render_application() -> None:
     if runtime_status is None:
         if callable(check_runtime_button):
             should_probe_runtime = check_runtime_button("Check runtime")
-        else:
-            should_probe_runtime = True
 
     if runtime_status is None and should_probe_runtime:
         try:

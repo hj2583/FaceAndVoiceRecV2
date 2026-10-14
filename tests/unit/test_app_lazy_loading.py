@@ -148,6 +148,39 @@ def test_render_application_stateful_tabs_import_only_open(monkeypatch):
     assert rendered == ["app.pages.video"]
 
 
+def test_render_application_without_button_api_does_not_probe_runtime(monkeypatch):
+    main = _load_main_with_fake_streamlit(monkeypatch)
+
+    class FakeStatefulStreamlit:
+        def __init__(self):
+            self.session_state = {}
+            self.captions = []
+
+        def title(self, _value):
+            pass
+
+        def caption(self, value):
+            self.captions.append(value)
+
+        def tabs(self, labels, *, on_change=None, key=None):
+            return [FakeTab(index == 1) for index, _ in enumerate(labels)]
+
+    fake_st = FakeStatefulStreamlit()
+
+    def import_module(module_path):
+        if module_path == "app.ui.status":
+            raise AssertionError("runtime status should not load without a button click")
+        return SimpleNamespace(render=lambda: None)
+
+    monkeypatch.setattr(main, "st", fake_st)
+    monkeypatch.setattr(main.importlib, "import_module", import_module)
+
+    main.render_application()
+
+    assert fake_st.session_state == {}
+    assert fake_st.captions == []
+
+
 def test_render_application_fallback_renders_all_pages(monkeypatch):
     main = _load_main_with_fake_streamlit(monkeypatch)
 
@@ -212,6 +245,7 @@ def test_render_application_runtime_check_clicks_once_and_caches(monkeypatch):
             self.session_state = {}
             self._buttons = [True, False]
             self.captions = []
+            self.button_labels = []
 
         def title(self, _value):
             pass
@@ -219,7 +253,8 @@ def test_render_application_runtime_check_clicks_once_and_caches(monkeypatch):
         def caption(self, value):
             self.captions.append(value)
 
-        def button(self, _label):
+        def button(self, label):
+            self.button_labels.append(label)
             return self._buttons.pop(0)
 
         def tabs(self, labels, *, on_change=None, key=None):
@@ -242,6 +277,76 @@ def test_render_application_runtime_check_clicks_once_and_caches(monkeypatch):
     assert probe_calls == ["called"]
     assert fake_st.session_state["runtime_status"] == {"torch": "ok", "face": "ok"}
     assert imported.count("app.ui.status") == 1
+    assert fake_st.button_labels == ["Check runtime"]
     assert fake_st.captions.count("Audio models (PyTorch): ok") == 2
     assert fake_st.captions.count("Face models (ONNX Runtime): ok") == 2
+    assert rendered == ["app.pages.video", "app.pages.video"]
+
+
+def test_render_application_runtime_failure_then_retry_success(monkeypatch):
+    main = _load_main_with_fake_streamlit(monkeypatch)
+
+    imported = []
+    rendered = []
+    probe_calls = []
+    status_results = [RuntimeError("probe failed"), {"torch": "ok", "face": "ok"}]
+
+    class FakeRuntimeStatusModule:
+        @staticmethod
+        def get_runtime_status():
+            probe_calls.append("called")
+            result = status_results.pop(0)
+            if isinstance(result, Exception):
+                raise result
+            return result
+
+    class FakeStatefulStreamlit:
+        def __init__(self):
+            self.session_state = {}
+            self._buttons = [True, True]
+            self.captions = []
+            self.button_labels = []
+
+        def title(self, _value):
+            pass
+
+        def caption(self, value):
+            self.captions.append(value)
+
+        def button(self, label):
+            self.button_labels.append(label)
+            return self._buttons.pop(0)
+
+        def tabs(self, labels, *, on_change=None, key=None):
+            return [FakeTab(index == 1) for index, _ in enumerate(labels)]
+
+    fake_st = FakeStatefulStreamlit()
+
+    def import_module(module_path):
+        imported.append(module_path)
+        if module_path == "app.ui.status":
+            return FakeRuntimeStatusModule()
+        return SimpleNamespace(render=lambda: rendered.append(module_path))
+
+    monkeypatch.setattr(main, "st", fake_st)
+    monkeypatch.setattr(main.importlib, "import_module", import_module)
+
+    main.render_application()
+
+    assert fake_st.session_state["runtime_status_error"] == "probe failed"
+    assert "runtime_status" not in fake_st.session_state
+    assert "Audio models (PyTorch): unavailable" in fake_st.captions
+    assert "Face models (ONNX Runtime): unavailable" in fake_st.captions
+    assert "Runtime status error: probe failed" in fake_st.captions
+    assert fake_st.button_labels == ["Check runtime"]
+
+    main.render_application()
+
+    assert probe_calls == ["called", "called"]
+    assert fake_st.session_state["runtime_status"] == {"torch": "ok", "face": "ok"}
+    assert "runtime_status_error" not in fake_st.session_state
+    assert imported.count("app.ui.status") == 2
+    assert fake_st.button_labels == ["Check runtime", "Check runtime"]
+    assert fake_st.captions.count("Audio models (PyTorch): ok") == 1
+    assert fake_st.captions.count("Face models (ONNX Runtime): ok") == 1
     assert rendered == ["app.pages.video", "app.pages.video"]
