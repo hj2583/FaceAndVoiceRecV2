@@ -36,6 +36,9 @@ class _FakeStreamlit:
     def set_page_config(self, **kwargs):
         self._events.append(("st.set_page_config", kwargs))
 
+    def set_option(self, name, value):
+        self._events.append(("st.set_option", name, value))
+
     def Page(self, render_fn, *, title, default=False):
         self._events.append(("st.Page", title, default))
         return _FakePage(render_fn, title=title, default=default)
@@ -137,6 +140,7 @@ def test_main_renders_tabs_in_expected_order_with_startup_sequence(monkeypatch):
                 "layout": "wide",
             },
         ),
+        ("st.set_option", "client.showSidebarNavigation", False),
         ("initialize_runtime_paths",),
         ("initialize_application_database",),
         ("st.Page", "AI Face + Active Speaker Recognition", True),

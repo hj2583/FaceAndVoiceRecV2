@@ -23,7 +23,7 @@ Reduce Streamlit startup/rerun work by loading only the selected tab's module an
 
 ## Lazy-Loading Design
 
-`app.main` will import no page modules at module scope. It builds the same seven labels in the same order. When the installed `st.tabs` supports `on_change`, it enables reruns on selection and imports/calls only the active page renderer. If the API is unavailable, the app imports and renders all pages as it does today; the project will not raise its Streamlit minimum solely for this optimization.
+`app.main` will import no page modules at module scope. It builds the same seven labels in the same order. Before constructing navigation it sets Streamlit's scriptable `client.showSidebarNavigation` option to `False`, preventing the conventional `app/pages/` directory from creating duplicate sidebar links. When the installed `st.tabs` supports `on_change="rerun"`, it enables reruns on selection and imports/calls only the active page renderer. If the API is unavailable, the app imports and renders all pages as it does today; the project will not raise its Streamlit minimum solely for this optimization.
 
 The runtime status panel becomes an explicit **Check runtime** action. Before the action, the UI shows no Torch/ONNX probe result and imports neither provider. On click, it calls the existing `get_runtime_status()` once and stores the result in `st.session_state` for subsequent reruns. The FaceIndex stays behind its existing cached getter and is reached only when the Face Database tab is selected.
 

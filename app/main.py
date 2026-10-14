@@ -130,6 +130,7 @@ def main() -> None:
         page_icon="🎥",
         layout="wide",
     )
+    st.set_option("client.showSidebarNavigation", False)
 
     initialize_runtime_paths()
     initialize_application_database()
