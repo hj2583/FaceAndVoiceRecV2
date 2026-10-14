@@ -66,6 +66,29 @@ def test_importing_app_main_is_inert(monkeypatch):
     assert events == []
 
 
+def test_initialize_application_database_caches_init_db(monkeypatch):
+    monkeypatch.delitem(sys.modules, "app.main", raising=False)
+    monkeypatch.delitem(sys.modules, "streamlit", raising=False)
+    main = importlib.import_module("app.main")
+
+    init_calls = []
+    monkeypatch.setattr(main, "init_db", lambda: init_calls.append("init_db"))
+
+    cache_clear = getattr(main.initialize_application_database, "clear", None)
+    if cache_clear is not None:
+        cache_clear()
+
+    try:
+        main.initialize_application_database()
+        main.initialize_application_database()
+    finally:
+        cache_clear = getattr(main.initialize_application_database, "clear", None)
+        if cache_clear is not None:
+            cache_clear()
+
+    assert init_calls == ["init_db"]
+
+
 def test_main_renders_tabs_in_expected_order_with_startup_sequence(monkeypatch):
     main = importlib.import_module("app.main")
 
@@ -75,7 +98,11 @@ def test_main_renders_tabs_in_expected_order_with_startup_sequence(monkeypatch):
     monkeypatch.setattr(main, "st", fake_st)
 
     monkeypatch.setattr(main, "initialize_runtime_paths", lambda: events.append(("initialize_runtime_paths",)))
-    monkeypatch.setattr(main, "init_db", lambda: events.append(("init_db",)))
+    monkeypatch.setattr(
+        main,
+        "initialize_application_database",
+        lambda: events.append(("initialize_application_database",)),
+    )
     monkeypatch.setattr(main.realtime, "render", lambda: events.append(("render.realtime",)))
     monkeypatch.setattr(main.video, "render", lambda: events.append(("render.video",)))
     monkeypatch.setattr(main.face_database, "render", lambda: events.append(("render.face_database",)))
@@ -101,7 +128,7 @@ def test_main_renders_tabs_in_expected_order_with_startup_sequence(monkeypatch):
             },
         ),
         ("initialize_runtime_paths",),
-        ("init_db",),
+        ("initialize_application_database",),
         ("st.Page", "AI Face + Active Speaker Recognition", True),
         ("st.navigation", 1, "AI Face + Active Speaker Recognition", "hidden"),
         ("st.navigation.run", 1),

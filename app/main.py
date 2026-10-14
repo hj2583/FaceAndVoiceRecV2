@@ -30,6 +30,11 @@ from face_voice_rec.config import initialize_runtime_paths
 from face_voice_rec.storage.database import init_db
 
 
+@st.cache_resource
+def initialize_application_database() -> None:
+    init_db()
+
+
 def render_application() -> None:
     st.title("🎥 AI Face + Active Speaker Recognition")
 
@@ -79,7 +84,7 @@ def main() -> None:
     )
 
     initialize_runtime_paths()
-    init_db()
+    initialize_application_database()
 
     navigation = st.navigation(
         [
