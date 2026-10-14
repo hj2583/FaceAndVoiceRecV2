@@ -23,7 +23,7 @@ Reduce Streamlit startup/rerun work by loading only the selected tab's module an
 
 ## Lazy-Loading Design
 
-`app.main` will import no page modules at module scope. It builds the same seven labels in the same order. Before constructing navigation it sets Streamlit's scriptable `client.showSidebarNavigation` option to `False`, preventing the conventional `app/pages/` directory from creating duplicate sidebar links. When the installed `st.tabs` supports `on_change="rerun"`, it enables reruns on selection and imports/calls only the active page renderer. If the API is unavailable, the app imports and renders all pages as it does today; the project will not raise its Streamlit minimum solely for this optimization.
+`app.main` will import no page modules at module scope. It builds the same seven labels in the same order. Before constructing navigation it sets Streamlit's scriptable `client.showSidebarNavigation` option to `False`, preventing the conventional `app/pages/` directory from creating duplicate sidebar links. When the installed `st.tabs` supports `on_change="rerun"`, it imports each page only on first selection, then renders the active and previously visited pages on subsequent reruns so Streamlit widget state remains alive. Unvisited pages stay unloaded. If the API is unavailable, the app imports and renders all pages as it does today; the project will not raise its Streamlit minimum solely for this optimization.
 
 The runtime status panel becomes an explicit **Check runtime** action. Before the action, the UI shows no Torch/ONNX probe result and imports neither provider. On click, it calls the existing `get_runtime_status()` once and stores the result in `st.session_state` for subsequent reruns. The FaceIndex stays behind its existing cached getter and is reached only when the Face Database tab is selected.
 
@@ -37,12 +37,14 @@ Within the Streamlit process, a cached application initialization wrapper calls 
 
 No database schema or recognition policy changes are part of this work.
 
+The legacy file/path migration is serialized across processes with a persistent SQLite lock database under the target `data/` root and the same bounded busy timeout. The migration lock is held across complete recursive preflight, file moves, both markers, and SQLite reference repair. Preflight walks every source descendant even when a destination directory does not exist, rejects source/destination symlinks and symlink ancestors, checks same-filesystem constraints, and rejects conflicts before any move. Marker temp files use unique names and are published without replacing an existing marker. These rules make concurrent migration retryable without overwriting unrelated data.
+
 ## Tests and Validation
 
-- Add a concurrency test using a temporary database and multiple threads that previously reproduced lock/duplicate-column failures; assert every initializer completes and the compatibility backfills are idempotent.
+- Add concurrency tests using a seeded legacy temporary database and multiple threads/processes that reproduce lock/duplicate-column failures during real ALTER/backfill work; assert every initializer completes and backfills preserve existing rows.
 - Add a separate-process initialization test against a temporary database to verify SQLite's busy timeout/write lock behavior beyond the in-process `RLock`.
 - Test that app reruns initialize the database once per Streamlit process while realtime startup still initializes independently.
-- Test selected-tab lazy import/render, older-Streamlit eager fallback, and runtime-status unloaded/loaded states using fakes; no test runs app initialization against the live database.
+- Test selected-tab lazy import/render, retention of widgets for previously visited tabs, older-Streamlit eager fallback, and runtime-status unloaded/loaded states using fakes; no test runs app initialization against the live database.
 - Run focused database/UI tests and the full suite. All database concurrency and migration tests use temporary paths. Do not run Streamlit or migration against the live project data during implementation validation.
 
 ## Out of Scope
