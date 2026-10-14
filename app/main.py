@@ -35,34 +35,6 @@ TAB_PAGES: tuple[tuple[str, str], ...] = (
 )
 
 
-class _LazyPageModule:
-    def __init__(self, module_path: str) -> None:
-        self._module_path = module_path
-
-    def render(self) -> None:
-        importlib.import_module(self._module_path).render()
-
-
-realtime = _LazyPageModule("app.pages.realtime")
-video = _LazyPageModule("app.pages.video")
-face_database = _LazyPageModule("app.pages.face_database")
-audio_logs = _LazyPageModule("app.pages.audio_logs")
-attendance = _LazyPageModule("app.pages.attendance")
-transcripts = _LazyPageModule("app.pages.transcripts")
-voice_enrollment = _LazyPageModule("app.pages.voice_enrollment")
-
-
-_MODULE_NAME_OVERRIDES = {
-    "app.pages.realtime": realtime,
-    "app.pages.video": video,
-    "app.pages.face_database": face_database,
-    "app.pages.audio_logs": audio_logs,
-    "app.pages.attendance": attendance,
-    "app.pages.transcripts": transcripts,
-    "app.pages.voice_enrollment": voice_enrollment,
-}
-
-
 def supports_stateful_tabs(tabs_callable: Callable[..., object]) -> bool:
     try:
         parameters = inspect.signature(tabs_callable).parameters
@@ -86,11 +58,6 @@ def _render_tab_pages(
             page_module.render()
 
 
-def _import_page_module(module_path: str) -> object:
-    # Keep old tests and fallback behavior patchable without eager imports.
-    return _MODULE_NAME_OVERRIDES.get(module_path, importlib.import_module(module_path))
-
-
 @st.cache_resource
 def initialize_application_database() -> None:
     init_db()
@@ -105,6 +72,7 @@ def render_application() -> None:
 
     labels = [label for label, _module_path in TAB_PAGES]
     module_paths = [module_path for _label, module_path in TAB_PAGES]
+    import_module = importlib.import_module
 
     if supports_stateful_tabs(st.tabs):
         tabs = st.tabs(labels, on_change="rerun", key="main-tabs")
@@ -112,7 +80,7 @@ def render_application() -> None:
             tabs,
             module_paths,
             active_only=True,
-            import_module=_import_page_module,
+            import_module=import_module,
         )
     else:
         tabs = st.tabs(labels)
@@ -120,7 +88,7 @@ def render_application() -> None:
             tabs,
             module_paths,
             active_only=False,
-            import_module=_import_page_module,
+            import_module=import_module,
         )
 
 

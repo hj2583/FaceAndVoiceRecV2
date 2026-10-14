@@ -1,4 +1,5 @@
 from contextlib import nullcontext
+from types import SimpleNamespace
 
 import importlib
 import sys
@@ -103,13 +104,16 @@ def test_main_renders_tabs_in_expected_order_with_startup_sequence(monkeypatch):
         "initialize_application_database",
         lambda: events.append(("initialize_application_database",)),
     )
-    monkeypatch.setattr(main.realtime, "render", lambda: events.append(("render.realtime",)))
-    monkeypatch.setattr(main.video, "render", lambda: events.append(("render.video",)))
-    monkeypatch.setattr(main.face_database, "render", lambda: events.append(("render.face_database",)))
-    monkeypatch.setattr(main.audio_logs, "render", lambda: events.append(("render.audio_logs",)))
-    monkeypatch.setattr(main.attendance, "render", lambda: events.append(("render.attendance",)))
-    monkeypatch.setattr(main.transcripts, "render", lambda: events.append(("render.transcripts",)))
-    monkeypatch.setattr(main.voice_enrollment, "render", lambda: events.append(("render.voice_enrollment",)))
+    page_modules = {
+        "app.pages.realtime": SimpleNamespace(render=lambda: events.append(("render.realtime",))),
+        "app.pages.video": SimpleNamespace(render=lambda: events.append(("render.video",))),
+        "app.pages.face_database": SimpleNamespace(render=lambda: events.append(("render.face_database",))),
+        "app.pages.audio_logs": SimpleNamespace(render=lambda: events.append(("render.audio_logs",))),
+        "app.pages.attendance": SimpleNamespace(render=lambda: events.append(("render.attendance",))),
+        "app.pages.transcripts": SimpleNamespace(render=lambda: events.append(("render.transcripts",))),
+        "app.pages.voice_enrollment": SimpleNamespace(render=lambda: events.append(("render.voice_enrollment",))),
+    }
+    monkeypatch.setattr(main.importlib, "import_module", lambda module_path: page_modules[module_path])
     monkeypatch.setattr(
         main,
         "get_runtime_status",

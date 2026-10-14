@@ -41,13 +41,16 @@ def test_stateful_tabs_import_only_the_open_page(monkeypatch):
         "app.pages.voice_enrollment",
     )
     tabs = [FakeTab(module_path == selected) for module_path in module_paths]
+    imported = []
     rendered = []
 
     def import_module(module_path):
+        imported.append(module_path)
         return SimpleNamespace(render=lambda: rendered.append(module_path))
 
     main._render_tab_pages(tabs, module_paths, active_only=True, import_module=import_module)
 
+    assert imported == [selected]
     assert rendered == [selected]
 
 
@@ -108,9 +111,11 @@ def test_render_application_stateful_tabs_import_only_open(monkeypatch):
             events.append(("tabs", list(labels), on_change, key))
             return [FakeTab(index == 1) for index, _ in enumerate(labels)]
 
+    imported = []
     rendered = []
 
     def import_module(module_path):
+        imported.append(module_path)
         return SimpleNamespace(render=lambda: rendered.append(module_path))
 
     monkeypatch.setattr(main, "st", FakeStatefulStreamlit())
@@ -123,6 +128,7 @@ def test_render_application_stateful_tabs_import_only_open(monkeypatch):
     assert events[3][0] == "tabs"
     assert events[3][2] == "rerun"
     assert events[3][3] == "main-tabs"
+    assert imported == ["app.pages.video"]
     assert rendered == ["app.pages.video"]
 
 
