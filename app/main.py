@@ -30,6 +30,7 @@ TAB_PAGES: tuple[tuple[str, str], ...] = (
     ("🔊 Audio Logs", "app.pages.audio_logs"),
     ("✅ Attendance", "app.pages.attendance"),
     ("📝 Transcripts", "app.pages.transcripts"),
+    ("📝 Transcripts", "app.pages.transcripts"),
     ("🎙️ Voice Enrollment", "app.pages.voice_enrollment"),
 )
 
