@@ -772,6 +772,122 @@ def test_reprocessing_replaces_detailed_and_readable_rows_without_duplicates(
     assert json.loads(source_refs) == detailed_ids
 
 
+@pytest.mark.parametrize(
+    "result,expected_status,expected_method,expected_error",
+    [
+        pytest.param(
+            (
+                "foundry",
+                "deployment-alpha",
+                False,
+                None,
+            ),
+            "complete",
+            "foundry:deployment-alpha",
+            None,
+            id="cloud-primary",
+        ),
+        pytest.param(
+            (
+                "ollama",
+                "qwen2.5:7b",
+                False,
+                None,
+            ),
+            "complete",
+            "ollama:qwen2.5:7b",
+            None,
+            id="local-primary",
+        ),
+        pytest.param(
+            (
+                "ollama",
+                "qwen2.5:14b",
+                True,
+                "Foundry request failed (HTTP 429)",
+            ),
+            "complete_local_fallback",
+            "ollama:qwen2.5:14b",
+            "Foundry request failed (HTTP 429)",
+            id="cloud-fallback-to-local",
+        ),
+    ],
+)
+def test_refresh_readable_transcript_persists_refinement_result_provenance(
+    tmp_path,
+    monkeypatch,
+    result,
+    expected_status,
+    expected_method,
+    expected_error,
+):
+    from face_voice_rec.domain.transcription import transcript_refiner
+
+    provider, model, used_local_fallback, fallback_reason = result
+
+    db_path = tmp_path / "meeting.db"
+    monkeypatch.setattr(config, "DB_PATH", db_path)
+    monkeypatch.setattr(database, "DB_PATH", db_path)
+    monkeypatch.setattr(config, "TRANSCRIPTS_DIR", tmp_path / "transcripts")
+    monkeypatch.setattr(config, "TRANSCRIPT_REFINEMENT_ENABLED", True)
+    # Ensure persisted method uses the result payload, not current config.
+    monkeypatch.setattr(config, "MODEL", "configured-cloud-model")
+    monkeypatch.setattr(config, "TRANSCRIPT_REFINEMENT_MODEL", "configured-local-model")
+    database.init_db()
+
+    video_path = tmp_path / "meeting.mp4"
+    video_path.write_bytes(b"video")
+
+    def fake_extract(_video_path, output_path):
+        output_path.parent.mkdir(parents=True, exist_ok=True)
+        output_path.write_bytes(b"audio")
+        return output_path
+
+    monkeypatch.setattr(
+        "face_voice_rec.domain.transcription.transcription_core.extract_audio_from_video",
+        fake_extract,
+    )
+    monkeypatch.setattr(
+        "face_voice_rec.domain.transcription.transcription_core.transcribe_with_diarization",
+        lambda *_args, **_kwargs: [
+            TranscriptionSegment("Alice", 0, 1000, "Hello there.", 0.9),
+        ],
+    )
+    monkeypatch.setattr(
+        transcript_refiner,
+        "refine_transcript",
+        lambda _payload: transcript_refiner.RefinementResult(
+            groups=(transcript_refiner.RefinedGroup((1,), "Hello there."),),
+            speaker_change_recommendations=(),
+            provider=provider,
+            model=model,
+            used_local_fallback=used_local_fallback,
+            fallback_reason=fallback_reason,
+        ),
+    )
+
+    meeting_id = process_meeting_transcription(video_path)
+
+    with database.get_conn() as connection:
+        run = connection.execute(
+            "SELECT status, method, error FROM transcript_refinement_runs WHERE meeting_id=?",
+            (meeting_id,),
+        ).fetchone()
+        readable = connection.execute(
+            "SELECT text, refinement_method, source_segment_ids "
+            "FROM refined_transcription_segments WHERE meeting_id=?",
+            (meeting_id,),
+        ).fetchone()
+        detailed = connection.execute(
+            "SELECT text FROM transcription_segments WHERE meeting_id=?",
+            (meeting_id,),
+        ).fetchall()
+
+    assert run == (expected_status, expected_method, expected_error)
+    assert readable == ("Hello there.", expected_method, "[1]")
+    assert detailed == [("Hello there.",)]
+
+
 def test_ollama_failure_falls_back_without_losing_detailed_transcript(tmp_path, monkeypatch):
     from face_voice_rec.domain.transcription import transcript_refiner
 
@@ -815,13 +931,63 @@ def test_ollama_failure_falls_back_without_losing_detailed_transcript(tmp_path, 
             (meeting_id,),
         ).fetchone()[0]
         run = connection.execute(
-            "SELECT status, error FROM transcript_refinement_runs WHERE meeting_id=?",
+            "SELECT status, method, error FROM transcript_refinement_runs WHERE meeting_id=?",
             (meeting_id,),
         ).fetchone()
 
     assert detailed_count == 1
     assert readable == "Hello there."
-    assert run == ("fallback", "Ollama unavailable")
+    assert run[0] == "fallback"
+    assert run[1] == "deterministic"
+    assert run[2] == "Ollama unavailable"
+
+
+def test_refresh_readable_transcript_empty_meeting_stays_deterministic_without_network(
+    tmp_path,
+    monkeypatch,
+):
+    from face_voice_rec.domain.transcription import transcript_refiner
+
+    db_path = tmp_path / "meeting.db"
+    monkeypatch.setattr(config, "DB_PATH", db_path)
+    monkeypatch.setattr(database, "DB_PATH", db_path)
+    monkeypatch.setattr(config, "TRANSCRIPTS_DIR", tmp_path / "transcripts")
+    monkeypatch.setattr(config, "TRANSCRIPT_REFINEMENT_ENABLED", True)
+    database.init_db()
+
+    with database.get_conn() as connection:
+        connection.execute(
+            "INSERT INTO meetings(video_path, created_at, transcription_status) "
+            "VALUES ('empty.mp4', 'now', 'completed')"
+        )
+        meeting_id = connection.execute(
+            "SELECT meeting_id FROM meetings"
+        ).fetchone()[0]
+
+    called = {"refine": 0}
+
+    def fail_if_called(_segments):
+        called["refine"] += 1
+        raise AssertionError("Refiner should not run when there are no detailed segments")
+
+    monkeypatch.setattr(transcript_refiner, "refine_transcript", fail_if_called)
+
+    count = transcription_core.refresh_readable_transcript(meeting_id, use_llm=True)
+
+    with database.get_conn() as connection:
+        run = connection.execute(
+            "SELECT status, method, error FROM transcript_refinement_runs WHERE meeting_id=?",
+            (meeting_id,),
+        ).fetchone()
+        refined_count = connection.execute(
+            "SELECT COUNT(*) FROM refined_transcription_segments WHERE meeting_id=?",
+            (meeting_id,),
+        ).fetchone()[0]
+
+    assert count == 0
+    assert called["refine"] == 0
+    assert refined_count == 0
+    assert run == ("disabled", "deterministic", None)
 
 
 def test_process_meeting_transcription_does_not_run_english_translation(

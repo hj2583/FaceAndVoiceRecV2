@@ -22,6 +22,15 @@ def _no_disk_video_writes(monkeypatch):
 
 
 @pytest.fixture(autouse=True)
+def _disable_cloud_refinement_by_default(monkeypatch):
+    """Never let a developer's .env send test transcripts to a model service."""
+    from face_voice_rec import config
+
+    monkeypatch.setattr(config, "TRANSCRIPT_REFINEMENT_ENABLED", False)
+    monkeypatch.setattr(config, "TRANSCRIPT_REFINEMENT_USE_CLOUD", False)
+
+
+@pytest.fixture(autouse=True)
 def _isolate_voice_and_transcript_dirs(tmp_path, monkeypatch):
     """Keep unknown-voice files and regenerated transcripts out of the real project folders."""
     from face_voice_rec import config

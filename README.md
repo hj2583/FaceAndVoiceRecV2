@@ -70,9 +70,9 @@ heavily code-switched recordings may still need transcript review.
 ### Optional readable transcript refinement
 
 Transcription always retains the detailed Whisper segments. A separate readable
-version is built from those segments and can be formatted by a local Ollama
-service. Refinement is disabled by default; the deterministic readable view
-still works without Ollama.
+version is built from those segments and can be formatted by an optional LLM
+refiner. Refinement is disabled by default; the deterministic readable view
+still works without any LLM service.
 
 In the UI, the readable view also presents continuous nearby speech as a
 paragraph, even if its detailed source rows have different speaker labels. Such
@@ -80,27 +80,67 @@ a paragraph is marked **Mixed/uncertain attribution** and lists every source
 speaker label; it does not reassign any segment. Use the Detailed view to
 inspect the original labels and timestamps.
 
+The app loads repository-root `.env` values, but existing process environment
+variables always take precedence. After changing refinement settings, restart
+Streamlit so the updated values are loaded.
+
+Use placeholder values (example only):
+
+```dotenv
+TRANSCRIPT_REFINEMENT_ENABLED=true
+TRANSCRIPT_REFINEMENT_USE_CLOUD=true
+ANTHROPIC_API_URL=https://example.services.ai.azure.com/anthropic/v1/messages
+API_KEY=your-foundry-key
+ANTHROPIC_VERSION=2023-06-01
+MODEL=your-deployment-name
+TRANSCRIPT_REFINEMENT_URL=http://localhost:11434
+TRANSCRIPT_REFINEMENT_MODEL=qwen2.5:7b
+TRANSCRIPT_REFINEMENT_TIMEOUT_SECONDS=90
+```
+
+Behavior:
+
+- `TRANSCRIPT_REFINEMENT_ENABLED=false` (default): deterministic readable output only.
+- `TRANSCRIPT_REFINEMENT_ENABLED=true` and `TRANSCRIPT_REFINEMENT_USE_CLOUD=false` (default): local Ollama refinement only.
+- `TRANSCRIPT_REFINEMENT_ENABLED=true` and `TRANSCRIPT_REFINEMENT_USE_CLOUD=true`: cloud Foundry first, then automatic local Ollama fallback, then deterministic fallback if both fail.
+
+If cloud mode is enabled, transcript text (not audio) is sent to the configured
+cloud endpoint. Audio files are never uploaded by this feature. Validation is
+strict: changed/omitted/reordered/invented words are rejected, and grouping
+across speaker changes, overlaps, or long pauses is rejected.
+
+The same privacy rule applies if `TRANSCRIPT_REFINEMENT_URL` points to a
+non-local Ollama service: transcript text is sent to that endpoint. Use only an
+endpoint you trust, and protect the connection because Ollama's default URL uses
+unencrypted HTTP. Keep API keys in `.env` or the process environment; do not
+commit or share them. `API_KEY` and `MODEL` are generic environment-variable
+names, so existing process values override `.env` and must identify the intended
+Foundry key and deployment. Foundry requires an HTTPS endpoint ending in
+`/anthropic/v1/messages` and the deployed model's exact deployment name.
+
+The app persists real refinement attribution for each run (provider and model)
+so historical labels remain accurate even after configuration changes.
+Changing settings does not automatically reprocess old meetings; use the
+refinement action in Meeting Transcripts to regenerate a meeting's readable
+view.
+
 To enable local refinement, install and start Ollama, download a model, then
-start Streamlit with these PowerShell environment settings:
+start Streamlit from the repository root or from `app/`:
 
 ```powershell
 ollama pull qwen2.5:7b
 $env:TRANSCRIPT_REFINEMENT_ENABLED = "1"
 $env:TRANSCRIPT_REFINEMENT_URL = "http://localhost:11434"
 $env:TRANSCRIPT_REFINEMENT_MODEL = "qwen2.5:7b"
-streamlit run app.py
+streamlit run app/main.py
+# or from the app directory:
+# streamlit run main.py
 ```
 
-The URL and model can be changed for another Ollama endpoint or model. Only
-enable a non-local endpoint if you intend to send transcript text to that
-service. The model receives transcript text, not audio, and cannot verify or
-correct spoken words; validation rejects changed, omitted, reordered, or
-invented words and rejects grouping across speaker changes, overlaps, and long
-pauses. Speaker-change suggestions are advisory and never change attribution.
-Failures leave the detailed Whisper transcript intact and show a deterministic
-readable transcript with an error status. The app stores the original Whisper
-text, manually corrected detailed text, and readable output separately so they
-can be compared.
+Speaker-change suggestions are advisory and never change attribution. Failures
+leave the detailed Whisper transcript intact and show a deterministic readable
+fallback. The app stores the original Whisper text, manually corrected detailed
+text, and readable output separately so they can be compared.
 
 ### Participant self-introductions
 
@@ -162,29 +202,9 @@ ffmpeg -version
 4. Launch the app:
 
 ```powershell
-streamlit run Traceback (most recent call last):
-  File "D:\Git\FaceAndVoiceRecV2\src\face_voice_rec\domain\transcription\transcription_core.py", line 962, in refresh_readable_transcript
-    result = transcript_refiner.refine_transcript([
-        {
-    ...<6 lines>...
-        for segment in detailed
-    ])
-  File "D:\Git\FaceAndVoiceRecV2\src\face_voice_rec\domain\transcription\transcript_refiner.py", line 285, in refine_transcript
-    groups, recommendations = _normalize_and_validate_response(
-                              ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~^
-        response,
-        ^^^^^^^^^
-        targets,
-        ^^^^^^^^
-        normalized,
-        ^^^^^^^^^^^
-    )
-    ^
-  File "D:\Git\FaceAndVoiceRecV2\src\face_voice_rec\domain\transcription\transcript_refiner.py", line 194, in _normalize_and_validate_response
-    raise TranscriptRefinementError(
-    ...<2 lines>...
-    )
-face_voice_rec.domain.transcription.transcript_refiner.TranscriptRefinementError: Refinement attempted to merge across a speaker change, overlap, or long pause.py
+streamlit run app/main.py
+# or from app/:
+# streamlit run main.py
 ```
 
 ## Optional GPU setup

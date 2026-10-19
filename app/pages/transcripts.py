@@ -6,6 +6,7 @@ from pathlib import Path
 import pandas as pd
 import streamlit as st
 
+from face_voice_rec import config
 from face_voice_rec.config import DB_PATH, TRANSCRIPT_REFINEMENT_ENABLED
 from face_voice_rec.domain.transcription.transcription_core import (
     SENTENCE_TYPES,
@@ -31,6 +32,40 @@ def _fmt_time(seconds: float) -> str:
     minutes = int(seconds // 60)
     secs = int(seconds % 60)
     return f"{minutes:02d}:{secs:02d}"
+
+
+def _parse_refinement_method(method: str) -> tuple[str, str]:
+    value = str(method or "").strip()
+    if not value:
+        return "unknown", ""
+    if value == "deterministic":
+        return "deterministic", ""
+    provider, _, model = value.partition(":")
+    return provider.strip().lower() or "unknown", model.strip()
+
+
+def _provider_caption(method: str) -> str:
+    provider, model = _parse_refinement_method(method)
+    if provider == "foundry":
+        return f"Cloud Foundry: {model}" if model else "Cloud Foundry"
+    if provider == "ollama":
+        return f"Local Ollama: {model}" if model else "Local Ollama"
+    if provider == "deterministic":
+        return "Deterministic"
+    return f"{provider}: {model}" if model else (method or "Unknown method")
+
+
+def _refinement_status_caption(status: str, method: str) -> str:
+    provider_label = _provider_caption(method)
+    if status == "complete_local_fallback":
+        return f"{provider_label} (cloud fallback)"
+    if status == "disabled":
+        return "Deterministic (LLM disabled)"
+    if status == "fallback":
+        return "Deterministic (refinement failed)"
+    if status == "complete":
+        return provider_label
+    return f"{provider_label} ({status})"
 
 
 def render() -> None:
@@ -183,31 +218,49 @@ def render() -> None:
         st.rerun()
 
     if TRANSCRIPT_REFINEMENT_ENABLED:
+        if config.TRANSCRIPT_REFINEMENT_USE_CLOUD:
+            action_label = (
+                "Refine readable transcript with cloud Foundry "
+                "(fallback to local Ollama)"
+            )
+            spinner_label = (
+                "Asking the configured cloud Foundry model to format the transcript "
+                "(local fallback on failure)..."
+            )
+        else:
+            action_label = "Refine readable transcript with local Ollama"
+            spinner_label = (
+                "Asking the configured local Ollama model to format the transcript..."
+            )
         if st.button(
-            "Refine readable transcript with local Ollama",
+            action_label,
             key=f"refine_readable_{selected_id}",
         ):
-            with st.spinner("Asking the configured local Ollama model to format the transcript..."):
+            with st.spinner(spinner_label):
                 refresh_readable_transcript(selected_id, use_llm=True)
             st.rerun()
     else:
+        action_hint = (
+            "cloud Foundry (with local fallback)"
+            if config.TRANSCRIPT_REFINEMENT_USE_CLOUD
+            else "local Ollama"
+        )
         st.caption(
-            "Local LLM refinement is disabled. Set TRANSCRIPT_REFINEMENT_ENABLED=1 "
-            "before starting the app to enable the Ollama action."
+            "Transcript refinement is disabled. Set TRANSCRIPT_REFINEMENT_ENABLED=1 "
+            f"before starting the app to enable the {action_hint} action."
         )
 
     if refinement_run:
         status, method, recommendations_json, refinement_error = refinement_run
-        status_label = (
-            "available (local LLM disabled)"
-            if status == "disabled"
-            else status
-        )
-        st.caption(f"Readable version: {status_label} · {method}")
+        st.caption(f"Readable version: {_refinement_status_caption(status, method)}")
         if status == "fallback" and refinement_error:
             st.warning(
-                f"LLM refinement failed; the deterministic version is shown. "
-                f"Details: {refinement_error}"
+                "Refinement failed; the deterministic version is shown. "
+                f"Reason: {refinement_error}"
+            )
+        elif status == "complete_local_fallback" and refinement_error:
+            st.info(
+                f"Cloud fallback reason: {refinement_error}"
             )
         try:
             recommendations = json.loads(recommendations_json or "[]")

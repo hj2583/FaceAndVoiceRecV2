@@ -64,3 +64,5 @@ data/.legacy_migration_lock.sqlite-shm
 *.db-shm
 *.db-wal
 *.log
+
+.env

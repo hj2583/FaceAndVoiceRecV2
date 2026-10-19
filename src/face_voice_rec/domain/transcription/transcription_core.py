@@ -899,6 +899,11 @@ def _person_id_for_label(connection, label: str) -> Optional[int]:
     return int(row[0]) if row else None
 
 
+def _refinement_failure_category(error: BaseException) -> str:
+    name = type(error).__name__
+    return re.sub(r"[^a-z0-9]+", "_", name.lower()).strip("_") or "refinement_error"
+
+
 def refresh_readable_transcript(meeting_id: int, use_llm: Optional[bool] = None) -> int:
     """Build a readable view without changing detailed source transcript rows."""
     with sqlite3.connect(config.DB_PATH) as connection:
@@ -956,6 +961,7 @@ def refresh_readable_transcript(meeting_id: int, use_llm: Optional[bool] = None)
         config.TRANSCRIPT_REFINEMENT_ENABLED if use_llm is None else use_llm
     )
     if should_use_llm and detailed:
+        transcript_refiner = None
         try:
             from face_voice_rec.domain.transcription import transcript_refiner
 
@@ -988,17 +994,34 @@ def refresh_readable_transcript(meeting_id: int, use_llm: Optional[bool] = None)
                 )
                 for group in result.groups
             ])
-            method = f"ollama:{config.TRANSCRIPT_REFINEMENT_MODEL}"
-            status = "complete"
+            result_provider = (result.provider or "").strip().lower()
+            result_model = (result.model or "").strip()
+            if result_provider in {"foundry", "ollama"} and result_model:
+                method = f"{result_provider}:{result_model}"
+            else:
+                method = "deterministic"
+            status = (
+                "complete_local_fallback"
+                if bool(result.used_local_fallback)
+                else "complete"
+            )
             recommendations = result.speaker_change_recommendations
+            error_message = result.fallback_reason if result.used_local_fallback else None
         except (OSError, RuntimeError, ValueError) as error:
-            logger.exception(
-                "Optional transcript refinement failed for meeting %s; "
+            category = (
+                str(error)[:500]
+                if transcript_refiner is not None
+                and isinstance(error, transcript_refiner.TranscriptRefinementError)
+                else _refinement_failure_category(error)
+            )
+            logger.warning(
+                "Optional transcript refinement failed for meeting %s (%s); "
                 "keeping the deterministic readable transcript",
                 meeting_id,
+                category,
             )
             status = "fallback"
-            error_message = str(error)[:2000]
+            error_message = category
 
     _persist_readable_transcript(
         meeting_id,
