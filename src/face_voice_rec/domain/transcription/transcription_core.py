@@ -20,6 +20,7 @@ from face_voice_rec.domain.transcription.subtitle_renderer import SubtitleWord
 from face_voice_rec.domain.voice import voice_core
 from face_voice_rec.domain.voice.audio_core import detect_speech_segments
 from face_voice_rec.pipelines.video.ffmpeg_utils import find_ffmpeg
+from face_voice_rec.storage import database
 
 
 logger = logging.getLogger(__name__)
@@ -718,7 +719,7 @@ def transcribe_with_diarization(
 
 def resolve_speaker_name(label):
     """Look up person_id for a speaker label that matches an enrolled person's name."""
-    with sqlite3.connect(config.DB_PATH) as connection:
+    with database.get_conn() as connection:
         row = connection.execute(
             "SELECT person_id FROM persons WHERE name=?",
             (label,),
@@ -769,8 +770,7 @@ def save_transcripts(
         paths[label] = path
 
     if meeting_id is not None:
-        with sqlite3.connect(config.DB_PATH) as connection:
-            connection.execute("PRAGMA foreign_keys=ON")
+        with database.get_conn() as connection:
             connection.execute(
                 "DELETE FROM transcription_segments WHERE meeting_id=?",
                 (meeting_id,),
@@ -831,8 +831,7 @@ def _persist_readable_transcript(
     recommendations=(),
     error: Optional[str] = None,
 ) -> None:
-    with sqlite3.connect(config.DB_PATH) as connection:
-        connection.execute("PRAGMA foreign_keys=ON")
+    with database.get_conn() as connection:
         connection.execute(
             "DELETE FROM refined_transcription_segments WHERE meeting_id=?",
             (meeting_id,),
@@ -906,8 +905,7 @@ def _refinement_failure_category(error: BaseException) -> str:
 
 def refresh_readable_transcript(meeting_id: int, use_llm: Optional[bool] = None) -> int:
     """Build a readable view without changing detailed source transcript rows."""
-    with sqlite3.connect(config.DB_PATH) as connection:
-        connection.row_factory = sqlite3.Row
+    with database.get_conn(row_factory=sqlite3.Row) as connection:
         rows = connection.execute(
             """
             SELECT segment_id, speaker_label, start_ms, end_ms, text, confidence,
@@ -1065,8 +1063,7 @@ def process_meeting_transcription(
     if not video_path.exists():
         raise FileNotFoundError(video_path)
 
-    with sqlite3.connect(config.DB_PATH) as connection:
-        connection.execute("PRAGMA foreign_keys=ON")
+    with database.get_conn() as connection:
         connection.execute(
             """
             INSERT INTO meetings(video_path, created_at, transcription_status)
@@ -1114,7 +1111,7 @@ def process_meeting_transcription(
                 meeting_id,
             )
 
-        with sqlite3.connect(config.DB_PATH) as connection:
+        with database.get_conn() as connection:
             connection.execute(
                 """
                 UPDATE meetings
@@ -1126,7 +1123,7 @@ def process_meeting_transcription(
             )
         return int(meeting_id)
     except Exception as error:
-        with sqlite3.connect(config.DB_PATH) as connection:
+        with database.get_conn() as connection:
             connection.execute(
                 """
                 UPDATE meetings

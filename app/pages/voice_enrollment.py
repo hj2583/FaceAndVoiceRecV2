@@ -292,6 +292,9 @@ def render() -> None:
                                         embedding_id,
                                         persons[replacement_name],
                                     ):
+                                        voice_core.index_voice_enrollments_for_person(
+                                            persons[replacement_name]
+                                        )
                                         st.session_state.pop(
                                             "editing_voice_enrollment_id",
                                             None,
@@ -412,6 +415,7 @@ def render() -> None:
                                 person_id=person_id,
                                 new_person_name=new_name if assignment_kind == "Create new person" else None,
                             )
+                            voice_core.index_voice_enrollments_for_person(resolved_id)
                             resolved_name = next(
                                 name
                                 for person_id, name, _created_at, _updated_at in list_persons()

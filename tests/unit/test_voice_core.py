@@ -1,15 +1,83 @@
 import json
 import numpy as np
 from pathlib import Path
+from qdrant_client import QdrantClient
 
 from face_voice_rec import config
 from face_voice_rec.storage import database
 from face_voice_rec.domain.voice import voice_core
+from face_voice_rec.storage.qdrant_store import QdrantVectorStore
 
 
 def _setup_database(tmp_path, monkeypatch):
     monkeypatch.setattr(database, "DB_PATH", tmp_path / "faces.db")
     database.init_db()
+    client = QdrantClient(":memory:")
+    vector_store = QdrantVectorStore(client)
+    vector_store.ensure_collection(config.QDRANT_FACE_COLLECTION, config.EMBEDDING_DIM)
+    vector_store.ensure_collection(
+        config.QDRANT_VOICE_COLLECTION,
+        config.VOICE_EMBEDDING_DIM,
+    )
+    monkeypatch.setattr(voice_core, "get_qdrant_vector_store", lambda: vector_store)
+    original_add_voice_embedding = database.add_voice_embedding
+
+    def add_voice_embedding_and_index(person_id, embedding_path, quality=0.0, audio_path=None):
+        embedding_id = original_add_voice_embedding(
+            person_id,
+            embedding_path,
+            quality=quality,
+            audio_path=audio_path,
+        )
+        try:
+            embedding = np.load(embedding_path)
+            voice_core.index_enrolled_voice_embedding(
+                embedding_id,
+                person_id,
+                quality,
+                embedding,
+            )
+        except (OSError, ValueError):
+            pass
+        return embedding_id
+
+    monkeypatch.setattr(database, "add_voice_embedding", add_voice_embedding_and_index)
+    original_add_unknown_voice_sample = database.add_unknown_voice_sample
+
+    def add_unknown_voice_sample_and_index(
+        unknown_voice_id,
+        embedding_path,
+        quality=0.0,
+        **kwargs,
+    ):
+        sample_id = original_add_unknown_voice_sample(
+            unknown_voice_id,
+            embedding_path,
+            quality=quality,
+            **kwargs,
+        )
+        try:
+            embedding = np.load(embedding_path)
+            voice_core.index_unknown_voice_sample(
+                sample_id,
+                unknown_voice_id,
+                quality,
+                embedding,
+            )
+        except (OSError, ValueError):
+            pass
+        return sample_id
+
+    monkeypatch.setattr(
+        database,
+        "add_unknown_voice_sample",
+        add_unknown_voice_sample_and_index,
+    )
+    monkeypatch.setattr(
+        voice_core,
+        "add_unknown_voice_sample",
+        add_unknown_voice_sample_and_index,
+    )
 
 
 def _unit(index):

@@ -11,7 +11,8 @@ from face_voice_rec.config import (
     EMBEDDING_DIM,
     FACE_UPSCALE_TARGET_SIZE,
     FACE_UPSCALE_THRESHOLD,
-    INDEX_PATH,
+    QDRANT_FACE_COLLECTION,
+    QDRANT_FACE_COLLECTION,
     RECOGNITION_THRESHOLD,
     UNKNOWN_MATCH_THRESHOLD,
 )
@@ -23,6 +24,12 @@ from face_voice_rec.storage.database import (
     list_embeddings,
     list_unknown_samples_with_embeddings,
 )
+from face_voice_rec.storage.qdrant_store import (
+    embedding_point_id,
+    get_qdrant_vector_store,
+    unknown_point_id,
+)
+from qdrant_client import models
 from face_voice_rec.domain.face.face_backend import get_face_backend
 
 logging.basicConfig(
@@ -177,147 +184,58 @@ def load_or_extract_embedding(embedding_path, image_path):
 
 
 class FaceIndex:
-    """
-    Small/medium face database index implemented with NumPy.
-    This deliberately replaces FAISS to avoid the Windows _swigfaiss DLL issue.
-    """
+    """Qdrant-backed face search with the existing ambiguity policy."""
 
-    def __init__(self):
-        self.lock = threading.RLock()
-        self.ids = np.empty((0,), dtype=np.int64)
-        self.embeddings = np.empty((0, EMBEDDING_DIM), dtype=np.float32)
-        self.reload()
+    def __init__(self, vector_store=None):
+        self._vector_store = vector_store or get_qdrant_vector_store()
 
     def reload(self):
-        with self.lock:
-            if INDEX_PATH.exists():
-                try:
-                    data = np.load(INDEX_PATH, allow_pickle=True)
-                    ids = np.asarray(data["ids"], dtype=np.int64)
-                    embeddings = np.asarray(data["embeddings"], dtype=np.float32)
-
-                    if embeddings.ndim != 2 or embeddings.shape[1] != EMBEDDING_DIM:
-                        raise ValueError("Invalid embedding dimensions")
-
-                    if len(ids) != len(embeddings):
-                        raise ValueError("Index ids/embeddings length mismatch")
-
-                    self.ids = ids
-                    self.embeddings = embeddings
-                    return
-                except Exception:
-                    logging.exception("Could not load NumPy face index; rebuilding.")
-
-            self.rebuild()
+        """Compatibility no-op; Qdrant is queried directly for every search."""
 
     def rebuild(self):
-        rows = list_embeddings()
-        ids = []
-        embeddings = []
-
-        for embedding_id, _person_id, _name, embedding_path, _image_path, _quality in rows:
-            path = Path(embedding_path)
-            if not path.exists():
-                continue
-
-            try:
-                emb = _load_embedding_file(path)
-                emb = _normalize(emb)
-                if emb is None or len(emb) != EMBEDDING_DIM:
-                    continue
-
-                ids.append(int(embedding_id))
-                embeddings.append(emb)
-            except Exception:
-                logging.exception("Failed loading embedding: %s", path)
-
-        with self.lock:
-            self.ids = np.asarray(ids, dtype=np.int64)
-            if embeddings:
-                self.embeddings = np.vstack(embeddings).astype(np.float32)
-            else:
-                self.embeddings = np.empty((0, EMBEDDING_DIM), dtype=np.float32)
-
-            self._save_locked()
-
-    def _save_locked(self):
-        temp = INDEX_PATH.with_suffix(".tmp.npz")
-        np.savez_compressed(
-            temp,
-            ids=self.ids,
-            embeddings=self.embeddings,
-        )
-        os.replace(temp, INDEX_PATH)
-
-    def add(self, embedding_id, embedding):
-        emb = _normalize(embedding)
-        if emb is None:
-            raise ValueError("Invalid embedding")
-
-        with self.lock:
-            self.ids = np.append(self.ids, int(embedding_id))
-            if len(self.embeddings) == 0:
-                self.embeddings = emb.reshape(1, -1)
-            else:
-                self.embeddings = np.vstack([self.embeddings, emb])
-            self._save_locked()
+        """Compatibility no-op; use the validated backfill for repair/sync."""
 
     def search(self, query_embedding, threshold=RECOGNITION_THRESHOLD):
         query = _normalize(query_embedding)
         if query is None:
             return None
+        groups = self._vector_store.search_grouped(
+            QDRANT_FACE_COLLECTION,
+            query,
+            group_by="person_id",
+            limit=2,
+            query_filter=models.Filter(
+                must=[
+                    models.FieldCondition(
+                        key="record_type",
+                        match=models.MatchValue(value="enrolled_embedding"),
+                    ),
+                    models.FieldCondition(
+                        key="modality",
+                        match=models.MatchValue(value="face"),
+                    ),
+                ]
+            ),
+        )
+        if not groups or not groups[0].hits:
+            return None
 
-        with self.lock:
-            if len(self.ids) == 0:
-                return None
-
-            similarities = self.embeddings @ query
-            order = np.argsort(-similarities)
-
-            best_idx = int(order[0])
-            best_score = float(similarities[best_idx])
-
-            embedding_ids = [int(self.ids[index]) for index in order]
-            placeholders = ",".join("?" for _ in embedding_ids)
-            with get_conn() as conn:
-                person_rows = conn.execute(
-                    "SELECT embedding_id, person_id "
-                    "FROM face_embeddings "
-                    f"WHERE embedding_id IN ({placeholders})",
-                    embedding_ids,
-                ).fetchall()
-
-            person_by_embedding = {
-                int(embedding_id): int(person_id)
-                for embedding_id, person_id in person_rows
-            }
-            best_person_id = person_by_embedding.get(
-                int(self.ids[best_idx]),
-                int(self.ids[best_idx]),
-            )
-
-            second_score = -1.0
-            for candidate_idx in order[1:]:
-                candidate_id = int(self.ids[candidate_idx])
-                candidate_person_id = person_by_embedding.get(
-                    candidate_id,
-                    candidate_id,
-                )
-                if candidate_person_id != best_person_id:
-                    second_score = float(similarities[candidate_idx])
-                    break
-
-            if best_score < threshold:
-                return None
-
-            if second_score >= 0.0 and (best_score - second_score) < AMBIGUITY_MARGIN:
-                return None
-
-            return {
-                "embedding_id": int(self.ids[best_idx]),
-                "similarity": best_score,
-                "second_similarity": second_score,
-            }
+        best = groups[0].hits[0]
+        best_score = float(best.score)
+        second_score = (
+            float(groups[1].hits[0].score)
+            if len(groups) > 1 and groups[1].hits
+            else -1.0
+        )
+        if best_score < threshold:
+            return None
+        if second_score >= 0.0 and best_score - second_score < AMBIGUITY_MARGIN:
+            return None
+        return {
+            "embedding_id": int(best.payload["embedding_id"]),
+            "similarity": best_score,
+            "second_similarity": second_score,
+        }
 
 
 def save_embedding_for_person(person_name, embedding, image_path=None, quality=0.0):
@@ -358,6 +276,19 @@ def save_embedding_for_person(person_name, embedding, image_path=None, quality=0
             (str(final_path), embedding_id),
         )
 
+    get_qdrant_vector_store().upsert(
+        QDRANT_FACE_COLLECTION,
+        embedding_point_id("face", embedding_id),
+        normalized_embedding,
+        {
+            "record_type": "enrolled_embedding",
+            "modality": "face",
+            "embedding_id": int(embedding_id),
+            "person_id": int(person_id),
+            "quality": float(quality or 0.0),
+        },
+    )
+
     return person_id, embedding_id
 
 def find_matching_unknown(query_embedding):
@@ -385,55 +316,34 @@ def find_matching_unknown(query_embedding):
     if not rows:
         return None
 
-    scores = []
+    points = get_qdrant_vector_store().search(
+        QDRANT_FACE_COLLECTION,
+        query,
+        limit=2,
+        query_filter=models.Filter(
+            must=[
+                models.FieldCondition(
+                    key="record_type",
+                    match=models.MatchValue(value="unknown_sample"),
+                ),
+                models.FieldCondition(
+                    key="modality",
+                    match=models.MatchValue(value="face"),
+                ),
+                models.FieldCondition(
+                    key="unknown_id",
+                    match=models.MatchAny(any=sorted({int(row[1]) for row in rows})),
+                ),
+            ]
+        ),
+    )
 
-    for sample_id, unknown_id, embedding_path, quality in rows:
-
-        path = Path(embedding_path)
-
-        if not path.exists():
-            continue
-
-        try:
-            stored_embedding = _load_embedding_file(path)
-            stored_embedding = _normalize(stored_embedding)
-
-            if stored_embedding is None:
-                continue
-
-            similarity = float(
-                np.dot(query, stored_embedding)
-            )
-
-            scores.append(
-                (
-                    similarity,
-                    int(unknown_id),
-                    int(sample_id),
-                )
-            )
-
-        except Exception:
-            logging.exception(
-                "Failed loading unknown embedding: %s",
-                path,
-            )
-
-    if not scores:
+    if not points:
         return None
 
-    scores.sort(
-        key=lambda x: x[0],
-        reverse=True,
-    )
-
-    best_similarity, best_unknown_id, best_sample_id = scores[0]
-
-    second_similarity = (
-        scores[1][0]
-        if len(scores) > 1
-        else -1.0
-    )
+    best = points[0]
+    best_similarity = float(best.score)
+    second_similarity = float(points[1].score) if len(points) > 1 else -1.0
 
     # Not similar enough
     if best_similarity < UNKNOWN_MATCH_THRESHOLD:
@@ -441,7 +351,7 @@ def find_matching_unknown(query_embedding):
 
     # Too ambiguous
     if (
-        len(scores) > 1
+        len(points) > 1
         and (best_similarity - second_similarity) < 0.03
     ):
         logging.info(
@@ -453,10 +363,29 @@ def find_matching_unknown(query_embedding):
         return None
 
     return {
-        "unknown_id": best_unknown_id,
+        "unknown_id": int(best.payload["unknown_id"]),
         "similarity": best_similarity,
-        "sample_id": best_sample_id,
+        "sample_id": int(best.payload["sample_id"]),
     }
+
+
+def index_unknown_face_sample(sample_id, unknown_id, quality, embedding):
+    """Store a captured unresolved face embedding in Qdrant."""
+    vector = _normalize(embedding)
+    if vector is None or vector.shape[0] != EMBEDDING_DIM:
+        raise ValueError("Invalid face embedding")
+    get_qdrant_vector_store().upsert(
+        QDRANT_FACE_COLLECTION,
+        unknown_point_id("face", int(sample_id)),
+        vector,
+        {
+            "record_type": "unknown_sample",
+            "modality": "face",
+            "sample_id": int(sample_id),
+            "unknown_id": int(unknown_id),
+            "quality": float(quality or 0.0),
+        },
+    )
 
 def register_unknown(
     label,

@@ -50,6 +50,7 @@ from face_voice_rec.storage.database import (
     log_recognition,
     record_attendance_event,
 )
+from face_voice_rec.storage import database
 
 from face_voice_rec.domain.face.face_core import (
     FaceIndex,
@@ -57,6 +58,7 @@ from face_voice_rec.domain.face.face_core import (
     face_quality,
     register_unknown,
     find_matching_unknown,
+    index_unknown_face_sample,
 )
 
 from face_voice_rec.domain.face.tracking import (
@@ -1030,7 +1032,7 @@ def run(
                                     ),
                                 )
 
-                                add_unknown_sample(
+                                sample_id = add_unknown_sample(
                                     unknown_id=(
                                         track.unknown_id
                                     ),
@@ -1041,6 +1043,12 @@ def run(
                                         embedding_path
                                     ),
                                     quality=quality,
+                                )
+                                index_unknown_face_sample(
+                                    sample_id,
+                                    track.unknown_id,
+                                    quality,
+                                    track.embedding,
                                 )
 
                                 track.unknown_samples += 1
@@ -1107,7 +1115,7 @@ def run(
                                     "Permanent attendance validation error"
                                 )
                                 attendance_logged_pairs.add(attendance_pair)
-                            except sqlite3.IntegrityError as exc:
+                            except database.INTEGRITY_ERRORS as exc:
                                 if "FOREIGN KEY" in str(exc).upper():
                                     logging.exception(
                                         "Permanent attendance foreign key error"

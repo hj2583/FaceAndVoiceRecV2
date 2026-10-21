@@ -9,6 +9,12 @@ from face_voice_rec import config
 from face_voice_rec.storage import database
 
 
+def _index_voice_profile(person_id: int) -> None:
+    from face_voice_rec.domain.voice.voice_core import index_voice_enrollments_for_person
+
+    index_voice_enrollments_for_person(person_id)
+
+
 logger = logging.getLogger(__name__)
 
 _WORD = r"[^\W\d_][\w’'-]*"
@@ -245,7 +251,7 @@ def process_meeting_introductions(
     speech_events: list[dict] | None = None,
 ) -> list[dict]:
     """Detect introductions, link reliable voice identity, and keep uncertainty pending."""
-    with sqlite3.connect(config.DB_PATH) as connection:
+    with database.get_conn() as connection:
         rows = connection.execute(
             """
             SELECT segment_id, speaker_label, start_ms, end_ms, text
@@ -337,7 +343,7 @@ def process_meeting_introductions(
             status = "pending_audio_face_conflict"
         elif face_person_id is not None:
             face_person_id = int(face_person_id)
-            with sqlite3.connect(config.DB_PATH) as connection:
+            with database.get_conn() as connection:
                 face_person = connection.execute(
                     "SELECT name FROM persons WHERE person_id=?",
                     (face_person_id,),
@@ -360,6 +366,7 @@ def process_meeting_introductions(
                             voice_unknown_id,
                             person_id=face_person_id,
                         )
+                        _index_voice_profile(person_id)
                         status = "voice_enrolled_face_matched"
                         changed_transcript = True
                     except (FileNotFoundError, ValueError, OSError, sqlite3.Error) as error:
@@ -411,7 +418,7 @@ def process_meeting_introductions(
                 status = "pending_identity_conflict"
                 person_id = None
         elif voice_person_id is not None:
-            with sqlite3.connect(config.DB_PATH) as connection:
+            with database.get_conn() as connection:
                 voice_person = connection.execute(
                     "SELECT name FROM persons WHERE person_id=?",
                     (voice_person_id,),
@@ -440,6 +447,7 @@ def process_meeting_introductions(
                     voice_unknown_id,
                     person_id=existing_name[0],
                 )
+                _index_voice_profile(person_id)
                 status = "voice_enrolled_face_pending"
                 changed_transcript = True
             except (FileNotFoundError, ValueError, OSError, sqlite3.Error) as error:
@@ -457,6 +465,7 @@ def process_meeting_introductions(
                     voice_unknown_id,
                     new_person_name=introduction.name,
                 )
+                _index_voice_profile(person_id)
                 status = "voice_enrolled_face_pending"
                 changed_transcript = True
             except (FileNotFoundError, ValueError, OSError, sqlite3.Error) as error:

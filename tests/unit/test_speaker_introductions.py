@@ -1,7 +1,11 @@
 import numpy as np
+from qdrant_client import QdrantClient
 
 from face_voice_rec import config
 from face_voice_rec.storage import database
+from face_voice_rec.domain.face import face_core
+from face_voice_rec.domain.voice import voice_core
+from face_voice_rec.storage.qdrant_store import QdrantVectorStore
 from face_voice_rec.domain.transcription.speaker_introductions import (
     extract_self_introductions,
     process_meeting_introductions,
@@ -13,6 +17,15 @@ def _setup_database(tmp_path, monkeypatch):
     monkeypatch.setattr(database, "DB_PATH", db_path)
     monkeypatch.setattr(config, "DB_PATH", db_path)
     monkeypatch.setattr(config, "TRANSCRIPTS_DIR", tmp_path / "transcripts")
+    vector_client = QdrantClient(":memory:")
+    vector_store = QdrantVectorStore(vector_client)
+    vector_store.ensure_collection(config.QDRANT_FACE_COLLECTION, config.EMBEDDING_DIM)
+    vector_store.ensure_collection(
+        config.QDRANT_VOICE_COLLECTION,
+        config.VOICE_EMBEDDING_DIM,
+    )
+    monkeypatch.setattr(face_core, "get_qdrant_vector_store", lambda: vector_store)
+    monkeypatch.setattr(voice_core, "get_qdrant_vector_store", lambda: vector_store)
     database.init_db()
     with database.get_conn() as conn:
         conn.execute(
@@ -22,6 +35,8 @@ def _setup_database(tmp_path, monkeypatch):
             """,
             (database.utc_now(),),
         )
+
+
         return int(
             conn.execute(
                 "SELECT meeting_id FROM meetings WHERE video_path='meeting.mp4'"

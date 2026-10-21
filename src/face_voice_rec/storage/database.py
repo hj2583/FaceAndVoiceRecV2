@@ -1,6 +1,7 @@
 import logging
 import json
 import math
+import re
 import sqlite3
 import threading
 from pathlib import Path
@@ -9,6 +10,9 @@ from datetime import datetime, timezone
 from numbers import Integral, Real
 from typing import Mapping, Sequence
 
+import psycopg
+from psycopg.rows import dict_row
+
 from face_voice_rec import config
 from face_voice_rec.config import DB_PATH
 
@@ -16,6 +20,92 @@ from face_voice_rec.config import DB_PATH
 logger = logging.getLogger(__name__)
 
 _DB_LOCK = threading.RLock()
+INTEGRITY_ERRORS = (sqlite3.IntegrityError, psycopg.IntegrityError)
+
+
+def _postgres_sql(statement):
+    """Translate this repository's qmark parameters and SQLite ignore inserts."""
+    ignore_conflicts = re.match(
+        r"^(\s*)INSERT\s+OR\s+IGNORE\s+INTO\b",
+        statement,
+        flags=re.IGNORECASE,
+    )
+    if ignore_conflicts:
+        statement = re.sub(
+            r"^(\s*)INSERT\s+OR\s+IGNORE\s+INTO\b",
+            r"\1INSERT INTO",
+            statement,
+            count=1,
+            flags=re.IGNORECASE,
+        )
+
+    translated = []
+    in_single_quote = False
+    in_double_quote = False
+    index = 0
+    while index < len(statement):
+        character = statement[index]
+        if character == "'" and not in_double_quote:
+            translated.append(character)
+            if in_single_quote and index + 1 < len(statement) and statement[index + 1] == "'":
+                translated.append("'")
+                index += 2
+                continue
+            in_single_quote = not in_single_quote
+        elif character == '"' and not in_single_quote:
+            translated.append(character)
+            if in_double_quote and index + 1 < len(statement) and statement[index + 1] == '"':
+                translated.append('"')
+                index += 2
+                continue
+            in_double_quote = not in_double_quote
+        elif character == "?" and not in_single_quote and not in_double_quote:
+            translated.append("%s")
+        else:
+            translated.append(character)
+        index += 1
+
+    statement = "".join(translated)
+    if ignore_conflicts and "ON CONFLICT" not in statement.upper():
+        statement = statement.rstrip().rstrip(";") + " ON CONFLICT DO NOTHING"
+    return statement
+
+
+class _PostgresConnection:
+    def __init__(self, connection):
+        self._connection = connection
+
+    def execute(self, statement, parameters=None):
+        return self._connection.execute(_postgres_sql(statement), parameters)
+
+    def executemany(self, statement, parameters):
+        return self._connection.executemany(_postgres_sql(statement), parameters)
+
+    def commit(self):
+        self._connection.commit()
+
+    def rollback(self):
+        self._connection.rollback()
+
+    def close(self):
+        self._connection.close()
+
+
+def _insert_id(connection, statement, parameters, column_name):
+    if isinstance(connection, _PostgresConnection):
+        statement = statement.rstrip().rstrip(";") + f" RETURNING {column_name}"
+        row = connection.execute(statement, parameters).fetchone()
+        return int(row[0])
+    cursor = connection.execute(statement, parameters)
+    return int(cursor.lastrowid)
+
+
+def _postgres_dsn():
+    return config.DATABASE_URL.replace(
+        "postgresql+psycopg://",
+        "postgresql://",
+        1,
+    )
 
 
 def utc_now():
@@ -341,13 +431,38 @@ def init_db():
 
 
 @contextmanager
-def get_conn():
+def get_conn(*, row_factory=None):
+    if config.DATABASE_URL:
+        postgres_row_factory = dict_row if row_factory is sqlite3.Row else None
+        connection = psycopg.connect(
+            _postgres_dsn(),
+            row_factory=postgres_row_factory,
+        )
+        adapted_connection = _PostgresConnection(connection)
+        try:
+            yield adapted_connection
+            adapted_connection.commit()
+        except Exception:
+            adapted_connection.rollback()
+            raise
+        finally:
+            adapted_connection.close()
+        return
+
     with _DB_LOCK:
-        conn = sqlite3.connect(DB_PATH)
+        conn = sqlite3.connect(
+            DB_PATH,
+            timeout=config.DB_BUSY_TIMEOUT_SECONDS,
+        )
+        if row_factory is not None:
+            conn.row_factory = row_factory
         conn.execute("PRAGMA foreign_keys=ON")
         try:
             yield conn
             conn.commit()
+        except Exception:
+            conn.rollback()
+            raise
         finally:
             conn.close()
 
@@ -463,7 +578,8 @@ def _regenerate_meeting_transcripts(meeting_ids):
 
 def add_embedding(person_id, embedding_path, image_path=None, quality=0.0):
     with get_conn() as conn:
-        cur = conn.execute(
+        return _insert_id(
+            conn,
             """
             INSERT INTO face_embeddings(
                 person_id, embedding_path, image_path, quality, created_at
@@ -477,12 +593,13 @@ def add_embedding(person_id, embedding_path, image_path=None, quality=0.0):
                 float(quality),
                 utc_now(),
             ),
+            "embedding_id",
         )
-        return int(cur.lastrowid)
 
 def create_unknown(label, image_path, embedding_path):
     with get_conn() as conn:
-        cur = conn.execute(
+        return _insert_id(
+            conn,
             """
             INSERT INTO unknown_tracks(
                 label, image_path, embedding_path, created_at
@@ -490,8 +607,8 @@ def create_unknown(label, image_path, embedding_path):
             VALUES (?, ?, ?, ?)
             """,
             (label, str(image_path), str(embedding_path), utc_now()),
+            "unknown_id",
         )
-        return int(cur.lastrowid)
 
 def add_unknown_sample(
     unknown_id,
@@ -501,7 +618,8 @@ def add_unknown_sample(
     angle_score=0.0,
 ):
     with get_conn() as conn:
-        cur = conn.execute(
+        return _insert_id(
+            conn,
             """
             INSERT INTO unknown_samples(
                 unknown_id,
@@ -521,9 +639,8 @@ def add_unknown_sample(
                 float(angle_score),
                 utc_now(),
             ),
+            "sample_id",
         )
-
-        return int(cur.lastrowid)
 
 def update_unknown_image(unknown_id, image_path):
     with get_conn() as conn:
@@ -672,7 +789,8 @@ def delete_low_quality_unknowns(threshold=0.4):
 
 def add_voice_embedding(person_id, embedding_path, quality=0.0, audio_path=None):
     with get_conn() as conn:
-        cur = conn.execute(
+        return _insert_id(
+            conn,
             """
             INSERT INTO voice_embeddings(
                 person_id, embedding_path, audio_path, quality, created_at
@@ -686,8 +804,8 @@ def add_voice_embedding(person_id, embedding_path, quality=0.0, audio_path=None)
                 float(quality),
                 utc_now(),
             ),
+            "embedding_id",
         )
-        return int(cur.lastrowid)
 
 
 def reassign_voice_embedding(embedding_id, person_id):
@@ -909,14 +1027,15 @@ def list_voice_enrollments():
 
 def create_unknown_voice(label, embedding_path):
     with get_conn() as conn:
-        cur = conn.execute(
+        return _insert_id(
+            conn,
             """
             INSERT INTO unknown_voices(label, embedding_path, created_at)
             VALUES (?, ?, ?)
             """,
             (label, str(embedding_path) if embedding_path else None, utc_now()),
+            "unknown_voice_id",
         )
-        return int(cur.lastrowid)
 
 
 def update_unknown_voice(unknown_voice_id, label, embedding_path):
@@ -989,7 +1108,8 @@ def add_unknown_voice_sample(
                 )
                 return int(unattached[0])
 
-        cur = conn.execute(
+        return _insert_id(
+            conn,
             """
             INSERT INTO unknown_voice_samples(
                 unknown_voice_id, embedding_path, audio_path, source_ref,
@@ -1007,8 +1127,8 @@ def add_unknown_voice_sample(
                 float(quality),
                 utc_now(),
             ),
+            "sample_id",
         )
-        return int(cur.lastrowid)
 
 
 def list_unknown_voice_samples(unknown_voice_id):
@@ -1341,6 +1461,10 @@ def confirm_meeting_introduction(introduction_id, person_id):
                     "The linked unknown voice has no enrolled sample to reassign"
                 )
             reassign_voice_embedding(int(profile[0]), person_id)
+
+            from face_voice_rec.domain.voice.voice_core import index_voice_enrollments_for_person
+
+            index_voice_enrollments_for_person(person_id)
 
     if face_unknown_id is not None:
         from face_voice_rec.domain.face.face_core import enroll_unknown_face_track

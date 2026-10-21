@@ -7,18 +7,25 @@ embedding, then match it against enrolled voiceprints by cosine similarity.
 import logging
 import json
 import hashlib
+import pickle
 import threading
 import uuid
 import wave
 from pathlib import Path
 
 import numpy as np
+from qdrant_client import models
 
 from face_voice_rec import config
 from face_voice_rec.storage.database import (
     get_conn,
     list_resolved_unknown_voice_samples_for_source,
     list_voice_embeddings,
+)
+from face_voice_rec.storage.qdrant_store import (
+    embedding_point_id,
+    get_qdrant_vector_store,
+    unknown_point_id,
 )
 
 logger = logging.getLogger(__name__)
@@ -130,6 +137,68 @@ def has_enrolled_voiceprints():
     return bool(list_voice_embeddings())
 
 
+def index_enrolled_voice_embedding(embedding_id, person_id, quality, embedding):
+    """Store an enrolled voice vector in Qdrant using its relational row ID."""
+    vector = _normalize(embedding)
+    if vector is None or vector.shape[0] != EMBEDDING_DIM:
+        raise ValueError("Invalid voice embedding")
+    get_qdrant_vector_store().upsert(
+        config.QDRANT_VOICE_COLLECTION,
+        embedding_point_id("voice", int(embedding_id)),
+        vector,
+        {
+            "record_type": "enrolled_embedding",
+            "modality": "voice",
+            "embedding_id": int(embedding_id),
+            "person_id": int(person_id),
+            "quality": float(quality or 0.0),
+        },
+    )
+
+
+def index_unknown_voice_sample(sample_id, unknown_voice_id, quality, embedding):
+    """Store an unresolved voice sample vector and searchable metadata."""
+    vector = _normalize(embedding)
+    if vector is None or vector.shape[0] != EMBEDDING_DIM:
+        raise ValueError("Invalid voice embedding")
+    get_qdrant_vector_store().upsert(
+        config.QDRANT_VOICE_COLLECTION,
+        unknown_point_id("voice", int(sample_id)),
+        vector,
+        {
+            "record_type": "unknown_sample",
+            "modality": "voice",
+            "sample_id": int(sample_id),
+            "unknown_id": int(unknown_voice_id),
+            "quality": float(quality or 0.0),
+        },
+    )
+
+
+def index_voice_enrollments_for_person(person_id):
+    """Sync a person's current relational enrollments into Qdrant."""
+    for embedding_id, row_person_id, _name, path, quality in list_voice_embeddings():
+        if int(row_person_id) != int(person_id):
+            continue
+        try:
+            saved = np.load(path, allow_pickle=True)
+            if isinstance(saved, np.ndarray) and saved.dtype == object:
+                saved = np.asarray(saved.tolist(), dtype=np.float32)
+            embedding = _normalize(saved)
+        except (OSError, pickle.UnpicklingError, TypeError, ValueError):
+            logger.warning("Skipping unreadable voice enrollment %s", embedding_id)
+            continue
+        if embedding is None or embedding.shape[0] != EMBEDDING_DIM:
+            logger.warning("Skipping invalid voice enrollment %s", embedding_id)
+            continue
+        index_enrolled_voice_embedding(
+            embedding_id,
+            row_person_id,
+            quality,
+            embedding,
+        )
+
+
 def diagnose_voice_embedding_match(
     query_embedding,
     threshold=None,
@@ -164,16 +233,29 @@ def diagnose_voice_embedding_match(
         result["reason"] = "no_enrolled_profiles"
         return result
 
+    vector_store = get_qdrant_vector_store()
+    qdrant_points = vector_store.retrieve(
+        config.QDRANT_VOICE_COLLECTION,
+        [embedding_point_id("voice", int(row[0])) for row in rows],
+    )
+    vectors_by_embedding_id = {
+        int(point.payload["embedding_id"]): point.vector
+        for point in qdrant_points
+        if point.payload
+        and point.payload.get("record_type") == "enrolled_embedding"
+        and point.payload.get("modality") == "voice"
+    }
+
     scores_by_person = {}
     seen_embeddings = {}
     invalid_sample_count = 0
     for embedding_id, person_id, person_name, embedding_path, quality in rows:
-        path = Path(embedding_path)
-        if not path.exists():
+        vector = vectors_by_embedding_id.get(int(embedding_id))
+        if vector is None:
             invalid_sample_count += 1
             continue
         try:
-            stored = _normalize(np.load(path))
+            stored = _normalize(vector)
             if stored is None or stored.shape[0] != EMBEDDING_DIM:
                 invalid_sample_count += 1
                 continue
@@ -328,7 +410,7 @@ def _persist_unknown_voice_window(
         audio_file.setframerate(SAMPLE_RATE)
         audio_file.writeframes(pcm)
     np.save(embedding_path, _normalize(embedding))
-    return add_unknown_voice_sample(
+    sample_id = add_unknown_voice_sample(
         unknown_voice_id,
         embedding_path,
         quality=quality,
@@ -337,6 +419,8 @@ def _persist_unknown_voice_window(
         start_ms=start_ms,
         end_ms=end_ms,
     )
+    index_unknown_voice_sample(sample_id, unknown_voice_id, quality, embedding)
+    return sample_id
 
 
 def find_matching_unknown_voice(query_embedding, threshold=None, candidate_ids=None):
@@ -352,34 +436,35 @@ def find_matching_unknown_voice(query_embedding, threshold=None, candidate_ids=N
     if not rows:
         return None
 
-    scores = []
-    for sample_id, unknown_voice_id, embedding_path, _quality in rows:
-        path = Path(embedding_path)
-        if not path.exists():
-            continue
-        try:
-            stored = _normalize(np.load(path))
-            if stored is None:
-                continue
-            scores.append((float(np.dot(query, stored)), unknown_voice_id, sample_id))
-        except Exception:
-            logger.warning(
-                "Skipping invalid unknown voice embedding sample_id=%s",
-                sample_id,
-            )
-
-    if not scores:
+    points = get_qdrant_vector_store().search(
+        config.QDRANT_VOICE_COLLECTION,
+        query,
+        limit=1,
+        score_threshold=threshold,
+        query_filter=models.Filter(
+            must=[
+                models.FieldCondition(
+                    key="record_type",
+                    match=models.MatchValue(value="unknown_sample"),
+                ),
+                models.FieldCondition(
+                    key="modality",
+                    match=models.MatchValue(value="voice"),
+                ),
+                models.FieldCondition(
+                    key="unknown_id",
+                    match=models.MatchAny(any=sorted({int(row[1]) for row in rows})),
+                ),
+            ]
+        ),
+    )
+    if not points:
         return None
-
-    scores.sort(key=lambda item: item[0], reverse=True)
-    best_similarity, best_unknown_voice_id, best_sample_id = scores[0]
-    if best_similarity < threshold:
-        return None
-
+    best = points[0]
     return {
-        "unknown_voice_id": best_unknown_voice_id,
-        "similarity": best_similarity,
-        "sample_id": best_sample_id,
+        "unknown_voice_id": int(best.payload["unknown_id"]),
+        "similarity": float(best.score),
+        "sample_id": int(best.payload["sample_id"]),
     }
 
 
@@ -400,7 +485,12 @@ def _register_unknown_voice(embedding, label=None):
     try:
         embedding_path = _save_unknown_voice_embedding(unknown_voice_id, embedding)
         update_unknown_voice(unknown_voice_id, label, embedding_path)
-        add_unknown_voice_sample(unknown_voice_id, embedding_path, quality=1.0)
+        sample_id = add_unknown_voice_sample(
+            unknown_voice_id,
+            embedding_path,
+            quality=1.0,
+        )
+        index_unknown_voice_sample(sample_id, unknown_voice_id, 1.0, embedding)
     except Exception:
         delete_unknown_voice(unknown_voice_id)
         raise
@@ -423,7 +513,13 @@ def register_new_unknown_voice(embedding):
 
 def add_unknown_voice_embedding_sample(unknown_voice_id, embedding, quality=1.0):
     embedding_path = _save_unknown_voice_embedding(unknown_voice_id, embedding)
-    return add_unknown_voice_sample(unknown_voice_id, embedding_path, quality=quality)
+    sample_id = add_unknown_voice_sample(
+        unknown_voice_id,
+        embedding_path,
+        quality=quality,
+    )
+    index_unknown_voice_sample(sample_id, unknown_voice_id, quality, embedding)
+    return sample_id
 
 
 def _unknown_voice_label(unknown_voice_id):

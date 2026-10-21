@@ -15,6 +15,7 @@ from fixtures.runtime_tree import RuntimeTree
 
 
 PATH_REFERENCE_MIGRATION_MARKER = ".legacy_path_references_v1_complete"
+STALE_PATH_REFERENCE_MIGRATION_MARKER = ".legacy_path_references_v2_complete"
 
 
 def _create_path_reference_test_db(db_path: Path) -> None:
@@ -523,6 +524,43 @@ def test_path_reference_migration_preserves_posix_separator_style_for_attendance
         ]
     finally:
         connection.close()
+
+
+def test_stale_path_reference_migration_repairs_previous_project_root_only_for_existing_files(
+    runtime_tree: RuntimeTree,
+) -> None:
+    runtime_tree.write_data(".legacy_migration_v1_complete", b"done\n")
+    db_path = runtime_tree.data_path("db/faces.db")
+    _create_path_reference_test_db(db_path)
+    face_file = runtime_tree.write_data("artifacts/known_faces/7/6.npy", b"embedding")
+    stale_path = f"C:\\Users\\HP\\Desktop\\FaceAndVoiceRecV2\\known_faces\\7\\6.npy"
+    unrelated_path = f"C:\\external\\known_faces\\7\\missing.npy"
+
+    connection = sqlite3.connect(db_path)
+    try:
+        connection.execute(
+            "INSERT INTO face_embeddings(id, image_path, embedding_path) VALUES (1, NULL, ?)",
+            (stale_path,),
+        )
+        connection.execute(
+            "INSERT INTO face_embeddings(id, image_path, embedding_path) VALUES (2, NULL, ?)",
+            (unrelated_path,),
+        )
+        connection.commit()
+    finally:
+        connection.close()
+
+    migrate_legacy_data(runtime_tree.project_root, runtime_tree.data_root)
+
+    connection = sqlite3.connect(db_path)
+    try:
+        assert _read_table(connection, "face_embeddings", "embedding_path") == [
+            (str(face_file),),
+            (unrelated_path,),
+        ]
+    finally:
+        connection.close()
+    assert runtime_tree.data_path(STALE_PATH_REFERENCE_MIGRATION_MARKER).exists()
 
 
 def test_path_reference_migration_sqlite_write_lock_policy(runtime_tree: RuntimeTree, monkeypatch: pytest.MonkeyPatch) -> None:

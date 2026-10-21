@@ -11,6 +11,7 @@ from .constants import DB_BUSY_TIMEOUT_SECONDS
 
 MIGRATION_MARKER = ".legacy_migration_v1_complete"
 PATH_REFERENCE_MIGRATION_MARKER = ".legacy_path_references_v1_complete"
+STALE_PATH_REFERENCE_MIGRATION_MARKER = ".legacy_path_references_v2_complete"
 MIGRATION_LOCK_DATABASE = ".legacy_migration_lock.sqlite"
 
 _MIGRATION_MAP: tuple[tuple[Path, Path], ...] = (
@@ -69,6 +70,7 @@ def migrate_legacy_data(project_root: Path, data_root: Path) -> None:
             _write_marker_atomically(marker)
 
         _migrate_path_references(project_root, data_root)
+        _migrate_stale_path_references(project_root, data_root)
         lock_connection.commit()
     except Exception:
         lock_connection.rollback()
@@ -92,6 +94,40 @@ def _acquire_migration_lock(data_root: Path) -> sqlite3.Connection:
 
 def _migrate_path_references(project_root: Path, data_root: Path) -> None:
     marker = data_root / PATH_REFERENCE_MIGRATION_MARKER
+    if marker.exists():
+        return
+
+    db_path = data_root / "db" / "faces.db"
+    if not db_path.exists():
+        _write_marker_atomically(marker)
+        return
+
+    replacements = tuple(_legacy_prefix_replacements(project_root, data_root))
+    connection = sqlite3.connect(db_path, timeout=DB_BUSY_TIMEOUT_SECONDS)
+    try:
+        connection.execute(f"PRAGMA busy_timeout={DB_BUSY_TIMEOUT_SECONDS * 1000}")
+        connection.execute("BEGIN IMMEDIATE")
+        for table_name, columns in _path_reference_columns():
+            if not _table_exists(connection, table_name):
+                continue
+            existing_columns = set(_column_names(connection, table_name))
+            for column_name in columns:
+                if column_name not in existing_columns:
+                    continue
+                _rewrite_table_column(connection, table_name, column_name, replacements)
+        connection.commit()
+    except sqlite3.Error:
+        connection.rollback()
+        raise
+    finally:
+        connection.close()
+
+    _write_marker_atomically(marker)
+
+
+def _migrate_stale_path_references(project_root: Path, data_root: Path) -> None:
+    """Repair managed asset paths that still point at a previous project root."""
+    marker = data_root / STALE_PATH_REFERENCE_MIGRATION_MARKER
     if marker.exists():
         return
 
@@ -195,6 +231,20 @@ def _rewrite_legacy_path(value: str, replacements: tuple[tuple[Path, Path], ...]
         if relative_suffix is not None:
             rewritten_path = destination_prefix / relative_suffix
             return _render_with_original_separators(rewritten_path, value)
+
+    # Legacy databases can outlive the project root they were first created
+    # under. Only repair a suffix under a managed directory when that exact
+    # destination file exists, leaving unrelated external paths untouched.
+    candidate_parts = [part.casefold() for part in candidate.parts]
+    for source_prefix, destination_prefix in replacements:
+        source_name = source_prefix.name.casefold()
+        for index, part in enumerate(candidate_parts):
+            if part != source_name or index + 1 >= len(candidate.parts):
+                continue
+            relative_suffix = Path(*candidate.parts[index + 1 :])
+            rewritten_path = destination_prefix / relative_suffix
+            if rewritten_path.is_file():
+                return _render_with_original_separators(rewritten_path, value)
     return value
 
 

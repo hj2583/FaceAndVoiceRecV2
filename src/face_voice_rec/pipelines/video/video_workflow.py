@@ -219,10 +219,6 @@ def process_video_and_transcribe(
                     meeting_id,
                     speech_events,
                 )
-                if any(update.get("face_enrolled") for update in identity_updates):
-                    from face_voice_rec.domain.face.face_core import FaceIndex
-
-                    FaceIndex().rebuild()
                 _apply_introduction_identity_updates(
                     subtitle_words,
                     identity_updates,

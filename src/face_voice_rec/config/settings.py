@@ -11,6 +11,17 @@ def _load_environment(project_root: Path | None = None) -> None:
 
 _load_environment()
 
+DATABASE_URL = os.environ.get("DATABASE_URL", "").strip() #reserve for postgreSQL
+QDRANT_URL = os.environ.get("QDRANT_URL", "http://localhost:6333").strip()
+QDRANT_API_KEY = os.environ.get("QDRANT_API_KEY", "").strip() or None
+QDRANT_TIMEOUT_SECONDS = float(os.environ.get("QDRANT_TIMEOUT_SECONDS", "10"))
+QDRANT_FACE_COLLECTION = os.environ.get(
+    "QDRANT_FACE_COLLECTION", "face_embeddings"
+).strip()
+QDRANT_VOICE_COLLECTION = os.environ.get(
+    "QDRANT_VOICE_COLLECTION", "voice_embeddings"
+).strip()
+
 VOICE_DIAGNOSTICS_ENABLED = os.environ.get(
     "VOICE_DIAGNOSTICS_ENABLED", "0"
 ).strip().lower() in {"1", "true", "yes", "on"}
@@ -44,6 +55,12 @@ TRANSCRIPT_REFINEMENT_CHUNK_CHARS = 9000
 
 
 __all__ = [
+    "DATABASE_URL",
+    "QDRANT_URL",
+    "QDRANT_API_KEY",
+    "QDRANT_TIMEOUT_SECONDS",
+    "QDRANT_FACE_COLLECTION",
+    "QDRANT_VOICE_COLLECTION",
     "VOICE_DIAGNOSTICS_ENABLED",
     "WHISPER_LANGUAGE_MODE",
     "WHISPER_LANGUAGE",

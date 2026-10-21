@@ -11,8 +11,8 @@ The system combines:
 - UniFace SCRFD + ArcFace for face detection and embedding extraction
 - UniFace FaceMesh for facial landmarks and mouth-motion measurements
 - OpenCV for fallback detection and video handling
-- SQLite for person and identity storage
-- NumPy for face-index matching
+- SQLite (default) or PostgreSQL for relational records
+- Qdrant for face and voice vector search
 - Silero VAD for speech activity detection
 - OpenAI Whisper for optional transcription
 - SpeechBrain ECAPA-TDNN for voice embeddings and speaker clustering
@@ -32,14 +32,50 @@ and attendance. The application combines these models and processing stages:
 | Transcription | OpenAI Whisper (`small`) | Converts extracted audio into text and timestamps. FFmpeg extracts audio from uploaded video. Whisper does not identify speakers. |
 | Voice embeddings | SpeechBrain ECAPA-TDNN | Represents voice samples numerically; the project uses embeddings to cluster speech and attempt matching against enrolled voice samples. |
 | Active-speaker estimate | Application logic combining VAD timing and FaceMesh lip motion | Estimates which visible face is speaking only when lip movement is measurable and competitive; face-recognition similarity and temporal continuity are not treated as evidence of speaker identity. |
-| Identity storage and matching | SQLite and NumPy | Stores people and their embeddings, then compares face embeddings against enrolled samples. |
+| Identity storage and matching | Relational database and Qdrant | Stores people and enrollment metadata relationally; searches face and voice embeddings in Qdrant. |
 | Attendance | Application logic and SQLite | Records a known person when the video or realtime pipeline recognizes their face with sufficient confidence. |
 | Optional transcript formatting | Local Ollama model (disabled by default) | Formats and groups existing transcript fragments while preserving the spoken words and speaker labels. It does not replace Whisper or determine speaker identities. |
 
 Face and voice enrollment are independent: enroll face samples for visual
 identity recognition, and enroll clean voice samples to support voice matching.
 Voice activity or an unknown face alone is not enough to create a known-person
-attendance record. Transcript and attendance data are stored in SQLite.
+attendance record. Person, enrollment, transcript, attendance, and log records
+remain relational data; Qdrant stores vectors and non-sensitive lookup metadata.
+
+### Production storage migration
+
+The production target is PostgreSQL for relational records and transactions,
+Qdrant for face and voice embeddings, and shared object storage for images,
+audio, and video. Qdrant payloads contain vector metadata and object references,
+not media files.
+
+The runtime now reads known and unresolved face/voice vectors from Qdrant for
+matching, and new face/voice vectors are indexed there as they are enrolled or
+captured. Relational records remain authoritative for person IDs, enrollment
+quality, and unresolved/resolved status. Local `.npy` embeddings are retained
+for recovery and backfill; images, audio, and video remain files and are not
+stored in Qdrant. Source scripts belong in version control, not a database.
+
+The relational migration is still staged: SQLite remains the default, while a
+portable PostgreSQL schema and Alembic initial migration are available. Logs,
+transcripts, attendance, and other structured records remain relational data;
+shared object storage for media is not yet implemented. Do not treat this as a
+complete production cutover until PostgreSQL deployment, shared media storage,
+backups, and recovery procedures are configured and verified.
+
+Qdrant collections are initialized from environment settings. The report-first
+`scripts/backfill_qdrant_embeddings.py` migrates existing known and unresolved
+face/voice vectors with deterministic IDs. Run it from the repository root,
+review the report, then pass `--apply`. Re-running it safely upserts the same
+points. It does not migrate relational records or media files.
+
+Set `DATABASE_URL` in the environment or root `.env` before creating a new
+relational schema. For example, use a PostgreSQL URL with the `postgresql+psycopg`
+driver, then run `python -m alembic upgrade head` from the repository root.
+Migrations create schema only; they do not migrate the current `data/db/faces.db`
+or upload local assets. The Qdrant backfill requires the current relational
+schema and readable local embedding files. Keep database and Qdrant credentials
+out of source control.
 
 Voice identity matching compares ECAPA cosine similarity with quality-filtered
 enrollment samples, deduplicates identical vectors, and checks both the best
@@ -173,6 +209,7 @@ inferred just because a face is visible.
 ## Requirements
 
 - Python 3.10+ 64-bit
+- Python 3.14 is the current CI-tested interpreter; the declared minimum remains Python 3.10.
 - FFmpeg installed and available on PATH
 - A webcam for realtime mode
 - A microphone for live audio/VAD analysis
@@ -193,13 +230,32 @@ python -m pip install --upgrade pip
 pip install -r requirements.txt
 ```
 
-3. Verify FFmpeg is installed:
+3. Start Qdrant locally (Docker Desktop required) and verify the service:
+
+```powershell
+docker run -d --name face-voice-qdrant -p 6333:6333 -v face_voice_qdrant:/qdrant/storage qdrant/qdrant
+Invoke-RestMethod http://localhost:6333/
+```
+
+For another Qdrant server, set `QDRANT_URL` and, if required, `QDRANT_API_KEY`
+in the root `.env` or process environment. The default URL is
+`http://localhost:6333`; the application does not start Qdrant itself.
+
+4. Backfill existing vectors from the repository root. Report first, then apply:
+
+```powershell
+$env:PYTHONPATH = 'src'
+python scripts/backfill_qdrant_embeddings.py
+python scripts/backfill_qdrant_embeddings.py --apply
+```
+
+5. Verify FFmpeg is installed:
 
 ```powershell
 ffmpeg -version
 ```
 
-4. Launch the app:
+6. Launch the app:
 
 ```powershell
 streamlit run app/main.py
@@ -338,8 +394,7 @@ FaceAndVoiceRecV2/
 5. Open Voice Enrollment to listen to enrolled samples and unresolved speakers,
    edit the person assigned to an existing saved voice sample, or confirm an
    assignment/create a person for an unidentified speaker.
-6. Rebuild or reload the face index if needed.
-7. Continue recognition using stored embeddings.
+6. Continue recognition using vectors stored in Qdrant.
 
 ## Important data folders
 
@@ -351,7 +406,7 @@ FaceAndVoiceRecV2/
 - `trackedVideo/`: processed output videos
 - `logs/`: runtime logs
 - `faces.db`: SQLite database with identities and logs
-- `face_index.npz`: cached embedding index
+- `face_index.npz`: legacy cache path handled during migration; runtime matching uses Qdrant
 
 ## Development and testing
 

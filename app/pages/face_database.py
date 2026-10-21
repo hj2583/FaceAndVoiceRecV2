@@ -6,8 +6,11 @@ import numpy as np
 
 import pandas as pd
 import streamlit as st
+from qdrant_client import models
 
+from face_voice_rec import config
 from face_voice_rec.domain.face.face_core import FaceIndex
+from face_voice_rec.storage.qdrant_store import get_qdrant_vector_store
 from face_voice_rec.storage.database import (
     create_person,
     delete_low_quality_unknowns,
@@ -37,7 +40,22 @@ def render() -> None:
         st.metric("Known Persons", len(persons))
 
     with col2:
-        st.metric("Face Embeddings", len(index.ids))
+        face_embedding_count = get_qdrant_vector_store().count(
+            config.QDRANT_FACE_COLLECTION,
+            query_filter=models.Filter(
+                must=[
+                    models.FieldCondition(
+                        key="record_type",
+                        match=models.MatchValue(value="enrolled_embedding"),
+                    ),
+                    models.FieldCondition(
+                        key="modality",
+                        match=models.MatchValue(value="face"),
+                    ),
+                ]
+            ),
+        )
+        st.metric("Face Embeddings", face_embedding_count)
 
     if persons:
         st.subheader("Known Persons")
