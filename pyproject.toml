@@ -1,0 +1,23 @@
+[build-system]
+requires = ["setuptools>=67", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "face-voice-rec"
+version = "0.0.0"
+description = "Face and voice recognition pipeline"
+requires-python = ">=3.10"
+classifiers = ["Programming Language :: Python :: 3.14"]
+dependencies = [
+	"qdrant-client>=1.19,<2",
+	"SQLAlchemy>=2.0,<3",
+	"alembic>=1.13,<2",
+	"psycopg[binary]>=3.2,<4",
+]
+
+[tool.setuptools.packages.find]
+where = ["src", "."]
+include = ["face_voice_rec*", "app*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]

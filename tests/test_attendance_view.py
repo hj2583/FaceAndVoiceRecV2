@@ -1,10 +1,10 @@
 from datetime import date, datetime, time, timedelta, timezone
 from pathlib import Path
 
-import database
+from face_voice_rec.storage import database
 import pytest
 
-from attendance_view import (
+from app.ui.attendance_view import (
     attendance_frame_to_csv,
     build_attendance_frame,
     build_realtime_attendance_range,
@@ -246,3 +246,4 @@ def test_realtime_period_defaults_are_seeded_once_and_fixed_end_is_preserved():
 
     assert state["attendance_end_date"] == date(2026, 10, 4)
     assert state["attendance_end_time"] == time(9, 15)
+

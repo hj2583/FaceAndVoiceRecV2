@@ -1,10 +1,5 @@
-import sys
-from pathlib import Path
-
 import cv2
 import pytest
-
-sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 
 class _NullVideoWriter:
@@ -27,9 +22,32 @@ def _no_disk_video_writes(monkeypatch):
 
 
 @pytest.fixture(autouse=True)
+def _disable_cloud_refinement_by_default(monkeypatch):
+    """Never let a developer's .env send test transcripts to a model service."""
+    from face_voice_rec import config
+
+    monkeypatch.setattr(config, "TRANSCRIPT_REFINEMENT_ENABLED", False)
+    monkeypatch.setattr(config, "TRANSCRIPT_REFINEMENT_USE_CLOUD", False)
+
+
+@pytest.fixture(autouse=True)
 def _isolate_voice_and_transcript_dirs(tmp_path, monkeypatch):
     """Keep unknown-voice files and regenerated transcripts out of the real project folders."""
-    import config
+    from face_voice_rec import config
 
     monkeypatch.setattr(config, "TRANSCRIPTS_DIR", tmp_path / "transcripts")
     monkeypatch.setattr(config, "UNKNOWN_VOICES_DIR", tmp_path / "unknown_voices")
+    monkeypatch.setattr(config, "WORKFLOW_TEMP_DIR", tmp_path)
+
+
+@pytest.fixture(autouse=True)
+def _isolate_database_path(tmp_path, monkeypatch):
+    """Ensure tests never open the default project database path."""
+    from face_voice_rec.storage import database
+    from face_voice_rec import config
+
+    db_path = tmp_path / "db" / "faces.db"
+    db_path.parent.mkdir(parents=True, exist_ok=True)
+    monkeypatch.setattr(database, "DB_PATH", db_path)
+    monkeypatch.setattr(config, "DB_PATH", db_path)
+    database.init_db()

@@ -1,6 +1,6 @@
 from types import SimpleNamespace
 
-from runtime_status import get_runtime_status
+from app.ui.status import get_runtime_status
 
 
 def _fake_torch(available, name="Test GPU"):

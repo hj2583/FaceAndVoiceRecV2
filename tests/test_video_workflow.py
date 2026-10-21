@@ -3,10 +3,10 @@ from pathlib import Path
 
 import pytest
 
-import config
-from subtitle_renderer import SubtitleWord, VideoMuxError
+from face_voice_rec import config
+from face_voice_rec.domain.transcription.subtitle_renderer import SubtitleWord, VideoMuxError
 import video_workflow
-import voice_core
+from face_voice_rec.domain.voice import voice_core
 
 
 def test_self_introduction_identity_updates_only_rename_supported_subtitle_words():
