@@ -132,6 +132,7 @@ Use placeholder values (example only):
 
 ```dotenv
 TRANSCRIPT_REFINEMENT_ENABLED=true
+TRANSCRIPT_REFINEMENT_API=ollama
 TRANSCRIPT_REFINEMENT_USE_CLOUD=true
 ANTHROPIC_API_URL=https://example.services.ai.azure.com/anthropic/v1/messages
 API_KEY=your-foundry-key
@@ -145,8 +146,8 @@ TRANSCRIPT_REFINEMENT_TIMEOUT_SECONDS=90
 Behavior:
 
 - `TRANSCRIPT_REFINEMENT_ENABLED=false` (default): deterministic readable output only.
-- `TRANSCRIPT_REFINEMENT_ENABLED=true` and `TRANSCRIPT_REFINEMENT_USE_CLOUD=false` (default): local Ollama refinement only.
-- `TRANSCRIPT_REFINEMENT_ENABLED=true` and `TRANSCRIPT_REFINEMENT_USE_CLOUD=true`: cloud Foundry first, then automatic local Ollama fallback, then deterministic fallback if both fail.
+- `TRANSCRIPT_REFINEMENT_ENABLED=true` and `TRANSCRIPT_REFINEMENT_USE_CLOUD=false` (default): local refinement only, through the configured local API.
+- `TRANSCRIPT_REFINEMENT_ENABLED=true` and `TRANSCRIPT_REFINEMENT_USE_CLOUD=true`: cloud Foundry first, then automatic local fallback through the configured local API, then deterministic fallback if both fail.
 
 If cloud mode is enabled, transcript text (not audio) is sent to the configured
 cloud endpoint. Audio files are never uploaded by this feature. Validation is
@@ -180,6 +181,24 @@ streamlit run app/main.py
 # or from the app directory:
 # streamlit run main.py
 ```
+
+`TRANSCRIPT_REFINEMENT_API` selects the local server API: `ollama` (default,
+native `/api/chat`) or `openai` (OpenAI-compatible `/v1/chat/completions`, for
+example llama.cpp `llama-server`). Set `TRANSCRIPT_REFINEMENT_URL` to the
+server root without `/v1`, and set `TRANSCRIPT_REFINEMENT_MODEL` to the model
+name the server exposes. Example for a `llama-server` on another machine:
+
+```dotenv
+TRANSCRIPT_REFINEMENT_ENABLED=true
+TRANSCRIPT_REFINEMENT_API=openai
+TRANSCRIPT_REFINEMENT_URL=http://192.168.1.50:30000
+TRANSCRIPT_REFINEMENT_MODEL=your-served-model-name
+TRANSCRIPT_REFINEMENT_TIMEOUT_SECONDS=300
+```
+
+Transcript text is sent to that server, and plain `http://` is unencrypted, so
+use only a trusted network and server. Large models may need a longer timeout.
+Runs are saved as `openai:<model>` and shown as "Local OpenAI-compatible".
 
 Speaker-change suggestions are advisory and never change attribution. Failures
 leave the detailed Whisper transcript intact and show a deterministic readable
