@@ -994,7 +994,7 @@ def refresh_readable_transcript(meeting_id: int, use_llm: Optional[bool] = None)
             ])
             result_provider = (result.provider or "").strip().lower()
             result_model = (result.model or "").strip()
-            if result_provider in {"foundry", "ollama"} and result_model:
+            if result_provider in {"foundry", "ollama", "openai"} and result_model:
                 method = f"{result_provider}:{result_model}"
             else:
                 method = "deterministic"

@@ -418,6 +418,7 @@ _ERROR_SENTINEL = "TRANSPORT-ERROR-SENTINEL"
 @pytest.fixture(autouse=True)
 def _isolated_refiner_config(monkeypatch):
     monkeypatch.setattr(config, "TRANSCRIPT_REFINEMENT_USE_CLOUD", False)
+    monkeypatch.setattr(config, "TRANSCRIPT_REFINEMENT_API", "ollama")
     monkeypatch.setattr(config, "ANTHROPIC_API_URL", _FOUNDRY_URL)
     monkeypatch.setattr(config, "API_KEY", _KEY)
     monkeypatch.setattr(config, "ANTHROPIC_VERSION", "2023-06-01")
@@ -1154,3 +1155,83 @@ def test_openai_compatible_oversized_response_is_rejected(monkeypatch):
         transcript_refiner._post_openai_compatible_chat("{}")
 
     _assert_sanitized(caught.value)
+
+
+def test_openai_api_routes_local_only_refinement(monkeypatch):
+    monkeypatch.setattr(config, "TRANSCRIPT_REFINEMENT_API", "openai")
+    monkeypatch.setattr(config, "TRANSCRIPT_REFINEMENT_MODEL", "remote-model")
+    monkeypatch.setattr(
+        transcript_refiner, "_post_ollama_chat",
+        lambda _payload: pytest.fail("Ollama must not be called"),
+    )
+    monkeypatch.setattr(
+        transcript_refiner,
+        "_post_openai_compatible_chat",
+        lambda payload: _reply(json.loads(payload)["target_segments"]),
+    )
+
+    result = transcript_refiner.refine_transcript(_segments(("Alice", 0, 500, "Hello.")))
+
+    assert (result.provider, result.model) == ("openai", "remote-model")
+    assert result.used_local_fallback is False
+
+
+def test_cloud_failure_falls_back_to_openai_compatible(monkeypatch):
+    monkeypatch.setattr(config, "TRANSCRIPT_REFINEMENT_USE_CLOUD", True)
+    monkeypatch.setattr(config, "TRANSCRIPT_REFINEMENT_API", "openai")
+
+    def cloud(_payload):
+        raise TranscriptRefinementError("Foundry request timed out")
+
+    monkeypatch.setattr(transcript_refiner, "_post_foundry_chat", cloud)
+    monkeypatch.setattr(
+        transcript_refiner,
+        "_post_openai_compatible_chat",
+        lambda payload: _reply(json.loads(payload)["target_segments"]),
+    )
+
+    result = transcript_refiner.refine_transcript(_segments(("Alice", 0, 500, "Hello.")))
+
+    assert result.provider == "openai"
+    assert result.used_local_fallback is True
+    assert result.fallback_reason == "Foundry request timed out"
+
+
+def test_both_failing_names_openai_compatible_local_provider(monkeypatch):
+    monkeypatch.setattr(config, "TRANSCRIPT_REFINEMENT_USE_CLOUD", True)
+    monkeypatch.setattr(config, "TRANSCRIPT_REFINEMENT_API", "openai")
+
+    def fail_cloud(_payload):
+        raise TranscriptRefinementError("Foundry request timed out")
+
+    def fail_local(_payload):
+        raise TranscriptRefinementError("Local OpenAI-compatible server request timed out")
+
+    monkeypatch.setattr(transcript_refiner, "_post_foundry_chat", fail_cloud)
+    monkeypatch.setattr(transcript_refiner, "_post_openai_compatible_chat", fail_local)
+
+    with pytest.raises(TranscriptRefinementError) as caught:
+        transcript_refiner.refine_transcript(_segments(("Alice", 0, 500, "Hello.")))
+
+    assert str(caught.value) == (
+        "Foundry refinement failed (Foundry request timed out); "
+        "local OpenAI-compatible server refinement failed "
+        "(Local OpenAI-compatible server request timed out)"
+    )
+
+
+def test_openai_invalid_chunk_keeps_source_text(monkeypatch):
+    monkeypatch.setattr(config, "TRANSCRIPT_REFINEMENT_API", "openai")
+    items = _segments(("Alice", 0, 500, "Hello."))
+    monkeypatch.setattr(
+        transcript_refiner,
+        "_post_openai_compatible_chat",
+        lambda _payload: _reply(items, text_by_id={1: "Goodbye."}),
+    )
+
+    result = transcript_refiner.refine_transcript(items)
+
+    assert result.provider == "openai"
+    assert [(group.source_segment_ids, group.text) for group in result.groups] == [
+        ((1,), "Hello.")
+    ]

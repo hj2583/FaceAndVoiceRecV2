@@ -801,6 +801,18 @@ def test_reprocessing_replaces_detailed_and_readable_rows_without_duplicates(
         ),
         pytest.param(
             (
+                "openai",
+                "unsloth/Qwen3.8-27B-GGUF:UD-Q8_K_XL",
+                False,
+                None,
+            ),
+            "complete",
+            "openai:unsloth/Qwen3.8-27B-GGUF:UD-Q8_K_XL",
+            None,
+            id="local-openai-compatible",
+        ),
+        pytest.param(
+            (
                 "ollama",
                 "qwen2.5:14b",
                 True,

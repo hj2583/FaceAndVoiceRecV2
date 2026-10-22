@@ -1,4 +1,4 @@
-"""Optional, validated readable-transcript refinement via local Ollama."""
+"""Optional, validated readable-transcript refinement via cloud or local LLMs."""
 
 from dataclasses import dataclass, replace
 from http.client import HTTPException
@@ -461,11 +461,20 @@ def _normalize_and_validate_response(
     return groups, recommendations
 
 
+_LOCAL_PROVIDER_NAMES = {"ollama": "Ollama", "openai": "OpenAI-compatible server"}
+
+
+def _local_provider() -> str:
+    return config.TRANSCRIPT_REFINEMENT_API
+
+
 def _refine_with_provider(normalized: Sequence[dict], provider: str) -> RefinementResult:
     if provider == "foundry":
         post, model = _post_foundry_chat, config.MODEL
     elif provider == "ollama":
         post, model = _post_ollama_chat, config.TRANSCRIPT_REFINEMENT_MODEL
+    elif provider == "openai":
+        post, model = _post_openai_compatible_chat, config.TRANSCRIPT_REFINEMENT_MODEL
     else:
         raise ValueError(f"Unknown refinement provider: {provider}")
 
@@ -491,7 +500,7 @@ def _refine_with_provider(normalized: Sequence[dict], provider: str) -> Refineme
                 normalized,
             )
         except TranscriptRefinementError:
-            if provider != "ollama":
+            if provider not in _LOCAL_PROVIDER_NAMES:
                 raise
             # A chunk is one same-speaker run, so its source text is a valid group.
             groups = [RefinedGroup(
@@ -511,8 +520,9 @@ def _refine_with_provider(normalized: Sequence[dict], provider: str) -> Refineme
         )
     if deterministic_chunks:
         logger.warning(
-            "Local Ollama output failed validation for %d of %d chunks; "
+            "Local %s output failed validation for %d of %d chunks; "
             "kept source text for those chunks",
+            _LOCAL_PROVIDER_NAMES[provider],
             deterministic_chunks,
             len(ranges),
         )
@@ -559,8 +569,9 @@ def refine_transcript(segments: Sequence[dict]) -> RefinementResult:
     if config.TRANSCRIPT_REFINEMENT_CHUNK_SEGMENTS < 1:
         raise TranscriptRefinementError("Chunk segment limit must be positive")
 
+    local_provider = _local_provider()
     if not config.TRANSCRIPT_REFINEMENT_USE_CLOUD:
-        return _refine_with_provider(normalized, "ollama")
+        return _refine_with_provider(normalized, local_provider)
 
     try:
         return _refine_with_provider(normalized, "foundry")
@@ -568,10 +579,11 @@ def refine_transcript(segments: Sequence[dict]) -> RefinementResult:
         cloud_reason = str(cloud_error)
     logger.warning("Foundry refinement failed (%s); retrying locally", cloud_reason)
     try:
-        local_result = _refine_with_provider(normalized, "ollama")
+        local_result = _refine_with_provider(normalized, local_provider)
     except TranscriptRefinementError as local_error:
         raise TranscriptRefinementError(
             "Foundry refinement failed "
-            f"({cloud_reason}); local Ollama refinement failed ({local_error})"
+            f"({cloud_reason}); local {_LOCAL_PROVIDER_NAMES[local_provider]} "
+            f"refinement failed ({local_error})"
         ) from None
     return replace(local_result, used_local_fallback=True, fallback_reason=cloud_reason)
