@@ -40,6 +40,19 @@ TRANSCRIPT_REFINEMENT_URL = os.environ.get(
 TRANSCRIPT_REFINEMENT_MODEL = os.environ.get(
     "TRANSCRIPT_REFINEMENT_MODEL", "qwen2.5:7b"
 )
+_REFINEMENT_APIS = ("ollama", "openai")
+
+
+def _refinement_api(value: str | None) -> str:
+    api = (value or "").strip().lower() or "ollama"
+    if api not in _REFINEMENT_APIS:
+        raise ValueError(
+            "TRANSCRIPT_REFINEMENT_API must be one of: " + ", ".join(_REFINEMENT_APIS)
+        )
+    return api
+
+
+TRANSCRIPT_REFINEMENT_API = _refinement_api(os.environ.get("TRANSCRIPT_REFINEMENT_API"))
 TRANSCRIPT_REFINEMENT_USE_CLOUD = os.environ.get(
     "TRANSCRIPT_REFINEMENT_USE_CLOUD", "0"
 ).strip().lower() in {"1", "true", "yes", "on"}
@@ -67,6 +80,7 @@ __all__ = [
     "TRANSCRIPT_REFINEMENT_ENABLED",
     "TRANSCRIPT_REFINEMENT_URL",
     "TRANSCRIPT_REFINEMENT_MODEL",
+    "TRANSCRIPT_REFINEMENT_API",
     "TRANSCRIPT_REFINEMENT_USE_CLOUD",
     "ANTHROPIC_API_URL",
     "API_KEY",
