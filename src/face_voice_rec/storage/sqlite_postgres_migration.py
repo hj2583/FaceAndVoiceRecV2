@@ -82,7 +82,14 @@ def copy_sqlite_database(source_path: Path, target_url: str) -> dict[str, int]:
                 )
 
             for table in metadata.sorted_tables:
-                result = source.execute(select(table)).mappings()
+                source_columns = {
+                    column["name"]
+                    for column in source_inspector.get_columns(table.name)
+                }
+                available_columns = [
+                    column for column in table.columns if column.name in source_columns
+                ]
+                result = source.execute(select(*available_columns)).mappings()
                 table_count = 0
                 while rows := result.fetchmany(_BATCH_SIZE):
                     target.execute(table.insert(), [dict(row) for row in rows])

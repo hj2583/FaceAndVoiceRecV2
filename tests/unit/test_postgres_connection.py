@@ -1,6 +1,7 @@
 from face_voice_rec.storage.database import (
     _PostgresConnection,
     _hybrid_row,
+    _hybrid_row_factory,
     _insert_id,
     _postgres_sql,
     init_db,
@@ -95,6 +96,21 @@ def test_postgres_row_supports_numeric_and_named_column_access():
         description = (Column("segment_id"), Column("text"))
 
     row = _hybrid_row(Cursor(), (12, "hello"))
+
+    assert row[0] == row["segment_id"] == 12
+    assert row[1] == row["text"] == "hello"
+
+
+def test_postgres_hybrid_row_factory_follows_psycopg_factory_protocol():
+    class Column:
+        def __init__(self, name):
+            self.name = name
+
+    class Cursor:
+        description = (Column("segment_id"), Column("text"))
+
+    make_row = _hybrid_row_factory(Cursor())
+    row = make_row((12, "hello"))
 
     assert row[0] == row["segment_id"] == 12
     assert row[1] == row["text"] == "hello"

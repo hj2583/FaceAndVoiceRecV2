@@ -96,7 +96,9 @@ class _PostgresConnection:
 
     @row_factory.setter
     def row_factory(self, factory):
-        self._connection.row_factory = _hybrid_row if factory is sqlite3.Row else factory
+        self._connection.row_factory = (
+            _hybrid_row_factory if factory is sqlite3.Row else factory
+        )
 
 
 class _HybridRow:
@@ -121,6 +123,11 @@ class _HybridRow:
 
 def _hybrid_row(cursor, values):
     return _HybridRow((column.name for column in cursor.description), values)
+
+
+def _hybrid_row_factory(cursor):
+    columns = tuple(column.name for column in cursor.description)
+    return lambda values: _HybridRow(columns, values)
 
 
 def _insert_id(connection, statement, parameters, column_name):

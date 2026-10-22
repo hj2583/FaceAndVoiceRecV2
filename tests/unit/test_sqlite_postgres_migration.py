@@ -60,6 +60,38 @@ def test_copy_preserves_ids_and_foreign_keys(tmp_path, monkeypatch):
     target_engine.dispose()
 
 
+def test_copy_supports_legacy_table_missing_nullable_column(tmp_path, monkeypatch):
+    source_path = tmp_path / "legacy_faces.db"
+    target_path = tmp_path / "target.db"
+    source_engine = _create_schema(source_path)
+    target_engine = _create_schema(target_path)
+    with source_engine.begin() as connection:
+        connection.exec_driver_sql("ALTER TABLE audio_logs DROP COLUMN source_ref")
+        connection.exec_driver_sql(
+            "INSERT INTO audio_logs "
+            "(log_id, start_time, end_time, source, transcript) "
+            "VALUES (1, 0.0, 1.0, 'test', 'hello')"
+        )
+    monkeypatch.setattr(
+        migration,
+        "create_engine",
+        lambda url: source_engine if url.startswith("sqlite:") else target_engine,
+    )
+
+    copied = migration.copy_sqlite_database(
+        source_path,
+        "postgresql+psycopg://unused/unused",
+    )
+
+    assert copied["audio_logs"] == 1
+    with target_engine.connect() as connection:
+        row = connection.execute(select(metadata.tables["audio_logs"])).mappings().one()
+    assert row["transcript"] == "hello"
+    assert row["source_ref"] is None
+    source_engine.dispose()
+    target_engine.dispose()
+
+
 def test_copy_refuses_nonempty_target_without_overwriting(tmp_path, monkeypatch):
     source_path = tmp_path / "faces.db"
     target_path = tmp_path / "target.db"
