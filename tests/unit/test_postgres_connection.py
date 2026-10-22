@@ -114,3 +114,41 @@ def test_postgres_hybrid_row_factory_follows_psycopg_factory_protocol():
 
     assert row[0] == row["segment_id"] == 12
     assert row[1] == row["text"] == "hello"
+
+def test_get_conn_passes_hybrid_row_factory_to_psycopg(monkeypatch):
+    import sqlite3
+
+    import psycopg
+
+    from face_voice_rec import config
+    from face_voice_rec.storage import database
+
+    class Connection:
+        def __init__(self):
+            self.events = []
+
+        def commit(self):
+            self.events.append("commit")
+
+        def rollback(self):
+            self.events.append("rollback")
+
+        def close(self):
+            self.events.append("close")
+
+    connection = Connection()
+    captured = {}
+
+    def fake_connect(dsn, **kwargs):
+        captured["dsn"] = dsn
+        captured["kwargs"] = kwargs
+        return connection
+
+    monkeypatch.setattr(config, "DATABASE_URL", "postgresql+psycopg://db/app")
+    monkeypatch.setattr(psycopg, "connect", fake_connect)
+
+    with database.get_conn(row_factory=sqlite3.Row) as conn:
+        assert isinstance(conn, _PostgresConnection)
+
+    assert captured["kwargs"]["row_factory"] is _hybrid_row_factory
+    assert connection.events == ["commit", "close"]

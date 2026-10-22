@@ -29,6 +29,7 @@ def _disable_cloud_refinement_by_default(monkeypatch):
     monkeypatch.setattr(config, "TRANSCRIPT_REFINEMENT_ENABLED", False)
     monkeypatch.setattr(config, "TRANSCRIPT_REFINEMENT_USE_CLOUD", False)
     monkeypatch.setattr(config, "TRANSCRIPT_REFINEMENT_API", "ollama")
+    monkeypatch.setattr(config, "DATABASE_URL", "")
 
 
 @pytest.fixture(autouse=True)

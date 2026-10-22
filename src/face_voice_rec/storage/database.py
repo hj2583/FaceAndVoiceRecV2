@@ -488,7 +488,7 @@ def init_db():
 @contextmanager
 def get_conn(*, row_factory=None):
     if config.DATABASE_URL:
-        postgres_row_factory = _hybrid_row if row_factory is sqlite3.Row else None
+        postgres_row_factory = _hybrid_row_factory if row_factory is sqlite3.Row else None
         connection = psycopg.connect(
             _postgres_dsn(),
             row_factory=postgres_row_factory,
