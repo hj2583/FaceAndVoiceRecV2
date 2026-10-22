@@ -114,6 +114,8 @@ def _seed_minimal_meeting(db_path, *, refinement_status, refinement_method, refi
         ("complete", "foundry:test-deployment", "Cloud"),
         ("complete", "ollama:test-local", "Local Ollama"),
         ("complete_local_fallback", "ollama:test-local", "cloud fallback"),
+        ("complete", "openai:remote-model", "Local OpenAI-compatible: remote-model"),
+        ("complete_local_fallback", "openai:remote-model", "cloud fallback"),
         ("fallback", "deterministic", "Deterministic"),
         ("disabled", "deterministic", "Deterministic"),
     ],
@@ -149,3 +151,38 @@ def test_render_uses_configured_provider_action_text_and_saved_fallback_details(
     assert any("cloud fallback" in caption.lower() for caption in fake_st.captions)
     assert any("Foundry request failed (HTTP 429)" in info for info in fake_st.infos)
     assert fake_st.warnings == []
+
+
+@pytest.mark.parametrize(
+    ("api", "use_cloud", "expected"),
+    [
+        ("ollama", False, "Refine readable transcript with local Ollama"),
+        ("openai", False, "Refine readable transcript with local OpenAI-compatible server"),
+        (
+            "openai",
+            True,
+            "Refine readable transcript with cloud Foundry "
+            "(fallback to local OpenAI-compatible server)",
+        ),
+    ],
+)
+def test_render_action_label_names_configured_local_backend(
+    tmp_path, monkeypatch, api, use_cloud, expected
+):
+    db_path = tmp_path / "meeting.db"
+    monkeypatch.setattr(config, "DB_PATH", db_path)
+    monkeypatch.setattr(database, "DB_PATH", db_path)
+    database.init_db()
+    _seed_minimal_meeting(
+        db_path,
+        refinement_status="complete",
+        refinement_method="deterministic",
+    )
+    module, fake_st = _load_transcripts_module(monkeypatch)
+    monkeypatch.setattr(module, "TRANSCRIPT_REFINEMENT_ENABLED", True)
+    monkeypatch.setattr(config, "TRANSCRIPT_REFINEMENT_USE_CLOUD", use_cloud)
+    monkeypatch.setattr(config, "TRANSCRIPT_REFINEMENT_API", api)
+
+    module.render()
+
+    assert expected in fake_st.button_labels

@@ -50,6 +50,8 @@ def _provider_caption(method: str) -> str:
         return f"Cloud Foundry: {model}" if model else "Cloud Foundry"
     if provider == "ollama":
         return f"Local Ollama: {model}" if model else "Local Ollama"
+    if provider == "openai":
+        return f"Local OpenAI-compatible: {model}" if model else "Local OpenAI-compatible"
     if provider == "deterministic":
         return "Deterministic"
     return f"{provider}: {model}" if model else (method or "Unknown method")
@@ -66,6 +68,12 @@ def _refinement_status_caption(status: str, method: str) -> str:
     if status == "complete":
         return provider_label
     return f"{provider_label} ({status})"
+
+
+def _local_backend_label() -> str:
+    if config.TRANSCRIPT_REFINEMENT_API == "openai":
+        return "local OpenAI-compatible server"
+    return "local Ollama"
 
 
 def render() -> None:
@@ -217,20 +225,21 @@ def render() -> None:
             refresh_readable_transcript(selected_id, use_llm=False)
         st.rerun()
 
+    local_label = _local_backend_label()
     if TRANSCRIPT_REFINEMENT_ENABLED:
         if config.TRANSCRIPT_REFINEMENT_USE_CLOUD:
             action_label = (
                 "Refine readable transcript with cloud Foundry "
-                "(fallback to local Ollama)"
+                f"(fallback to {local_label})"
             )
             spinner_label = (
                 "Asking the configured cloud Foundry model to format the transcript "
                 "(local fallback on failure)..."
             )
         else:
-            action_label = "Refine readable transcript with local Ollama"
+            action_label = f"Refine readable transcript with {local_label}"
             spinner_label = (
-                "Asking the configured local Ollama model to format the transcript..."
+                f"Asking the configured {local_label} model to format the transcript..."
             )
         if st.button(
             action_label,
@@ -241,9 +250,9 @@ def render() -> None:
             st.rerun()
     else:
         action_hint = (
-            "cloud Foundry (with local fallback)"
+            f"cloud Foundry (with {local_label} fallback)"
             if config.TRANSCRIPT_REFINEMENT_USE_CLOUD
-            else "local Ollama"
+            else local_label
         )
         st.caption(
             "Transcript refinement is disabled. Set TRANSCRIPT_REFINEMENT_ENABLED=1 "
