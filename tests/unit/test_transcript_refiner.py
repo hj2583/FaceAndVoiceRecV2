@@ -1020,3 +1020,137 @@ def test_local_ollama_errors_are_sanitized(monkeypatch, outcome):
     assert config.TRANSCRIPT_REFINEMENT_URL not in str(caught.value)
     assert "localhost" not in str(caught.value)
     _assert_sanitized(caught.value)
+
+
+# ---- OpenAI-compatible local server ----
+
+
+def _openai_envelope(content):
+    return json.dumps(
+        {"choices": [{"message": {"role": "assistant", "content": content}}]}
+    ).encode("utf-8")
+
+
+def test_openai_compatible_request_contract(monkeypatch):
+    monkeypatch.setattr(config, "TRANSCRIPT_REFINEMENT_URL", "http://lan-host.invalid:30000")
+    monkeypatch.setattr(config, "TRANSCRIPT_REFINEMENT_MODEL", "remote-model")
+    sent = {}
+
+    def fake_urlopen(request, timeout):
+        sent["request"] = request
+        sent["timeout"] = timeout
+        return _FakeResponse(_openai_envelope(_GOOD_REPLY_TEXT))
+
+    monkeypatch.setattr(transcript_refiner, "urlopen", fake_urlopen)
+
+    result = transcript_refiner._post_openai_compatible_chat('{"target_segments": []}')
+
+    assert result["groups"][0]["text"] == "Hello."
+    request = sent["request"]
+    assert request.full_url == "http://lan-host.invalid:30000/v1/chat/completions"
+    assert request.get_method() == "POST"
+    headers = {key.lower(): value for key, value in request.header_items()}
+    assert headers["content-type"] == "application/json"
+    assert "authorization" not in headers
+    assert json.loads(request.data.decode("utf-8")) == {
+        "model": "remote-model",
+        "temperature": 0,
+        "stream": False,
+        "messages": [
+            {"role": "system", "content": transcript_refiner._SYSTEM_PROMPT},
+            {"role": "user", "content": '{"target_segments": []}'},
+        ],
+        "response_format": {
+            "type": "json_schema",
+            "json_schema": {
+                "name": "transcript_refinement",
+                "schema": transcript_refiner._OUTPUT_SCHEMA,
+            },
+        },
+    }
+    assert sent["timeout"] == config.TRANSCRIPT_REFINEMENT_TIMEOUT_SECONDS
+
+
+@pytest.mark.parametrize(
+    "content",
+    [
+        f"<think>reasoning about it</think>\n{_GOOD_REPLY_TEXT}",
+        f"<think>\nmulti\nline\n</think>\n\n```json\n{_GOOD_REPLY_TEXT}\n```",
+        f"```json\n{_GOOD_REPLY_TEXT}\n```",
+    ],
+    ids=["think", "think-fenced", "fenced"],
+)
+def test_openai_compatible_strips_think_and_fences(monkeypatch, content):
+    monkeypatch.setattr(
+        transcript_refiner,
+        "urlopen",
+        lambda request, timeout: _FakeResponse(_openai_envelope(content)),
+    )
+
+    assert transcript_refiner._post_openai_compatible_chat("{}")["groups"][0]["text"] == "Hello."
+
+
+@pytest.mark.parametrize(
+    "outcome",
+    [
+        urllib.error.URLError(f"http://lan-host.invalid {_ERROR_SENTINEL}"),
+        _http_error(500),
+        TimeoutError(_ERROR_SENTINEL),
+        OSError(_ERROR_SENTINEL),
+        b"not json " + _BODY_SENTINEL.encode(),
+        b"\xff\xfe",
+        b"[]",
+        json.dumps({"choices": []}).encode(),
+        json.dumps({"choices": [{"message": {"content": None}}]}).encode(),
+        json.dumps({"choices": [{"message": {"content": 5}}]}).encode(),
+        _openai_envelope(f"not json {_BODY_SENTINEL}"),
+        b"[" * 200000,
+    ],
+    ids=[
+        "url-error", "http-500", "timeout", "os-error", "malformed", "non-utf8",
+        "non-object", "no-choices", "null-content", "non-string-content",
+        "bad-content", "deep-nesting",
+    ],
+)
+def test_openai_compatible_errors_are_sanitized(monkeypatch, outcome):
+    monkeypatch.setattr(config, "TRANSCRIPT_REFINEMENT_URL", "http://lan-host.invalid:30000")
+
+    def fake_urlopen(request, timeout):
+        return _FakeOpener(outcome).open(request, timeout)
+
+    monkeypatch.setattr(transcript_refiner, "urlopen", fake_urlopen)
+
+    with pytest.raises(TranscriptRefinementError) as caught:
+        transcript_refiner._post_openai_compatible_chat("{}")
+
+    assert "lan-host" not in str(caught.value)
+    assert str(caught.value).startswith(
+        ("Local OpenAI-compatible server", "Refinement response must be")
+    )
+    _assert_sanitized(caught.value)
+
+
+def test_openai_compatible_http_error_reports_status_only(monkeypatch):
+    monkeypatch.setattr(
+        transcript_refiner,
+        "urlopen",
+        lambda request, timeout: _FakeOpener(_http_error(503)).open(request, timeout),
+    )
+
+    with pytest.raises(TranscriptRefinementError) as caught:
+        transcript_refiner._post_openai_compatible_chat("{}")
+
+    assert str(caught.value) == "Local OpenAI-compatible server request failed (HTTP 503)"
+
+
+def test_openai_compatible_oversized_response_is_rejected(monkeypatch):
+    monkeypatch.setattr(transcript_refiner, "_MAX_RESPONSE_BYTES", 64)
+    body = _openai_envelope(_BODY_SENTINEL + "x" * 200)
+    monkeypatch.setattr(
+        transcript_refiner, "urlopen", lambda request, timeout: _FakeResponse(body)
+    )
+
+    with pytest.raises(TranscriptRefinementError, match="size limit") as caught:
+        transcript_refiner._post_openai_compatible_chat("{}")
+
+    _assert_sanitized(caught.value)

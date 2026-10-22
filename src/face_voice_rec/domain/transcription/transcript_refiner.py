@@ -16,6 +16,7 @@ from face_voice_rec import config
 logger = logging.getLogger(__name__)
 
 _MAX_RESPONSE_BYTES = 4 * 1024 * 1024
+_THINK_PREFIX = re.compile(r"^\s*<think>.*?</think>\s*", flags=re.DOTALL)
 
 
 class TranscriptRefinementError(RuntimeError):
@@ -198,6 +199,56 @@ def _post_ollama_chat(user_content: str) -> dict:
             "Local Ollama returned an invalid structured response"
         ) from None
     return _parse_structured_response(content, "Local Ollama")
+
+
+def _post_openai_compatible_chat(user_content: str) -> dict:
+    provider = "Local OpenAI-compatible server"
+    payload = {
+        "model": config.TRANSCRIPT_REFINEMENT_MODEL,
+        "temperature": 0,
+        "stream": False,
+        "messages": [
+            {"role": "system", "content": _SYSTEM_PROMPT},
+            {"role": "user", "content": user_content},
+        ],
+        "response_format": {
+            "type": "json_schema",
+            "json_schema": {"name": "transcript_refinement", "schema": _OUTPUT_SCHEMA},
+        },
+    }
+    request = Request(
+        f"{config.TRANSCRIPT_REFINEMENT_URL}/v1/chat/completions",
+        data=json.dumps(payload, ensure_ascii=False).encode("utf-8"),
+        headers={"Content-Type": "application/json"},
+        method="POST",
+    )
+    try:
+        with urlopen(request, timeout=config.TRANSCRIPT_REFINEMENT_TIMEOUT_SECONDS) as response:
+            envelope = json.loads(_read_bounded_body(response, provider).decode("utf-8"))
+    except HTTPError as error:
+        raise TranscriptRefinementError(
+            f"{provider} request failed (HTTP {error.code})"
+        ) from None
+    except (URLError, TimeoutError, OSError, HTTPException) as error:
+        raise TranscriptRefinementError(
+            f"{provider} request {_transport_failure_kind(error)}"
+        ) from None
+    except (UnicodeDecodeError, json.JSONDecodeError, ValueError, RecursionError):
+        raise TranscriptRefinementError(
+            f"{provider} returned an invalid structured response"
+        ) from None
+
+    try:
+        content = envelope["choices"][0]["message"]["content"]
+    except (KeyError, IndexError, TypeError):
+        raise TranscriptRefinementError(
+            f"{provider} returned an invalid structured response"
+        ) from None
+    if not isinstance(content, str):
+        raise TranscriptRefinementError(
+            f"{provider} returned an invalid structured response"
+        )
+    return _parse_structured_response(_THINK_PREFIX.sub("", content, count=1), provider)
 
 
 def _transport_failure_kind(error: BaseException) -> str:
