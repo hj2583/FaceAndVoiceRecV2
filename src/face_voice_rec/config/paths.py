@@ -2,6 +2,8 @@ from __future__ import annotations
 
 from pathlib import Path
 
+from face_voice_rec import config
+
 from .migration import migrate_legacy_data
 
 
@@ -46,7 +48,8 @@ def initialize_runtime_paths(
     runtime_log_dir = resolved_data_root / "artifacts" / "logs"
     runtime_transcripts_dir = resolved_data_root / "transcripts"
 
-    migrate_legacy_data(resolved_project_root, resolved_data_root)
+    if not config.DATABASE_URL:
+        migrate_legacy_data(resolved_project_root, resolved_data_root)
 
     required_directories = (
         runtime_db_path.parent,

@@ -11,7 +11,7 @@ def _load_environment(project_root: Path | None = None) -> None:
 
 _load_environment()
 
-DATABASE_URL = os.environ.get("DATABASE_URL", "").strip() #reserve for postgreSQL
+DATABASE_URL = os.environ.get("DATABASE_URL", "").strip()
 QDRANT_URL = os.environ.get("QDRANT_URL", "http://localhost:6333").strip()
 QDRANT_API_KEY = os.environ.get("QDRANT_API_KEY", "").strip() or None
 QDRANT_TIMEOUT_SECONDS = float(os.environ.get("QDRANT_TIMEOUT_SECONDS", "10"))

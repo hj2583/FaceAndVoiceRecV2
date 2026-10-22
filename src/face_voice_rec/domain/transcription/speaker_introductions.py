@@ -3,7 +3,6 @@
 from dataclasses import dataclass
 import logging
 import re
-import sqlite3
 
 from face_voice_rec import config
 from face_voice_rec.storage import database
@@ -369,7 +368,7 @@ def process_meeting_introductions(
                         _index_voice_profile(person_id)
                         status = "voice_enrolled_face_matched"
                         changed_transcript = True
-                    except (FileNotFoundError, ValueError, OSError, sqlite3.Error) as error:
+                    except (FileNotFoundError, ValueError, OSError, *database.DATABASE_ERRORS) as error:
                         person_id = None
                         reason = f"Could not enroll the matched voice: {error}"
                         status = "pending_voice_enrollment"
@@ -450,7 +449,7 @@ def process_meeting_introductions(
                 _index_voice_profile(person_id)
                 status = "voice_enrolled_face_pending"
                 changed_transcript = True
-            except (FileNotFoundError, ValueError, OSError, sqlite3.Error) as error:
+            except (FileNotFoundError, ValueError, OSError, *database.DATABASE_ERRORS) as error:
                 reason = f"Could not enroll the introduced voice: {error}"
                 status = "pending_voice_enrollment"
                 logger.warning(
@@ -468,7 +467,7 @@ def process_meeting_introductions(
                 _index_voice_profile(person_id)
                 status = "voice_enrolled_face_pending"
                 changed_transcript = True
-            except (FileNotFoundError, ValueError, OSError, sqlite3.Error) as error:
+            except (FileNotFoundError, ValueError, OSError, *database.DATABASE_ERRORS) as error:
                 reason = f"Could not enroll the introduced voice: {error}"
                 status = "pending_voice_enrollment"
                 logger.warning(
@@ -506,7 +505,7 @@ def process_meeting_introductions(
                     status = "matched_face_and_voice"
                 reason = None
                 changed_transcript = True
-            except (FileNotFoundError, ValueError, OSError, sqlite3.Error) as error:
+            except (FileNotFoundError, ValueError, OSError, *database.DATABASE_ERRORS) as error:
                 logger.warning(
                     "Could not enroll active face track for meeting %s: %s",
                     meeting_id,

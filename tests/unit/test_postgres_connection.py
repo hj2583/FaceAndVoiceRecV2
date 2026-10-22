@@ -1,7 +1,9 @@
 from face_voice_rec.storage.database import (
     _PostgresConnection,
+    _hybrid_row,
     _insert_id,
     _postgres_sql,
+    init_db,
 )
 
 
@@ -69,3 +71,30 @@ def test_postgres_insert_id_uses_returning_primary_key():
     assert connection.calls == [
         ("INSERT INTO persons(name) VALUES (%s) RETURNING person_id", ("Ari",))
     ]
+
+
+def test_init_db_uses_alembic_when_postgres_is_configured(monkeypatch):
+    from alembic import command
+    from face_voice_rec import config
+
+    calls = []
+    monkeypatch.setattr(config, "DATABASE_URL", "postgresql+psycopg://db/app")
+    monkeypatch.setattr(command, "upgrade", lambda cfg, revision: calls.append(revision))
+
+    init_db()
+
+    assert calls == ["head"]
+
+
+def test_postgres_row_supports_numeric_and_named_column_access():
+    class Column:
+        def __init__(self, name):
+            self.name = name
+
+    class Cursor:
+        description = (Column("segment_id"), Column("text"))
+
+    row = _hybrid_row(Cursor(), (12, "hello"))
+
+    assert row[0] == row["segment_id"] == 12
+    assert row[1] == row["text"] == "hello"

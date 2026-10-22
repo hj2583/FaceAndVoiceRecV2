@@ -1,5 +1,4 @@
 import io
-import sqlite3
 import tempfile
 import uuid
 import wave
@@ -24,6 +23,7 @@ from face_voice_rec.storage.database import (
     reassign_voice_embedding,
     resolve_unknown_voice,
 )
+from face_voice_rec.storage import database
 
 
 def _fmt_time(seconds: float) -> str:
@@ -187,7 +187,7 @@ def render() -> None:
                             quality=1.0,
                             audio_path=audio_path,
                         )
-                    except (OSError, ValueError, sqlite3.Error, wave.Error) as error:
+                    except (OSError, ValueError, wave.Error, *database.DATABASE_ERRORS) as error:
                         for artifact_path in (embedding_path, audio_path):
                             if artifact_path is not None:
                                 try:
@@ -309,7 +309,7 @@ def render() -> None:
                                             f"Saved voice sample #{embedding_id} "
                                             "could not be found."
                                         )
-                                except (TypeError, ValueError, sqlite3.Error) as error:
+                                except (TypeError, ValueError, *database.DATABASE_ERRORS) as error:
                                     st.error(
                                         f"Could not change the person for sample "
                                         f"#{embedding_id}: {error}"

@@ -1,13 +1,12 @@
 import html
 import json
-import sqlite3
 from pathlib import Path
 
 import pandas as pd
 import streamlit as st
 
 from face_voice_rec import config
-from face_voice_rec.config import DB_PATH, TRANSCRIPT_REFINEMENT_ENABLED
+from face_voice_rec.config import TRANSCRIPT_REFINEMENT_ENABLED
 from face_voice_rec.domain.transcription.transcription_core import (
     SENTENCE_TYPES,
     TranscriptionSegment,
@@ -15,6 +14,7 @@ from face_voice_rec.domain.transcription.transcription_core import (
     group_readable_paragraphs,
     refresh_readable_transcript,
 )
+from face_voice_rec.storage import database
 from face_voice_rec.storage.database import (
     confirm_meeting_introduction,
     create_person,
@@ -70,7 +70,7 @@ def _refinement_status_caption(status: str, method: str) -> str:
 
 def render() -> None:
     st.header("📝 Meeting Transcripts")
-    with sqlite3.connect(DB_PATH) as connection:
+    with database.get_conn() as connection:
         meetings = connection.execute(
             """
             SELECT meeting_id, video_path, transcription_status, error_log
@@ -92,7 +92,7 @@ def render() -> None:
         format_func=lambda meeting_id: options[meeting_id],
     )
 
-    with sqlite3.connect(DB_PATH) as connection:
+    with database.get_conn() as connection:
         rows = connection.execute(
             """
             SELECT speaker_label, start_ms, end_ms, text, original_text,
@@ -203,7 +203,7 @@ def render() -> None:
                     from app.pages.face_database import get_face_index
 
                     get_face_index().rebuild()
-                except (ValueError, OSError, sqlite3.Error) as error:
+                except (ValueError, OSError, *database.DATABASE_ERRORS) as error:
                     st.error(f"Could not confirm introduction: {error}")
                 else:
                     st.success(f"Confirmed {name} as {person_id_to_assign}.")

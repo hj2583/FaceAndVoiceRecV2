@@ -498,6 +498,7 @@ def process_video_pipeline(
                 event["activity_score"],
                 "video",
                 track_id=event_track_id,
+                source_ref=input_path,
             )
             active_speech_logs.append({
                 "start_time": round(event["start_time"], 2),

@@ -11,7 +11,6 @@ from numbers import Integral, Real
 from typing import Mapping, Sequence
 
 import psycopg
-from psycopg.rows import dict_row
 
 from face_voice_rec import config
 from face_voice_rec.config import DB_PATH
@@ -20,6 +19,7 @@ from face_voice_rec.config import DB_PATH
 logger = logging.getLogger(__name__)
 
 _DB_LOCK = threading.RLock()
+DATABASE_ERRORS = (sqlite3.Error, psycopg.Error)
 INTEGRITY_ERRORS = (sqlite3.IntegrityError, psycopg.IntegrityError)
 
 
@@ -90,6 +90,38 @@ class _PostgresConnection:
     def close(self):
         self._connection.close()
 
+    @property
+    def row_factory(self):
+        return self._connection.row_factory
+
+    @row_factory.setter
+    def row_factory(self, factory):
+        self._connection.row_factory = _hybrid_row if factory is sqlite3.Row else factory
+
+
+class _HybridRow:
+    """Support both sqlite3.Row-style numeric and named column access."""
+
+    def __init__(self, columns, values):
+        self._columns = tuple(columns)
+        self._values = tuple(values)
+        self._positions = {name: index for index, name in enumerate(self._columns)}
+
+    def __getitem__(self, key):
+        if isinstance(key, str):
+            key = self._positions[key]
+        return self._values[key]
+
+    def __iter__(self):
+        return iter(self._values)
+
+    def __len__(self):
+        return len(self._values)
+
+
+def _hybrid_row(cursor, values):
+    return _HybridRow((column.name for column in cursor.description), values)
+
 
 def _insert_id(connection, statement, parameters, column_name):
     if isinstance(connection, _PostgresConnection):
@@ -113,6 +145,19 @@ def utc_now():
 
 
 def init_db():
+    if config.DATABASE_URL:
+        if not config.DATABASE_URL.startswith(
+            ("postgresql://", "postgresql+psycopg://")
+        ):
+            raise ValueError("DATABASE_URL must be a PostgreSQL URL")
+        from alembic import command
+        from alembic.config import Config
+
+        project_root = Path(__file__).resolve().parents[3]
+        alembic_config = Config(str(project_root / "alembic.ini"))
+        command.upgrade(alembic_config, "head")
+        return
+
     with _DB_LOCK:
         conn = sqlite3.connect(DB_PATH, timeout=config.DB_BUSY_TIMEOUT_SECONDS)
         try:
@@ -193,6 +238,7 @@ def init_db():
                 confidence REAL,
                 source TEXT NOT NULL,
                 transcript TEXT,
+                source_ref TEXT,
                 FOREIGN KEY(person_id) REFERENCES persons(person_id)
             )
         """)
@@ -224,6 +270,8 @@ def init_db():
         }
             if "track_id" not in audio_log_columns:
                 conn.execute("ALTER TABLE audio_logs ADD COLUMN track_id INTEGER")
+            if "source_ref" not in audio_log_columns:
+                conn.execute("ALTER TABLE audio_logs ADD COLUMN source_ref TEXT")
 
             conn.execute("""
             CREATE TABLE IF NOT EXISTS meetings (
@@ -433,7 +481,7 @@ def init_db():
 @contextmanager
 def get_conn(*, row_factory=None):
     if config.DATABASE_URL:
-        postgres_row_factory = dict_row if row_factory is sqlite3.Row else None
+        postgres_row_factory = _hybrid_row if row_factory is sqlite3.Row else None
         connection = psycopg.connect(
             _postgres_dsn(),
             row_factory=postgres_row_factory,
@@ -1744,15 +1792,30 @@ def log_recognition(timestamp_sec, person_id, person_name, confidence, source):
         )
 
 
-def log_audio(start_time, end_time, person_id, person_name, confidence, source, transcript=None, track_id=None):
+def log_audio(
+    start_time,
+    end_time,
+    person_id,
+    person_name,
+    confidence,
+    source,
+    transcript=None,
+    track_id=None,
+    source_ref=None,
+):
+    normalized_source_ref = (
+        _normalize_source_ref(source, source_ref)
+        if source_ref is not None
+        else None
+    )
     with get_conn() as conn:
         conn.execute(
             """
             INSERT INTO audio_logs(
                 start_time, end_time, person_id, person_name,
-                confidence, source, transcript, track_id
+                confidence, source, transcript, track_id, source_ref
             )
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 float(start_time),
@@ -1763,32 +1826,64 @@ def log_audio(start_time, end_time, person_id, person_name, confidence, source, 
                 source,
                 transcript,
                 track_id,
+                normalized_source_ref,
             ),
         )
 
 
-def fetch_audio_logs(source=None):
+def fetch_audio_logs(
+    source=None,
+    person_id=None,
+    from_time=None,
+    to_time=None,
+    source_ref=None,
+):
     with get_conn() as conn:
-        if source:
-            return conn.execute(
-                """
-                SELECT log_id, start_time, end_time, person_name,
-                       confidence, source, transcript, track_id
-                FROM audio_logs
-                WHERE source=?
-                ORDER BY start_time DESC
-                """,
-                (source,),
-            ).fetchall()
-
-        return conn.execute(
-            """
+        query = """
             SELECT log_id, start_time, end_time, person_name,
                    confidence, source, transcript, track_id
             FROM audio_logs
-            ORDER BY start_time DESC
+        """
+        where_clauses = []
+        params = []
+        if source is not None:
+            where_clauses.append("source=?")
+            params.append(source)
+        if source_ref is not None:
+            where_clauses.append("source_ref=?")
+            params.append(_normalize_source_ref(source, source_ref))
+        if person_id is not None:
+            if person_id == "UNKNOWN" or person_id == -1:
+                where_clauses.append(
+                    "(person_id IS NULL OR person_name='UNKNOWN' OR person_name IS NULL)"
+                )
+            else:
+                where_clauses.append("person_id=?")
+                params.append(int(person_id))
+        if from_time is not None:
+            where_clauses.append("start_time>=?")
+            params.append(float(from_time))
+        if to_time is not None:
+            where_clauses.append("start_time<=?")
+            params.append(float(to_time))
+        if where_clauses:
+            query += " WHERE " + " AND ".join(where_clauses)
+        query += " ORDER BY start_time DESC"
+
+        return conn.execute(query, params).fetchall()
+
+
+def list_audio_log_video_sources():
+    with get_conn() as conn:
+        rows = conn.execute(
+            """
+            SELECT DISTINCT source_ref
+            FROM audio_logs
+            WHERE source='video' AND source_ref IS NOT NULL
+            ORDER BY source_ref
             """
         ).fetchall()
+    return [row[0] for row in rows]
 
 
 def _normalize_source_ref(source, source_ref):

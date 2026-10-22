@@ -173,6 +173,7 @@ def test_process_video_pipeline_logs_unknown_speaker_events(tmp_path, monkeypatc
     assert args[3] == "UNKNOWN"
     assert args[5] == "video"
     assert kwargs["track_id"] == 1
+    assert kwargs["source_ref"] == (tmp_path / "in.mp4").resolve()
     speech = json.loads((tmp_path / "log.json").read_text(encoding="utf-8"))["speech"]
     assert len(speech) == 1
     assert speech[0]["person_id"] is None

@@ -105,6 +105,7 @@ def test_main_renders_tabs_in_expected_order_with_startup_sequence(monkeypatch):
     events = []
     fake_st = _FakeStreamlit(events)
 
+    monkeypatch.setattr(main.config, "DATABASE_URL", "postgresql+psycopg://db/app")
     monkeypatch.setattr(main, "st", fake_st)
 
     monkeypatch.setattr(main, "initialize_runtime_paths", lambda: events.append(("initialize_runtime_paths",)))

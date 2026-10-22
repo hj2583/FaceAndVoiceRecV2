@@ -10,6 +10,7 @@ import uuid
 import cv2
 import numpy as np
 
+from face_voice_rec import config
 from face_voice_rec.domain.voice.audio_core import RealtimeVAD
 from face_voice_rec.domain.voice import voice_core
 
@@ -1456,6 +1457,10 @@ if __name__ == "__main__":
     args = parser.parse_args()
 
     try:
+        if not config.DATABASE_URL:
+            raise RuntimeError(
+                "PostgreSQL is required. Set DATABASE_URL in the repository-root .env."
+            )
         initialize_runtime_paths()
         run(
             camera=args.camera

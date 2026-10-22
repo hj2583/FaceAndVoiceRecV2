@@ -140,7 +140,6 @@ def test_render_uses_configured_provider_action_text_and_saved_fallback_details(
     )
 
     module, fake_st = _load_transcripts_module(monkeypatch)
-    monkeypatch.setattr(module, "DB_PATH", db_path)
     monkeypatch.setattr(module, "TRANSCRIPT_REFINEMENT_ENABLED", True)
     monkeypatch.setattr(config, "TRANSCRIPT_REFINEMENT_USE_CLOUD", True)
 
