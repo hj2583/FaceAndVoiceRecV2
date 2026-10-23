@@ -18,12 +18,12 @@ Build and run the FaceAndVoiceRec Streamlit app in Linux containers with NVIDIA 
 
 Create a Linux NVIDIA/CUDA application image and a Docker Compose stack with separate services for the app, PostgreSQL, and Qdrant. PostgreSQL and Qdrant use the existing named volumes, declared as external Compose volumes; they must not be recreated or deleted. Mount `./data` into the app container for persistent application data and logs, and use a separate named volume for downloaded ML model caches. The transcript LLM server remains external and is addressed by the URL in `.env`.
 
-The image uses Python 3.14, installs `requirements-gpu.txt`, system libraries required by OpenCV/audio, and FFmpeg. Compose maps the app's database and Qdrant URLs to the internal service names (`postgres` and `qdrant`) rather than `localhost`. The app listens on container port 8501 and maps to host port 8501. Health checks gate app startup on PostgreSQL and Qdrant readiness.
+The image uses Python 3.14, installs `requirements-gpu.txt`, system libraries required by OpenCV/audio, and FFmpeg. Compose maps the app's database and Qdrant URLs to the internal service names (`postgres` and `qdrant`) rather than `localhost`. The app listens on container port 8501 and maps to host port 8501. A Compose health check gates app startup on PostgreSQL; the app startup command polls Qdrant's `/readyz` endpoint before launching Streamlit because the official Qdrant image has no shell or HTTP client for a container-native health check.
 
 ## Docker files
 
 - `Dockerfile`: reproducible NVIDIA/CUDA-capable application image, installs runtime libraries, FFmpeg, Python GPU requirements, and the project package; starts Streamlit on `0.0.0.0:8501`.
-- `docker-compose.yml`: app, PostgreSQL and Qdrant services; GPU reservation for the app; health checks; persistent data/model-cache mounts; external declarations for the existing PostgreSQL and Qdrant volumes; service-address overrides.
+- `docker-compose.yml`: app, PostgreSQL and Qdrant services; GPU reservation for the app; PostgreSQL health check; persistent data/model-cache mounts; external declarations for the existing PostgreSQL and Qdrant volumes; service-address overrides.
 - `.dockerignore`: exclude `.env`, `.git`, virtual environments, local caches, `data/`, test outputs, and other local artifacts from the image build context.
 - Optional `docker-compose.linux-devices.yml`: Linux-host-only webcam/microphone device mappings. Not used on Windows Docker Desktop.
 - `README.md`: backup, environment, build/start, verification, stop/restart and troubleshooting instructions.
@@ -45,7 +45,7 @@ NVIDIA GPU acceleration is supported only when the host NVIDIA driver and Docker
 1. Verify Docker GPU access and the model endpoint before disrupting existing services.
 2. Back up PostgreSQL and Qdrant and verify the external named volumes.
 3. Stop the existing PostgreSQL and Qdrant containers without removing their volumes.
-4. Build the application image and start the Compose stack.
+4. Build the application image and start the Compose stack; app startup waits for PostgreSQL health and Qdrant readiness.
 5. Verify app health at `http://localhost:8501`, PostgreSQL health, Qdrant health, GPU visibility in the app container, the external model server endpoint, and the presence of existing data.
 6. Run one prerecorded video/audio workflow and verify that generated media, transcripts, and logs are persisted under `./data`.
 
