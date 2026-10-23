@@ -2,15 +2,6 @@
 
 A Streamlit application for face recognition, active-speaker estimation, and optional video transcription.
 
-This project is built to run comfortably on CPU by default. If CUDA is available, the app can use it automatically. If not, it falls back to CPU instead of failing at startup.
-
-## Overview
-
-The system combines:
-
-- UniFace SCRFD + ArcFace for face detection and embedding extraction
-- UniFace FaceMesh for facial landmarks and mouth-motion measurements
-- OpenCV for fallback detection and video handling
 - PostgreSQL for relational records
 - Qdrant for face and voice vector search
 - Silero VAD for speech activity detection
@@ -181,15 +172,6 @@ streamlit run app/main.py
 # or from the app directory:
 # streamlit run main.py
 ```
-
-`TRANSCRIPT_REFINEMENT_API` selects the local server API: `ollama` (default,
-native `/api/chat`) or `openai` (OpenAI-compatible `/v1/chat/completions`, for
-example llama.cpp `llama-server`). Set `TRANSCRIPT_REFINEMENT_URL` to the
-server root without `/v1`, and set `TRANSCRIPT_REFINEMENT_MODEL` to the model
-name the server exposes. Example for a `llama-server` on another machine:
-
-```dotenv
-TRANSCRIPT_REFINEMENT_ENABLED=true
 TRANSCRIPT_REFINEMENT_API=openai
 TRANSCRIPT_REFINEMENT_URL=http://192.168.1.50:30000
 TRANSCRIPT_REFINEMENT_MODEL=your-served-model-name
@@ -330,6 +312,75 @@ pip install -r requirements-gpu.txt
 ```
 
 The project prefers CUDA automatically when it is available. If CUDA is missing or unavailable, it falls back to CPU mode. GPU acceleration covers both face recognition (ONNX Runtime) and the torch-based audio models (Whisper, Silero VAD, SpeechBrain voice embeddings) — `requirements-gpu.txt` pulls a CUDA-enabled build of `torch` from PyTorch's own package index for this reason. If you already have a CPU-only `torch` installed from `requirements.txt`, re-run `pip install -r requirements-gpu.txt` to replace it with the CUDA build.
+
+## Docker Compose (NVIDIA)
+
+The Docker deployment runs the app, PostgreSQL and Qdrant in separate Linux containers and reuses the existing `face_voice_postgres` and `face_voice_qdrant` volumes. The app uses the NVIDIA/CUDA requirements. Compose reads the root `.env` at runtime; it is excluded from the image. The container entrypoint changes only the DB hostname to `postgres`, preserving the existing `DATABASE_URL` credentials. The transcript model remains external.
+
+On Windows Docker Desktop, uploaded/pre-recorded media is supported, but Windows webcam and microphone devices are not passed through to the Linux container. The optional `docker-compose.linux-devices.yml` is only for Linux Docker hosts.
+
+If running Compose from `.worktrees/docker-compose-deployment`, set the env file and data directory to the original repository paths in the same PowerShell session:
+
+```powershell
+$env:APP_ENV_FILE = (Resolve-Path ..\..\.env).Path
+$env:DATA_ROOT = (Resolve-Path ..\..\data).Path
+```
+
+When running from the repository root, leave these variables unset; Compose uses `./.env` and `./data`.
+
+### Back up before handoff
+
+Set the existing `.env` `DATABASE_URL` to the currently working connection. The Docker entrypoint rewrites its host for the Compose network, so no duplicate password variable is needed. The existing Postgres volume is initialized; a fresh empty Postgres volume is not supported by this Compose file.
+
+Create and verify backups before stopping `face-voice-postgres` or `face-voice-qdrant`:
+
+```powershell
+$dataRoot = if ($env:DATA_ROOT) { $env:DATA_ROOT } else { Join-Path $PWD "data" }
+$backupRoot = Join-Path $dataRoot ("backups\docker-handoff-" + (Get-Date -Format "yyyyMMdd-HHmmss"))
+New-Item -ItemType Directory -Path $backupRoot -Force | Out-Null
+
+docker exec face-voice-postgres pg_dump -U face_voice_rec -d face_voice_rec -Fc -f /tmp/face_voice_rec.dump
+if ($LASTEXITCODE -ne 0) { throw "pg_dump failed; leave existing services running" }
+docker cp face-voice-postgres:/tmp/face_voice_rec.dump "$backupRoot\face_voice_rec.dump"
+if ($LASTEXITCODE -ne 0) { throw "Postgres backup copy failed; leave existing services running" }
+if ((Get-Item "$backupRoot\face_voice_rec.dump").Length -le 0) { throw "Postgres backup is empty" }
+docker exec face-voice-postgres rm -f /tmp/face_voice_rec.dump
+
+$collections = (Invoke-RestMethod http://localhost:6333/collections).result.collections
+foreach ($collection in $collections) {
+    $name = [uri]::EscapeDataString($collection.name)
+    $snapshot = Invoke-RestMethod -Method Post -Uri "http://localhost:6333/collections/$name/snapshots"
+    $snapshotName = [uri]::EscapeDataString($snapshot.result.name)
+    $path = Join-Path $backupRoot "$($collection.name).snapshot"
+    Invoke-WebRequest -Uri "http://localhost:6333/collections/$name/snapshots/$snapshotName" -OutFile $path -UseBasicParsing
+    if ((Get-Item $path).Length -le 0) { throw "Qdrant snapshot is empty: $($collection.name)" }
+}
+```
+
+Only hand off the services after every backup file exists and is non-empty. Build first, then start Compose:
+
+```powershell
+docker build --pull -t face-voice-rec:gpu .
+```
+
+When running Compose from this Git worktree, point it at the original root `.env` and `data` directory before starting the stack:
+
+```powershell
+$env:APP_ENV_FILE = (Resolve-Path ..\..\.env).Path
+$env:DATA_ROOT = (Resolve-Path ..\..\data).Path
+```
+
+Then hand off the existing containers and start the stack:
+
+```powershell
+docker stop face-voice-postgres face-voice-qdrant
+docker compose up -d --build
+docker compose ps
+```
+
+Verify the app, Qdrant and Postgres health endpoints, then check that existing database counts and Qdrant collections are still present. Process one prerecorded MP4/MP3 in the Docker app at `http://localhost:8502`; the host-run app remains at `http://localhost:8501`.
+
+Stop the stack with `docker compose down` only. Never use `docker compose down -v`, `docker volume rm`, or remove either named volume. If startup fails, stop Compose without `-v` and start the original containers. Restore backups only after confirming it is necessary.
 
 ## Project structure
 

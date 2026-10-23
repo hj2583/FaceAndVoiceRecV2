@@ -1,0 +1,66 @@
+services:
+  postgres:
+    image: postgres:17
+    environment:
+      POSTGRES_USER: face_voice_rec
+      POSTGRES_DB: face_voice_rec
+    ports:
+      - "5432:5432"
+    volumes:
+      - face_voice_postgres:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U $${POSTGRES_USER} -d $${POSTGRES_DB}"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 20s
+    restart: unless-stopped
+
+  qdrant:
+    image: qdrant/qdrant:v1.20.0
+    ports:
+      - "6333:6333"
+    volumes:
+      - face_voice_qdrant:/qdrant/storage
+    restart: unless-stopped
+
+  app:
+    image: face-voice-rec:gpu
+    build:
+      context: .
+      dockerfile: Dockerfile
+    env_file:
+      - ${APP_ENV_FILE:-.env}
+    environment:
+      DATABASE_HOST: postgres
+      QDRANT_URL: http://qdrant:6333
+      QDRANT_API_KEY: ""
+    ports:
+      - "8502:8501"
+    volumes:
+      - type: bind
+        source: ${DATA_ROOT:-./data}
+        target: /app/data
+      - model-cache:/models
+    gpus: all
+    depends_on:
+      postgres:
+        condition: service_healthy
+      qdrant:
+        condition: service_started
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://localhost:8501/_stcore/health"]
+      interval: 30s
+      timeout: 5s
+      retries: 5
+      start_period: 120s
+    restart: unless-stopped
+
+volumes:
+  face_voice_postgres:
+    external: true
+    name: face_voice_postgres
+  face_voice_qdrant:
+    external: true
+    name: face_voice_qdrant
+  model-cache:

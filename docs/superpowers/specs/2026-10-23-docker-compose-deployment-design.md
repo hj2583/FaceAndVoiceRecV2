@@ -18,21 +18,22 @@ Build and run the FaceAndVoiceRec Streamlit app in Linux containers with NVIDIA 
 
 Create a Linux NVIDIA/CUDA application image and a Docker Compose stack with separate services for the app, PostgreSQL, and Qdrant. PostgreSQL and Qdrant use the existing named volumes, declared as external Compose volumes; they must not be recreated or deleted. Mount `./data` into the app container for persistent application data and logs, and use a separate named volume for downloaded ML model caches. The transcript LLM server remains external and is addressed by the URL in `.env`.
 
-The image uses Python 3.14, installs `requirements-gpu.txt`, system libraries required by OpenCV/audio, and FFmpeg. Compose maps the app's database and Qdrant URLs to the internal service names (`postgres` and `qdrant`) rather than `localhost`. The app listens on container port 8501 and maps to host port 8501. A Compose health check gates app startup on PostgreSQL; the app startup command polls Qdrant's `/readyz` endpoint before launching Streamlit because the official Qdrant image has no shell or HTTP client for a container-native health check.
+The image uses Python 3.14, installs `requirements-gpu.txt`, system libraries required by OpenCV/audio, and FFmpeg. Compose maps the app's database and Qdrant URLs to the internal service names (`postgres` and `qdrant`) rather than `localhost`. The app listens on container port 8501 and maps to host port 8502 so the current host app can remain on 8501. A Compose health check gates app startup on PostgreSQL; the app startup command polls Qdrant's `/readyz` endpoint before launching Streamlit because the official Qdrant image has no shell or HTTP client for a container-native health check.
 
 ## Docker files
 
 - `Dockerfile`: reproducible NVIDIA/CUDA-capable application image, installs runtime libraries, FFmpeg, Python GPU requirements, and the project package; starts Streamlit on `0.0.0.0:8501`.
 - `docker-compose.yml`: app, PostgreSQL and Qdrant services; GPU reservation for the app; PostgreSQL health check; persistent data/model-cache mounts; external declarations for the existing PostgreSQL and Qdrant volumes; service-address overrides.
+- `src/face_voice_rec/docker_entrypoint.py`: uses SQLAlchemy URL parsing to change the configured database URL host to the Compose PostgreSQL service without copying or reconstructing its credentials.
 - `.dockerignore`: exclude `.env`, `.git`, virtual environments, local caches, `data/`, test outputs, and other local artifacts from the image build context.
 - Optional `docker-compose.linux-devices.yml`: Linux-host-only webcam/microphone device mappings. Not used on Windows Docker Desktop.
 - `README.md`: backup, environment, build/start, verification, stop/restart and troubleshooting instructions.
 
 ## Configuration and secret handling
 
-Compose reads the root `.env` locally with `env_file` and passes runtime values to the app. The image build must not receive the contents of `.env`. Compose overrides `DATABASE_URL` to use `postgres:5432` and `QDRANT_URL` to use `http://qdrant:6333`. The PostgreSQL service must be configured with the same user, database, and password that initialized the existing data volume. The app continues to use the external model-server URL configured in `.env`.
+Compose reads the root `.env` locally with `env_file` and passes runtime values to the app. The image build must not receive the contents of `.env`. Compose sets `DATABASE_HOST=postgres` and `QDRANT_URL=http://qdrant:6333`. `src/face_voice_rec/docker_entrypoint.py` changes only the host in `DATABASE_URL` using `sqlalchemy.engine.make_url(...).set(host=...)`; it preserves the existing username, password and URL-encoded characters, and never prints the URL. The Postgres container uses the existing initialized data volume and existing `face_voice_rec` role/database. It does not need `POSTGRES_PASSWORD` at runtime because the official Postgres entrypoint skips initialization/password verification for an initialized data directory. Starting with a new or empty Postgres volume is explicitly out of scope and must fail safely rather than initialize with a placeholder credential. The app continues to use the external model-server URL configured in `.env`.
 
-Before Compose starts, inspect the existing containers and verify their named volume mounts and PostgreSQL database credentials. Create a PostgreSQL logical backup and Qdrant collection snapshots before stopping either service. Never run `docker compose down -v`, `docker volume rm`, or any command that deletes existing volumes. Compose must declare the existing volume names as `external: true`.
+Before Compose starts, inspect the existing containers and verify their named volume mounts and PostgreSQL database identity. Confirm the current `DATABASE_URL` works before stopping either service. Create a PostgreSQL logical backup and Qdrant collection snapshots before stopping either service. Never run `docker compose down -v`, `docker volume rm`, or any command that deletes existing volumes. Compose must declare the existing volume names as `external: true`.
 
 ## Data and hardware behavior
 
@@ -46,7 +47,7 @@ NVIDIA GPU acceleration is supported only when the host NVIDIA driver and Docker
 2. Back up PostgreSQL and Qdrant and verify the external named volumes.
 3. Stop the existing PostgreSQL and Qdrant containers without removing their volumes.
 4. Build the application image and start the Compose stack; app startup waits for PostgreSQL health and Qdrant readiness.
-5. Verify app health at `http://localhost:8501`, PostgreSQL health, Qdrant health, GPU visibility in the app container, the external model server endpoint, and the presence of existing data.
+5. Verify app health at `http://localhost:8502`, PostgreSQL health, Qdrant health, GPU visibility in the app container, the external model server endpoint, and the presence of existing data.
 6. Run one prerecorded video/audio workflow and verify that generated media, transcripts, and logs are persisted under `./data`.
 
 A failed verification must not trigger deletion or recreation of the existing data volumes. If the existing volume names, credentials, or GPU configuration differ from the assumptions above, stop before service handoff and revise the Compose configuration with the user.

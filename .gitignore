@@ -45,6 +45,7 @@ data/db/faces.db
 data/db/faces.db-wal
 data/db/faces.db-shm
 data/artifacts/face_index.npz
+data/backups/
 data/artifacts/known_faces/**
 data/artifacts/known_voices/**
 data/artifacts/unknown_faces/**
