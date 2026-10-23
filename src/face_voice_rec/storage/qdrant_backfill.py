@@ -9,6 +9,7 @@ from typing import Any
 import numpy as np
 
 from face_voice_rec import config
+from face_voice_rec.storage.safe_numpy import load_embedding_array
 from face_voice_rec.storage import database
 from face_voice_rec.storage.qdrant_store import (
     QdrantVectorStore,
@@ -47,7 +48,7 @@ class PreparedBackfill:
 
 
 def _load_vector(path: str, dimension: int) -> np.ndarray:
-    loaded = np.load(Path(path), allow_pickle=True)
+    loaded = load_embedding_array(path)
     try:
         value = loaded.tolist() if isinstance(loaded, np.ndarray) else loaded
         if isinstance(value, np.ndarray):

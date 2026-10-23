@@ -11,6 +11,7 @@ from qdrant_client import models
 from face_voice_rec import config
 from face_voice_rec.domain.face.face_core import FaceIndex
 from face_voice_rec.storage.qdrant_store import get_qdrant_vector_store
+from face_voice_rec.storage.safe_numpy import load_embedding_array
 from face_voice_rec.storage.database import (
     create_person,
     delete_low_quality_unknowns,
@@ -309,9 +310,8 @@ def render() -> None:
 
                         for sample in sample_records:
                             try:
-                                emb = np.load(
-                                    sample["embedding_path"],
-                                    allow_pickle=True,
+                                emb = load_embedding_array(
+                                    sample["embedding_path"]
                                 )
                                 if emb.dtype == object:
                                     emb = np.asarray(emb.tolist(), dtype=np.float32)
@@ -344,10 +344,7 @@ def render() -> None:
                                 and os.path.exists(embedding_path)
                             ):
                                 try:
-                                    emb = np.load(
-                                        embedding_path,
-                                        allow_pickle=True,
-                                    )
+                                    emb = load_embedding_array(embedding_path)
                                     if emb.dtype == object:
                                         emb = np.asarray(emb.tolist(), dtype=np.float32)
 

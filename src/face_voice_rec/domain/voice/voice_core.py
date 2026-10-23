@@ -17,6 +17,7 @@ import numpy as np
 from qdrant_client import models
 
 from face_voice_rec import config
+from face_voice_rec.storage.safe_numpy import load_embedding_array
 from face_voice_rec.storage.database import (
     get_conn,
     list_resolved_unknown_voice_samples_for_source,
@@ -181,7 +182,7 @@ def index_voice_enrollments_for_person(person_id):
         if int(row_person_id) != int(person_id):
             continue
         try:
-            saved = np.load(path, allow_pickle=True)
+            saved = load_embedding_array(path)
             if isinstance(saved, np.ndarray) and saved.dtype == object:
                 saved = np.asarray(saved.tolist(), dtype=np.float32)
             embedding = _normalize(saved)
