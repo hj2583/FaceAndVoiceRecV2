@@ -470,6 +470,55 @@ def _local_provider() -> str:
     return config.TRANSCRIPT_REFINEMENT_API
 
 
+def _source_group(targets: Sequence[dict]) -> RefinedGroup:
+    # A chunk is one same-speaker run, so its source text is a valid group.
+    return RefinedGroup(
+        tuple(int(item["segment_id"]) for item in targets),
+        " ".join(item["text"] for item in targets),
+    )
+
+
+def _refine_chunk(post, provider: str, normalized: Sequence[dict], start: int, end: int):
+    """Return (groups, recommendations, all_source) for normalized[start:end]."""
+    targets = normalized[start:end]
+    context = normalized[max(0, start - 2):start] + normalized[end:end + 2]
+    response = post(json.dumps(
+        {
+            "target_segments": targets,
+            "read_only_context_segments": context,
+            "target_segment_ids": [item["segment_id"] for item in targets],
+        },
+        ensure_ascii=False,
+    ))
+    try:
+        groups, recommendations = _normalize_and_validate_response(
+            response,
+            targets,
+            normalized,
+        )
+    except TranscriptRefinementError:
+        if provider not in _LOCAL_PROVIDER_NAMES:
+            raise
+        if len(targets) == 1:
+            return [_source_group(targets)], [], True
+        # Models drop segments on long chunks; shorter halves usually pass.
+        middle = start + len(targets) // 2
+        left_groups, left_recommendations, left_source = _refine_chunk(
+            post, provider, normalized, start, middle
+        )
+        right_groups, right_recommendations, right_source = _refine_chunk(
+            post, provider, normalized, middle, end
+        )
+        if left_source and right_source:
+            return [_source_group(targets)], [], True
+        return (
+            left_groups + right_groups,
+            left_recommendations + right_recommendations,
+            False,
+        )
+    return groups, recommendations, False
+
+
 def _refine_with_provider(normalized: Sequence[dict], provider: str) -> RefinementResult:
     if provider == "foundry":
         post, model = _post_foundry_chat, config.MODEL
@@ -485,31 +534,10 @@ def _refine_with_provider(normalized: Sequence[dict], provider: str) -> Refineme
     deterministic_chunks = 0
     ranges = _chunk_ranges(normalized)
     for chunk_index, (start, end) in enumerate(ranges):
-        targets = normalized[start:end]
-        context = normalized[max(0, start - 2):start] + normalized[end:end + 2]
-        response = post(json.dumps(
-            {
-                "target_segments": targets,
-                "read_only_context_segments": context,
-                "target_segment_ids": [item["segment_id"] for item in targets],
-            },
-            ensure_ascii=False,
-        ))
-        try:
-            groups, recommendations = _normalize_and_validate_response(
-                response,
-                targets,
-                normalized,
-            )
-        except TranscriptRefinementError:
-            if provider not in _LOCAL_PROVIDER_NAMES:
-                raise
-            # A chunk is one same-speaker run, so its source text is a valid group.
-            groups = [RefinedGroup(
-                tuple(int(item["segment_id"]) for item in targets),
-                " ".join(item["text"] for item in targets),
-            )]
-            recommendations = []
+        groups, recommendations, all_source = _refine_chunk(
+            post, provider, normalized, start, end
+        )
+        if all_source:
             deterministic_chunks += 1
         output_groups.extend(groups)
         output_recommendations.extend(recommendations)
@@ -517,7 +545,7 @@ def _refine_with_provider(normalized: Sequence[dict], provider: str) -> Refineme
             "Refined transcript chunk %d/%d (%d segments) via %s",
             chunk_index + 1,
             len(ranges),
-            len(targets),
+            end - start,
             provider,
         )
     if deterministic_chunks:

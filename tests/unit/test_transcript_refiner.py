@@ -1237,3 +1237,69 @@ def test_openai_invalid_chunk_keeps_source_text(monkeypatch):
     assert [(group.source_segment_ids, group.text) for group in result.groups] == [
         ((1,), "Hello.")
     ]
+
+
+def test_rejected_chunk_is_resent_as_halves(monkeypatch):
+    items = _segments(
+        ("Alice", 0, 500, "one two"),
+        ("Alice", 600, 900, "three four"),
+        ("Alice", 1000, 1400, "five six"),
+        ("Alice", 1500, 1900, "seven eight"),
+    )
+    requests = []
+
+    def chat(payload):
+        targets = json.loads(payload)["target_segments"]
+        requests.append([item["segment_id"] for item in targets])
+        # Mimics the model dropping segments on a long chunk.
+        return _reply(targets[:2] if len(targets) > 2 else targets)
+
+    monkeypatch.setattr(transcript_refiner, "_post_ollama_chat", chat)
+
+    result = transcript_refiner.refine_transcript(items)
+
+    assert requests == [[1, 2, 3, 4], [1, 2], [3, 4]]
+    assert [group.source_segment_ids for group in result.groups] == [(1,), (2,), (3,), (4,)]
+    assert [group.text for group in result.groups] == [
+        "one two", "three four", "five six", "seven eight",
+    ]
+
+
+def test_halves_that_all_fail_merge_back_into_one_source_group(monkeypatch):
+    items = _segments(
+        ("Alice", 0, 500, "one two"),
+        ("Alice", 600, 900, "three four"),
+    )
+    requests = []
+
+    def chat(payload):
+        targets = json.loads(payload)["target_segments"]
+        requests.append([item["segment_id"] for item in targets])
+        return {"groups": [], "speaker_change_recommendations": []}
+
+    monkeypatch.setattr(transcript_refiner, "_post_ollama_chat", chat)
+
+    result = transcript_refiner.refine_transcript(items)
+
+    assert requests == [[1, 2], [1], [2]]
+    assert [group.source_segment_ids for group in result.groups] == [(1, 2)]
+    assert result.groups[0].text == "one two three four"
+
+
+def test_request_errors_are_not_retried_by_splitting(monkeypatch):
+    items = _segments(
+        ("Alice", 0, 500, "one two"),
+        ("Alice", 600, 900, "three four"),
+    )
+    requests = []
+
+    def chat(_payload):
+        requests.append(1)
+        raise TranscriptRefinementError("Local Ollama request timed out")
+
+    monkeypatch.setattr(transcript_refiner, "_post_ollama_chat", chat)
+
+    with pytest.raises(TranscriptRefinementError, match="timed out"):
+        transcript_refiner.refine_transcript(items)
+
+    assert requests == [1]
