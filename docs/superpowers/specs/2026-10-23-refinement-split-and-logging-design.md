@@ -59,7 +59,9 @@ New module `src/face_voice_rec/logging_setup.py` with `setup_logging()`.
   - `app.log`: INFO and above from every module.
   - `errors.log`: ERROR and above only.
   - Both rotate at 5 MB with 5 backups.
-- Console output is unchanged.
+- A console stream handler (INFO and above, same line format) keeps terminal
+  output working; attaching file handlers to the root logger would otherwise
+  switch off Python's default stderr output for warnings.
 - Line format, with time in local time:
   `2026-10-23 10:44:09,256 WARNING transcript_refiner._refine_with_provider:530 | message`
   (time, level, module, function, line, then the message with `key=value`
