@@ -1,5 +1,7 @@
 from pathlib import Path
 import json
+import logging
+import re
 import sqlite3
 
 import pytest
@@ -868,7 +870,7 @@ def test_refresh_readable_transcript_persists_refinement_result_provenance(
     monkeypatch.setattr(
         transcript_refiner,
         "refine_transcript",
-        lambda _payload: transcript_refiner.RefinementResult(
+        lambda _payload, **_kwargs: transcript_refiner.RefinementResult(
             groups=(transcript_refiner.RefinedGroup((1,), "Hello there."),),
             speaker_change_recommendations=(),
             provider=provider,
@@ -978,7 +980,7 @@ def test_refresh_readable_transcript_empty_meeting_stays_deterministic_without_n
 
     called = {"refine": 0}
 
-    def fail_if_called(_segments):
+    def fail_if_called(_segments, **_kwargs):
         called["refine"] += 1
         raise AssertionError("Refiner should not run when there are no detailed segments")
 
@@ -1247,3 +1249,38 @@ def test_process_meeting_transcription_forwards_exact_subtitle_callback(tmp_path
 
     assert meeting_id > 0
     assert captured["subtitle_word_callback"] is callback
+
+
+def test_refinement_failure_is_logged_as_error_with_duration(monkeypatch, caplog):
+    from face_voice_rec.domain.transcription import transcript_refiner
+
+    monkeypatch.setattr(config, "TRANSCRIPT_REFINEMENT_ENABLED", True)
+    with database.get_conn() as connection:
+        connection.execute(
+            "INSERT INTO meetings(video_path, created_at, transcription_status) "
+            "VALUES ('m.mp4', 'now', 'completed')"
+        )
+        meeting_id = connection.execute("SELECT meeting_id FROM meetings").fetchone()[0]
+    save_transcripts(
+        [TranscriptionSegment("Alice", 0, 1000, "Hello there.", 0.9)],
+        config.TRANSCRIPTS_DIR / str(meeting_id),
+        meeting_id=meeting_id,
+    )
+
+    def fail(_segments, **_kwargs):
+        raise transcript_refiner.TranscriptRefinementError(
+            "Local OpenAI-compatible server request timed out"
+        )
+
+    monkeypatch.setattr(transcript_refiner, "refine_transcript", fail)
+
+    transcription_core.refresh_readable_transcript(meeting_id, use_llm=True)
+
+    errors = [r for r in caplog.records if r.levelno == logging.ERROR]
+    assert len(errors) == 1
+    assert re.fullmatch(
+        rf"Optional transcript refinement failed for meeting {meeting_id} "
+        r"\(Local OpenAI-compatible server request timed out\) after \d+\.\ds; "
+        r"keeping the deterministic readable transcript",
+        errors[0].getMessage(),
+    )

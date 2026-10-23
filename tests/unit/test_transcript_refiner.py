@@ -1,4 +1,6 @@
 import json
+import logging
+import re
 
 import pytest
 
@@ -1303,3 +1305,150 @@ def test_request_errors_are_not_retried_by_splitting(monkeypatch):
         transcript_refiner.refine_transcript(items)
 
     assert requests == [1]
+
+
+def _refiner_records(caplog):
+    return [r for r in caplog.records if r.name == transcript_refiner.logger.name]
+
+
+def test_refinement_logs_run_and_request_events(monkeypatch, caplog):
+    monkeypatch.setattr(
+        config,
+        "TRANSCRIPT_REFINEMENT_URL",
+        "http://sentinel-user:sentinel-pw@lan-host.invalid:30000/x",
+    )
+    monkeypatch.setattr(config, "TRANSCRIPT_REFINEMENT_MODEL", "log-model")
+    monkeypatch.setattr(config, "TRANSCRIPT_REFINEMENT_TIMEOUT_SECONDS", 123)
+    items = _segments(("Alice", 0, 500, "Hello there."))
+    monkeypatch.setattr(
+        transcript_refiner,
+        "_post_ollama_chat",
+        lambda payload: _reply(json.loads(payload)["target_segments"]),
+    )
+    caplog.set_level(logging.INFO)
+
+    transcript_refiner.refine_transcript(items, meeting_id=7)
+
+    started, request, finished = [r.getMessage() for r in _refiner_records(caplog)]
+    assert started == (
+        "refinement started meeting=7 provider=ollama model=log-model "
+        "endpoint=lan-host.invalid:30000 timeout=123s segments=1 chunks=1"
+    )
+    assert re.fullmatch(
+        r"refinement request meeting=7 chunk=1/1 depth=0 segments=1 chars=12 "
+        r"duration=\d+\.\ds outcome=ok",
+        request,
+    )
+    assert re.fullmatch(
+        r"refinement finished meeting=7 status=complete requests=1 rejected=0 "
+        r"repaired_by_split=0 kept_source_segments=0 duration=\d+\.\ds",
+        finished,
+    )
+    assert "sentinel-user" not in caplog.text
+    assert "sentinel-pw" not in caplog.text
+
+
+def test_rejected_chunk_split_is_logged(monkeypatch, caplog):
+    items = _segments(
+        ("Alice", 0, 500, "one two"),
+        ("Alice", 600, 900, "three four"),
+        ("Alice", 1000, 1400, "five six"),
+        ("Alice", 1500, 1900, "seven eight"),
+    )
+
+    def chat(payload):
+        targets = json.loads(payload)["target_segments"]
+        return _reply(targets[:2] if len(targets) > 2 else targets)
+
+    monkeypatch.setattr(transcript_refiner, "_post_ollama_chat", chat)
+    caplog.set_level(logging.INFO)
+
+    transcript_refiner.refine_transcript(items, meeting_id=3)
+
+    records = _refiner_records(caplog)
+    rejected = [r for r in records if "outcome=rejected" in r.getMessage()]
+    assert len(rejected) == 1
+    assert rejected[0].levelno == logging.WARNING
+    assert "chunk=1/1 depth=0 segments=4" in rejected[0].getMessage()
+    assert (
+        "reason=Refinement omitted, duplicated, or reordered source segment references"
+        in rejected[0].getMessage()
+    )
+    ok_depths = [
+        re.search(r"depth=(\d+)", r.getMessage()).group(1)
+        for r in records
+        if "outcome=ok" in r.getMessage()
+    ]
+    assert ok_depths == ["1", "1"]
+    finished = records[-1]
+    assert finished.levelno == logging.INFO
+    assert re.fullmatch(
+        r"refinement finished meeting=3 status=complete requests=3 rejected=1 "
+        r"repaired_by_split=1 kept_source_segments=0 duration=\d+\.\ds",
+        finished.getMessage(),
+    )
+
+
+def test_segments_kept_as_source_are_logged_and_counted(monkeypatch, caplog):
+    items = _segments(
+        ("Alice", 0, 500, "one two"),
+        ("Alice", 600, 900, "three four"),
+    )
+    monkeypatch.setattr(
+        transcript_refiner,
+        "_post_ollama_chat",
+        lambda _payload: {"groups": [], "speaker_change_recommendations": []},
+    )
+    caplog.set_level(logging.INFO)
+
+    transcript_refiner.refine_transcript(items, meeting_id=5)
+
+    records = _refiner_records(caplog)
+    kept = [r for r in records if "kept source text" in r.getMessage()]
+    assert len(kept) == 2
+    assert all(r.levelno == logging.WARNING for r in kept)
+    assert "chunk=1/1 depth=1 segment=1" in kept[0].getMessage()
+    finished = records[-1]
+    assert finished.levelno == logging.WARNING
+    assert re.fullmatch(
+        r"refinement finished meeting=5 status=complete requests=3 rejected=3 "
+        r"repaired_by_split=0 kept_source_segments=2 duration=\d+\.\ds",
+        finished.getMessage(),
+    )
+
+
+def test_request_failure_is_logged_as_error_with_chunk_and_duration(monkeypatch, caplog):
+    items = _segments(("Alice", 0, 500, "Hello."))
+
+    def chat(_payload):
+        raise TranscriptRefinementError("Local Ollama request timed out")
+
+    monkeypatch.setattr(transcript_refiner, "_post_ollama_chat", chat)
+
+    with pytest.raises(TranscriptRefinementError):
+        transcript_refiner.refine_transcript(items, meeting_id=9)
+
+    errors = [r for r in _refiner_records(caplog) if r.levelno == logging.ERROR]
+    assert len(errors) == 1
+    assert re.fullmatch(
+        r"refinement request failed meeting=9 chunk=1/1 depth=0 segments=1 chars=6 "
+        r"duration=\d+\.\ds reason=Local Ollama request timed out",
+        errors[0].getMessage(),
+    )
+
+
+def test_logs_never_contain_transcript_text(monkeypatch, caplog):
+    items = _segments(
+        ("Alice", 0, 500, "SECRETWORD one"),
+        ("Alice", 600, 900, "SECRETWORD two"),
+    )
+    monkeypatch.setattr(
+        transcript_refiner,
+        "_post_ollama_chat",
+        lambda _payload: {"groups": [], "speaker_change_recommendations": []},
+    )
+    caplog.set_level(logging.DEBUG)
+
+    transcript_refiner.refine_transcript(items, meeting_id=1)
+
+    assert "SECRETWORD" not in caplog.text

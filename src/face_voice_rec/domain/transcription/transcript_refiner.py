@@ -5,6 +5,7 @@ from http.client import HTTPException
 import json
 import logging
 import re
+from time import perf_counter
 from typing import Sequence
 from urllib.error import HTTPError, URLError
 from urllib.parse import urlsplit
@@ -470,6 +471,27 @@ def _local_provider() -> str:
     return config.TRANSCRIPT_REFINEMENT_API
 
 
+@dataclass
+class _RunStats:
+    meeting_id: int | None
+    provider: str
+    total_chunks: int
+    requests: int = 0
+    rejected: int = 0
+    kept_source_segments: int = 0
+
+
+def _endpoint_label(provider: str) -> str:
+    url = config.ANTHROPIC_API_URL if provider == "foundry" else config.TRANSCRIPT_REFINEMENT_URL
+    parts = urlsplit(url)
+    try:
+        port = parts.port
+    except ValueError:
+        port = None
+    host = parts.hostname or "unknown"
+    return f"{host}:{port}" if port else host
+
+
 def _source_group(targets: Sequence[dict]) -> RefinedGroup:
     # A chunk is one same-speaker run, so its source text is a valid group.
     return RefinedGroup(
@@ -478,36 +500,75 @@ def _source_group(targets: Sequence[dict]) -> RefinedGroup:
     )
 
 
-def _refine_chunk(post, provider: str, normalized: Sequence[dict], start: int, end: int):
+def _refine_chunk(
+    post,
+    normalized: Sequence[dict],
+    start: int,
+    end: int,
+    stats: _RunStats,
+    chunk_number: int,
+    depth: int,
+):
     """Return (groups, recommendations, all_source) for normalized[start:end]."""
     targets = normalized[start:end]
     context = normalized[max(0, start - 2):start] + normalized[end:end + 2]
-    response = post(json.dumps(
-        {
-            "target_segments": targets,
-            "read_only_context_segments": context,
-            "target_segment_ids": [item["segment_id"] for item in targets],
-        },
-        ensure_ascii=False,
-    ))
+    fields = (
+        stats.meeting_id,
+        chunk_number,
+        stats.total_chunks,
+        depth,
+        len(targets),
+        sum(len(item["text"]) for item in targets),
+    )
+    started = perf_counter()
+    try:
+        response = post(json.dumps(
+            {
+                "target_segments": targets,
+                "read_only_context_segments": context,
+                "target_segment_ids": [item["segment_id"] for item in targets],
+            },
+            ensure_ascii=False,
+        ))
+    except TranscriptRefinementError as error:
+        logger.error(
+            "refinement request failed meeting=%s chunk=%d/%d depth=%d segments=%d "
+            "chars=%d duration=%.1fs reason=%s",
+            *fields, perf_counter() - started, error,
+        )
+        raise
+    duration = perf_counter() - started
+    stats.requests += 1
     try:
         groups, recommendations = _normalize_and_validate_response(
             response,
             targets,
             normalized,
         )
-    except TranscriptRefinementError:
-        if provider not in _LOCAL_PROVIDER_NAMES:
+    except TranscriptRefinementError as error:
+        logger.warning(
+            "refinement request meeting=%s chunk=%d/%d depth=%d segments=%d chars=%d "
+            "duration=%.1fs outcome=rejected reason=%s",
+            *fields, duration, error,
+        )
+        if stats.provider not in _LOCAL_PROVIDER_NAMES:
             raise
+        stats.rejected += 1
         if len(targets) == 1:
+            stats.kept_source_segments += 1
+            logger.warning(
+                "refinement kept source text meeting=%s chunk=%d/%d depth=%d segment=%d",
+                stats.meeting_id, chunk_number, stats.total_chunks, depth,
+                targets[0]["segment_id"],
+            )
             return [_source_group(targets)], [], True
         # Models drop segments on long chunks; shorter halves usually pass.
         middle = start + len(targets) // 2
         left_groups, left_recommendations, left_source = _refine_chunk(
-            post, provider, normalized, start, middle
+            post, normalized, start, middle, stats, chunk_number, depth + 1
         )
         right_groups, right_recommendations, right_source = _refine_chunk(
-            post, provider, normalized, middle, end
+            post, normalized, middle, end, stats, chunk_number, depth + 1
         )
         if left_source and right_source:
             return [_source_group(targets)], [], True
@@ -516,10 +577,19 @@ def _refine_chunk(post, provider: str, normalized: Sequence[dict], start: int, e
             left_recommendations + right_recommendations,
             False,
         )
+    logger.info(
+        "refinement request meeting=%s chunk=%d/%d depth=%d segments=%d chars=%d "
+        "duration=%.1fs outcome=ok",
+        *fields, duration,
+    )
     return groups, recommendations, False
 
 
-def _refine_with_provider(normalized: Sequence[dict], provider: str) -> RefinementResult:
+def _refine_with_provider(
+    normalized: Sequence[dict],
+    provider: str,
+    meeting_id: int | None = None,
+) -> RefinementResult:
     if provider == "foundry":
         post, model = _post_foundry_chat, config.MODEL
     elif provider == "ollama":
@@ -529,33 +599,37 @@ def _refine_with_provider(normalized: Sequence[dict], provider: str) -> Refineme
     else:
         raise ValueError(f"Unknown refinement provider: {provider}")
 
+    ranges = _chunk_ranges(normalized)
+    stats = _RunStats(meeting_id, provider, len(ranges))
+    run_started = perf_counter()
+    logger.info(
+        "refinement started meeting=%s provider=%s model=%s endpoint=%s timeout=%ss "
+        "segments=%d chunks=%d",
+        meeting_id, provider, model, _endpoint_label(provider),
+        config.TRANSCRIPT_REFINEMENT_TIMEOUT_SECONDS, len(normalized), len(ranges),
+    )
+
     output_groups = []
     output_recommendations = []
-    deterministic_chunks = 0
-    ranges = _chunk_ranges(normalized)
-    for chunk_index, (start, end) in enumerate(ranges):
-        groups, recommendations, all_source = _refine_chunk(
-            post, provider, normalized, start, end
+    repaired_by_split = 0
+    for chunk_number, (start, end) in enumerate(ranges, start=1):
+        rejected_before = stats.rejected
+        kept_before = stats.kept_source_segments
+        groups, recommendations, _all_source = _refine_chunk(
+            post, normalized, start, end, stats, chunk_number, 0
         )
-        if all_source:
-            deterministic_chunks += 1
+        if stats.rejected > rejected_before and stats.kept_source_segments == kept_before:
+            repaired_by_split += 1
         output_groups.extend(groups)
         output_recommendations.extend(recommendations)
-        logger.debug(
-            "Refined transcript chunk %d/%d (%d segments) via %s",
-            chunk_index + 1,
-            len(ranges),
-            end - start,
-            provider,
-        )
-    if deterministic_chunks:
-        logger.warning(
-            "Local %s output failed validation for %d of %d chunks; "
-            "kept source text for those chunks",
-            _LOCAL_PROVIDER_NAMES[provider],
-            deterministic_chunks,
-            len(ranges),
-        )
+
+    logger.log(
+        logging.WARNING if stats.kept_source_segments else logging.INFO,
+        "refinement finished meeting=%s status=complete requests=%d rejected=%d "
+        "repaired_by_split=%d kept_source_segments=%d duration=%.1fs",
+        meeting_id, stats.requests, stats.rejected, repaired_by_split,
+        stats.kept_source_segments, perf_counter() - run_started,
+    )
     return RefinementResult(
         tuple(output_groups),
         tuple(output_recommendations),
@@ -564,7 +638,10 @@ def _refine_with_provider(normalized: Sequence[dict], provider: str) -> Refineme
     )
 
 
-def refine_transcript(segments: Sequence[dict]) -> RefinementResult:
+def refine_transcript(
+    segments: Sequence[dict],
+    meeting_id: int | None = None,
+) -> RefinementResult:
     """Format transcript text while retaining strict source/speaker boundaries."""
     if not segments:
         return RefinementResult((), (), provider="deterministic")
@@ -601,15 +678,15 @@ def refine_transcript(segments: Sequence[dict]) -> RefinementResult:
 
     local_provider = _local_provider()
     if not config.TRANSCRIPT_REFINEMENT_USE_CLOUD:
-        return _refine_with_provider(normalized, local_provider)
+        return _refine_with_provider(normalized, local_provider, meeting_id)
 
     try:
-        return _refine_with_provider(normalized, "foundry")
+        return _refine_with_provider(normalized, "foundry", meeting_id)
     except TranscriptRefinementError as cloud_error:
         cloud_reason = str(cloud_error)
     logger.warning("Foundry refinement failed (%s); retrying locally", cloud_reason)
     try:
-        local_result = _refine_with_provider(normalized, local_provider)
+        local_result = _refine_with_provider(normalized, local_provider, meeting_id)
     except TranscriptRefinementError as local_error:
         raise TranscriptRefinementError(
             "Foundry refinement failed "

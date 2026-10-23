@@ -12,6 +12,7 @@ from pathlib import Path
 import shutil
 import sqlite3
 import subprocess
+from time import perf_counter
 from typing import Callable, Iterable, Optional
 import re
 
@@ -960,6 +961,7 @@ def refresh_readable_transcript(meeting_id: int, use_llm: Optional[bool] = None)
     )
     if should_use_llm and detailed:
         transcript_refiner = None
+        refinement_started = perf_counter()
         try:
             from face_voice_rec.domain.transcription import transcript_refiner
 
@@ -972,7 +974,7 @@ def refresh_readable_transcript(meeting_id: int, use_llm: Optional[bool] = None)
                     "text": segment.text,
                 }
                 for segment in detailed
-            ])
+            ], meeting_id=meeting_id)
             by_id = {
                 segment.source_segment_ids[0]: segment
                 for segment in detailed
@@ -1012,11 +1014,12 @@ def refresh_readable_transcript(meeting_id: int, use_llm: Optional[bool] = None)
                 and isinstance(error, transcript_refiner.TranscriptRefinementError)
                 else _refinement_failure_category(error)
             )
-            logger.warning(
-                "Optional transcript refinement failed for meeting %s (%s); "
+            logger.error(
+                "Optional transcript refinement failed for meeting %s (%s) after %.1fs; "
                 "keeping the deterministic readable transcript",
                 meeting_id,
                 category,
+                perf_counter() - refinement_started,
             )
             status = "fallback"
             error_message = category
