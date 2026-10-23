@@ -21,6 +21,7 @@ import streamlit as st
 
 from face_voice_rec import config
 from face_voice_rec.config import initialize_runtime_paths
+from face_voice_rec.logging_setup import setup_logging
 from face_voice_rec.storage.database import init_db
 
 
@@ -154,6 +155,7 @@ def main() -> None:
     st.set_option("client.showSidebarNavigation", False)
 
     initialize_runtime_paths()
+    setup_logging()
     initialize_application_database()
 
     navigation = st.navigation(

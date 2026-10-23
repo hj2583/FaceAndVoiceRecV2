@@ -109,6 +109,7 @@ def test_main_renders_tabs_in_expected_order_with_startup_sequence(monkeypatch):
     monkeypatch.setattr(main, "st", fake_st)
 
     monkeypatch.setattr(main, "initialize_runtime_paths", lambda: events.append(("initialize_runtime_paths",)))
+    monkeypatch.setattr(main, "setup_logging", lambda: events.append(("setup_logging",)))
     monkeypatch.setattr(
         main,
         "initialize_application_database",
@@ -143,6 +144,7 @@ def test_main_renders_tabs_in_expected_order_with_startup_sequence(monkeypatch):
         ),
         ("st.set_option", "client.showSidebarNavigation", False),
         ("initialize_runtime_paths",),
+        ("setup_logging",),
         ("initialize_application_database",),
         ("st.Page", "AI Face + Active Speaker Recognition", True),
         ("st.navigation", 1, "AI Face + Active Speaker Recognition", "hidden"),
