@@ -1057,6 +1057,8 @@ def test_openai_compatible_request_contract(monkeypatch):
         "model": "remote-model",
         "temperature": 0,
         "stream": False,
+        "max_tokens": 8192,
+        "chat_template_kwargs": {"enable_thinking": False},
         "messages": [
             {"role": "system", "content": transcript_refiner._SYSTEM_PROMPT},
             {"role": "user", "content": '{"target_segments": []}'},

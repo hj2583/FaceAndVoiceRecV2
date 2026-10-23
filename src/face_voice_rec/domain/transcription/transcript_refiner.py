@@ -207,6 +207,8 @@ def _post_openai_compatible_chat(user_content: str) -> dict:
         "model": config.TRANSCRIPT_REFINEMENT_MODEL,
         "temperature": 0,
         "stream": False,
+        "max_tokens": 8192,
+        "chat_template_kwargs": {"enable_thinking": False},
         "messages": [
             {"role": "system", "content": _SYSTEM_PROMPT},
             {"role": "user", "content": user_content},

@@ -6,7 +6,7 @@ from dotenv import load_dotenv
 
 def _load_environment(project_root: Path | None = None) -> None:
     root = project_root if project_root is not None else Path(__file__).resolve().parents[3]
-    load_dotenv(root / ".env", override=False)
+    load_dotenv(root / ".env", override=True)
 
 
 _load_environment()
