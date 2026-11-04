@@ -403,6 +403,76 @@ def test_ollama_request_uses_shared_prompt_and_schema(monkeypatch):
     assert "speaker_change_recommendations" in transcript_refiner._SYSTEM_PROMPT
 
 
+def test_glossary_terms_are_added_to_system_prompt(monkeypatch):
+    monkeypatch.setattr(config, "TRANSCRIPT_GLOSSARY", ("Public Bank Berhad", "Tan Sri"))
+
+    prompt = transcript_refiner._system_prompt()
+
+    assert prompt.startswith(transcript_refiner._SYSTEM_PROMPT)
+    assert "Public Bank Berhad; Tan Sri" in prompt
+    assert "Make no other word substitutions." in prompt
+
+
+def test_system_prompt_is_unchanged_without_glossary(monkeypatch):
+    monkeypatch.setattr(config, "TRANSCRIPT_GLOSSARY", ())
+
+    assert transcript_refiner._system_prompt() == transcript_refiner._SYSTEM_PROMPT
+
+
+def test_thinking_flag_reaches_local_request_payloads(monkeypatch):
+    monkeypatch.setattr(config, "TRANSCRIPT_REFINEMENT_THINKING", True)
+    sent = []
+
+    def fake_urlopen(request, timeout):
+        sent.append(json.loads(request.data.decode("utf-8")))
+        if request.full_url.endswith("/api/chat"):
+            return _FakeResponse(json.dumps({"message": {"content": _GOOD_REPLY_TEXT}}).encode("utf-8"))
+        return _FakeResponse(_openai_envelope(_GOOD_REPLY_TEXT))
+
+    monkeypatch.setattr(transcript_refiner, "urlopen", fake_urlopen)
+
+    transcript_refiner._post_ollama_chat("{}")
+    transcript_refiner._post_openai_compatible_chat("{}")
+
+    assert sent[0]["think"] is True
+    assert sent[1]["chat_template_kwargs"] == {"enable_thinking": True}
+
+
+@pytest.mark.parametrize(
+    ("glossary", "source", "refined"),
+    [
+        (("Berhad",), "Public Bank Bahá'í", "Public Bank Berhad"),
+        (("Public Bank",), "topic bank in 1966", "Public Bank in 1966"),
+        (
+            ("Tan Sri Dato' Sri Teh Hong Piow",),
+            "Tansri Dattel Shree Dr. Teh-O-Pat",
+            "Tan Sri Dato' Sri Teh Hong Piow",
+        ),
+        (("Public Bank",), "the bank", "the bank"),
+    ],
+)
+def test_known_term_corrections_pass_validation(monkeypatch, glossary, source, refined):
+    monkeypatch.setattr(config, "TRANSCRIPT_GLOSSARY", glossary)
+
+    assert transcript_refiner._words_match_source(source, refined)
+
+
+@pytest.mark.parametrize(
+    ("glossary", "source", "refined"),
+    [
+        ((), "Public Bank Bahá'í", "Public Bank Berhad"),
+        (("Public Bank",), "the bank", "a bank"),
+        (("Public Bank",), "hello", "hello world"),
+        (("Public Bank",), "hello world", "hello"),
+        (("Public Bank",), "topic bank", "topic"),
+    ],
+)
+def test_non_term_changes_fail_validation(monkeypatch, glossary, source, refined):
+    monkeypatch.setattr(config, "TRANSCRIPT_GLOSSARY", glossary)
+
+    assert not transcript_refiner._words_match_source(source, refined)
+
+
 # ---- Task 3: Foundry transport, whole-transcript fallback, provenance ----
 
 import email.message

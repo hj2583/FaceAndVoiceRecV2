@@ -140,6 +140,18 @@ Behavior:
 - `TRANSCRIPT_REFINEMENT_ENABLED=true` and `TRANSCRIPT_REFINEMENT_USE_CLOUD=false` (default): local refinement only, through the configured local API.
 - `TRANSCRIPT_REFINEMENT_ENABLED=true` and `TRANSCRIPT_REFINEMENT_USE_CLOUD=true`: cloud Foundry first, then automatic local fallback through the configured local API, then deterministic fallback if both fail.
 
+`TRANSCRIPT_GLOSSARY` is an optional comma-separated list of correct names and
+terms, for example `Public Bank Berhad, Tan Sri Dato' Sri Teh Hong Piow`. The
+list is passed to Whisper as its initial prompt (unless `WHISPER_INITIAL_PROMPT`
+is set) and to the refiner, which may correct only clear speech-recognition
+mishearings of these terms. It applies to new transcriptions and regenerated
+refinements.
+
+`TRANSCRIPT_REFINEMENT_THINKING=true` asks local Ollama or OpenAI-compatible
+models to reason before answering. It can improve term correction but makes
+refinement slower and uses more of the output token budget; keep it off unless
+the timeout allows it. Foundry requests are not affected.
+
 If cloud mode is enabled, transcript text (not audio) is sent to the configured
 cloud endpoint. Audio files are never uploaded by this feature. Validation is
 strict: changed/omitted/reordered/invented words are rejected, and grouping

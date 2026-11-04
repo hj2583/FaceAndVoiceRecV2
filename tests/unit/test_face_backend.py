@@ -95,3 +95,16 @@ def test_get_cuda_providers_falls_back_to_cpu_when_cuda_is_unavailable(monkeypat
     monkeypatch.setitem(sys.modules, "onnxruntime", fake_ort)
 
     assert face_backend.get_cuda_providers() == ["CPUExecutionProvider"]
+    fake_ort.preload_dlls.assert_not_called()
+
+
+def test_get_cuda_providers_preloads_nvidia_libraries_on_linux(monkeypatch):
+    fake_ort = Mock()
+    fake_ort.get_available_providers.return_value = [
+        "CUDAExecutionProvider", "CPUExecutionProvider"
+    ]
+    monkeypatch.setitem(sys.modules, "onnxruntime", fake_ort)
+    monkeypatch.setattr(sys, "platform", "linux")
+
+    assert face_backend.get_cuda_providers() == ["CUDAExecutionProvider"]
+    fake_ort.preload_dlls.assert_called_once_with(directory="")

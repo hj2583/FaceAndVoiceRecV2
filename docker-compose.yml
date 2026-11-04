@@ -35,8 +35,16 @@ services:
       DATABASE_HOST: postgres
       QDRANT_URL: http://qdrant:6333
       QDRANT_API_KEY: ""
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
     ports:
       - "8502:8501"
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - capabilities: [ gpu ]
+              count: all
     volumes:
       - type: bind
         source: ${DATA_ROOT:-./data}

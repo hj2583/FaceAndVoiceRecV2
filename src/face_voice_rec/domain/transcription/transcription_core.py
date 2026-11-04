@@ -606,8 +606,10 @@ def transcribe_with_diarization(
         )
         if detected_language:
             transcribe_kwargs["language"] = detected_language
-    if config.WHISPER_INITIAL_PROMPT:
-        transcribe_kwargs["initial_prompt"] = config.WHISPER_INITIAL_PROMPT
+    # Glossary terms bias Whisper toward the correct spelling of names and terms.
+    initial_prompt = config.WHISPER_INITIAL_PROMPT or ", ".join(config.TRANSCRIPT_GLOSSARY)
+    if initial_prompt:
+        transcribe_kwargs["initial_prompt"] = initial_prompt
 
     result = model.transcribe(str(audio_path), verbose=False, **transcribe_kwargs)
     segments = []
