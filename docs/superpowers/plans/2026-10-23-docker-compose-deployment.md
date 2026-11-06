@@ -20,6 +20,8 @@
 - `.env` must never enter the Docker build context, image, logs, or Git. Never print secret values.
 - Use the existing root `.env` `DATABASE_URL` as the only source of DB credentials. The Docker entrypoint changes its host only; never duplicate or print the password.
 - Existing initialized Postgres volumes may start without `POSTGRES_PASSWORD`; a fresh/empty Postgres volume is out of scope and must not be initialized with a placeholder password.
+- Use the existing root `.env` `DATABASE_URL` as the only source of DB credentials. The Docker entrypoint changes its host only; never duplicate or print the password.
+- Existing initialized Postgres volumes may start without `POSTGRES_PASSWORD`; a fresh/empty Postgres volume is out of scope and must not be initialized with a placeholder password.
 - Inside the app container, `DATABASE_URL` uses host `postgres` and `QDRANT_URL` uses `http://qdrant:6333`, not `localhost`.
 - Keep the configured OpenAI-compatible model server external and use its existing `.env` URL.
 - Persist application data with `./data:/app/data` and model caches in a separate named volume mounted at `/models`.
@@ -33,6 +35,8 @@
 | File | Change | Responsibility |
 |---|---|---|
 | `Dockerfile` | Create | CUDA Python runtime, FFmpeg/OS libs, GPU requirements, Qdrant readiness wait, Streamlit entrypoint |
+| `src/face_voice_rec/docker_entrypoint.py` | Create | Rewrite only the DB hostname to the Compose service while preserving URL credentials |
+| `tests/unit/test_docker_entrypoint.py` | Create | Prove DB URL host rewriting preserves encoded credentials and other URL fields |
 | `src/face_voice_rec/docker_entrypoint.py` | Create | Rewrite only the DB hostname to the Compose service while preserving URL credentials |
 | `tests/unit/test_docker_entrypoint.py` | Create | Prove DB URL host rewriting preserves encoded credentials and other URL fields |
 | `.dockerignore` | Create | Exclude `.env`, `data`, VCS, virtualenvs and caches from build context |
@@ -94,12 +98,16 @@ docker exec face-voice-postgres psql -U face_voice_rec -d face_voice_rec -Atc 'S
 ```
 
 Expected: `face_voice_rec|face_voice_rec` and the existing collection list. Record collection names/counts without printing keys or media. Check only whether `.env` contains a non-empty `DATABASE_URL`:
+Expected: `face_voice_rec|face_voice_rec` and the existing collection list. Record collection names/counts without printing keys or media. Check only whether `.env` contains a non-empty `DATABASE_URL`:
 
 ```powershell
 $hasDatabaseUrl = Select-String -Path .env -Pattern '^DATABASE_URL=postgresql\+psycopg://' -Quiet
 Write-Output "PostgreSQL DATABASE_URL present: $hasDatabaseUrl"
+$hasDatabaseUrl = Select-String -Path .env -Pattern '^DATABASE_URL=postgresql\+psycopg://' -Quiet
+Write-Output "PostgreSQL DATABASE_URL present: $hasDatabaseUrl"
 ```
 
+If absent, stop before Docker handoff; do not request or print a password separately.
 If absent, stop before Docker handoff; do not request or print a password separately.
 
 - [ ] **Step 5: Confirm the external model endpoint is reachable**
@@ -130,11 +138,55 @@ Expected: HTTP 200. Stop before service handoff if unreachable.
 - Create: `.dockerignore`
 - Create: `src/face_voice_rec/docker_entrypoint.py`
 - Create: `tests/unit/test_docker_entrypoint.py`
+- Create: `src/face_voice_rec/docker_entrypoint.py`
+- Create: `tests/unit/test_docker_entrypoint.py`
 
 **Interfaces:**
 - Consumes: project source except `.env`, runtime `data/`, `.git`, virtual environments and caches.
 - Produces: image `face-voice-rec:gpu`; source stays at `/app`, and `PYTHONPATH=/app/src` ensures `config.paths.PROJECT_ROOT` resolves to `/app`.
 
+- [ ] **Step 1: Write the failing DB URL host-rewrite test**
+
+Create `tests/unit/test_docker_entrypoint.py`:
+
+```python
+from sqlalchemy.engine import make_url
+
+from face_voice_rec.docker_entrypoint import rewrite_database_url
+
+
+def test_rewrite_database_url_changes_only_host():
+    original = (
+        "postgresql+psycopg://face_voice_rec:p%40ss%3Aword@localhost:5432/"
+        "face_voice_rec?sslmode=prefer"
+    )
+
+    rewritten = rewrite_database_url(original, "postgres")
+    parsed = make_url(rewritten)
+
+    assert parsed.host == "postgres"
+    assert parsed.port == 5432
+    assert parsed.database == "face_voice_rec"
+    assert parsed.username == "face_voice_rec"
+    assert parsed.password == "p@ss:word"
+    assert parsed.query == {"sslmode": "prefer"}
+```
+
+- [ ] **Step 2: Run it and verify the expected failure**
+
+Run: `.\directmlvenv\Scripts\python.exe -m pytest tests/unit/test_docker_entrypoint.py -q`
+Expected: collection fails because `face_voice_rec.docker_entrypoint` does not yet exist.
+
+- [ ] **Step 3: Implement the tested entrypoint module**
+
+Create `src/face_voice_rec/docker_entrypoint.py` with the code shown in the Dockerfile section above. It exposes `rewrite_database_url(database_url: str, database_host: str) -> str`, waits up to 180 seconds for `$QDRANT_URL/readyz`, and then `os.execv`s Streamlit. It never logs or prints the database URL.
+
+- [ ] **Step 4: Run the test and verify it passes**
+
+Run: `.\directmlvenv\Scripts\python.exe -m pytest tests/unit/test_docker_entrypoint.py -q`
+Expected: `1 passed`.
+
+- [ ] **Step 5: Create `.dockerignore`**
 - [ ] **Step 1: Write the failing DB URL host-rewrite test**
 
 Create `tests/unit/test_docker_entrypoint.py`:
@@ -203,7 +255,9 @@ docker-backups/
 Do not ignore `app/`, `src/`, `migrations/`, `alembic.ini`, `pyproject.toml`, `requirements-gpu.txt`, `sitecustomize.py`, or README.
 
 - [ ] **Step 6: Create `Dockerfile`**
+- [ ] **Step 6: Create `Dockerfile`**
 
+Use Python 3.14 slim, FFmpeg, OpenCV/audio runtime libraries, GPU requirements, `/app/src` on the Python path, and persistent model caches. Poll Qdrant for at most 180 seconds before starting Streamlit; fail clearly if `/readyz` never succeeds. Before starting, use `face_voice_rec.docker_entrypoint` to rewrite only the host component of `DATABASE_URL` to `DATABASE_HOST` while preserving password encoding:
 Use Python 3.14 slim, FFmpeg, OpenCV/audio runtime libraries, GPU requirements, `/app/src` on the Python path, and persistent model caches. Poll Qdrant for at most 180 seconds before starting Streamlit; fail clearly if `/readyz` never succeeds. Before starting, use `face_voice_rec.docker_entrypoint` to rewrite only the host component of `DATABASE_URL` to `DATABASE_HOST` while preserving password encoding:
 
 ```dockerfile
@@ -310,6 +364,7 @@ docker build --pull -t face-voice-rec:gpu .
 Expected: exit code 0.
 
 - [ ] **Step 8: Verify CUDA and exclusion of local data/secrets**
+- [ ] **Step 8: Verify CUDA and exclusion of local data/secrets**
 
 Run:
 
@@ -331,9 +386,11 @@ Expected: CUDA is available, `/app/.env` and `/app/data` do not exist in the ima
 - `postgres`: PostgreSQL 17, external `face_voice_postgres` volume, Compose health check.
 - `qdrant`: pinned `qdrant/qdrant:v1.20.0`, external `face_voice_qdrant` volume; app startup polls `/readyz`.
 - `app`: root `.env` at runtime, `DATABASE_HOST=postgres`, `QDRANT_URL=http://qdrant:6333`, configurable host data root and model-cache mounts, GPU, port 8501, app health check.
+- `app`: root `.env` at runtime, `DATABASE_HOST=postgres`, `QDRANT_URL=http://qdrant:6333`, configurable host data root and model-cache mounts, GPU, port 8501, app health check.
 
 - [ ] **Step 1: Create `docker-compose.yml`**
 
+Use this service shape. The initialized external PostgreSQL volume contains its existing role and password; the Compose service does not receive or recreate that password. A new or empty database volume is out of scope.
 Use this service shape. The initialized external PostgreSQL volume contains its existing role and password; the Compose service does not receive or recreate that password. A new or empty database volume is out of scope.
 
 ```yaml
@@ -370,13 +427,18 @@ services:
       dockerfile: Dockerfile
     env_file:
       - ${APP_ENV_FILE:-.env}
+      - ${APP_ENV_FILE:-.env}
     environment:
+      DATABASE_HOST: postgres
       DATABASE_HOST: postgres
       QDRANT_URL: http://qdrant:6333
       QDRANT_API_KEY: ""
     ports:
       - "8502:8501"
     volumes:
+      - type: bind
+        source: ${DATA_ROOT:-./data}
+        target: /app/data
       - type: bind
         source: ${DATA_ROOT:-./data}
         target: /app/data
@@ -406,6 +468,7 @@ volumes:
 ```
 
 Compose reads root `.env` and passes it to the app using `env_file`. Set `APP_ENV_FILE` only if the env file is outside the Compose project directory (for example, while running from a Git worktree); set `DATA_ROOT` only if persistent media lives outside the Compose project directory. By default both paths resolve relative to the Compose project. The app entrypoint rewrites only the host in the existing `DATABASE_URL` to `DATABASE_HOST=postgres`, preserving its encoded credentials. Compose sets `QDRANT_URL` to `qdrant` and clears `QDRANT_API_KEY` for the local unauthenticated service. Keep the model URL external. Do not set `container_name`.
+Compose reads root `.env` and passes it to the app using `env_file`. Set `APP_ENV_FILE` only if the env file is outside the Compose project directory (for example, while running from a Git worktree); set `DATA_ROOT` only if persistent media lives outside the Compose project directory. By default both paths resolve relative to the Compose project. The app entrypoint rewrites only the host in the existing `DATABASE_URL` to `DATABASE_HOST=postgres`, preserving its encoded credentials. Compose sets `QDRANT_URL` to `qdrant` and clears `QDRANT_API_KEY` for the local unauthenticated service. Keep the model URL external. Do not set `container_name`.
 
 - [ ] **Step 2: Add the optional Linux-only device override**
 
@@ -433,12 +496,22 @@ $env:DATA_ROOT = (Resolve-Path ..\..\data).Path
 
 From the normal project root, leave both variables unset; Compose defaults to `./.env` and `./data`.
 
+When executing from the approved worktree, point Compose at the original ignored `.env` and host data directory:
+
+```powershell
+$env:APP_ENV_FILE = (Resolve-Path ..\..\.env).Path
+$env:DATA_ROOT = (Resolve-Path ..\..\data).Path
+```
+
+From the normal project root, leave both variables unset; Compose defaults to `./.env` and `./data`.
+
 Run:
 
 ```powershell
 docker compose config --quiet
 ```
 
+Expected: exit code 0. If `DATABASE_URL` is absent or invalid, stop before handoff; never print it. Do not start services yet.
 Expected: exit code 0. If `DATABASE_URL` is absent or invalid, stop before handoff; never print it. Do not start services yet.
 
 ---
@@ -456,12 +529,15 @@ Add `data/backups/` to `.gitignore` so local DB and Qdrant backups cannot be com
 - [ ] **Step 2: Document local Compose configuration**
 
 Document that root `.env` must contain a valid `DATABASE_URL` for the existing `face_voice_rec` database. Do not add or include a duplicate password variable or credential value in README/source control. Explain that the Docker entrypoint changes only the DB hostname to `postgres`, `QDRANT_URL` is overridden to `qdrant:6333`, and transcript refinement continues to use the external URL from `.env`.
+Document that root `.env` must contain a valid `DATABASE_URL` for the existing `face_voice_rec` database. Do not add or include a duplicate password variable or credential value in README/source control. Explain that the Docker entrypoint changes only the DB hostname to `postgres`, `QDRANT_URL` is overridden to `qdrant:6333`, and transcript refinement continues to use the external URL from `.env`.
 
 - [ ] **Step 3: Document backup directory creation**
 
 Use this before backup commands:
 
 ```powershell
+$dataRoot = if ($env:DATA_ROOT) { $env:DATA_ROOT } else { Join-Path $PWD "data" }
+$backupRoot = Join-Path $dataRoot ("backups\docker-handoff-" + (Get-Date -Format "yyyyMMdd-HHmmss"))
 $dataRoot = if ($env:DATA_ROOT) { $env:DATA_ROOT } else { Join-Path $PWD "data" }
 $backupRoot = Join-Path $dataRoot ("backups\docker-handoff-" + (Get-Date -Format "yyyyMMdd-HHmmss"))
 New-Item -ItemType Directory -Path $backupRoot -Force | Out-Null
@@ -516,6 +592,7 @@ Inspect the Docker README section and confirm it contains no actual credentials 
 
 - [ ] **Step 1: Recheck preconditions immediately before handoff**
 
+Repeat container mount inspection, `docker compose config --quiet`, app image build, GPU visibility and model endpoint health. Verify `DATABASE_URL` is present and authenticates to the existing DB without printing it. If any precondition differs, leave old services running and stop.
 Repeat container mount inspection, `docker compose config --quiet`, app image build, GPU visibility and model endpoint health. Verify `DATABASE_URL` is present and authenticates to the existing DB without printing it. If any precondition differs, leave old services running and stop.
 
 - [ ] **Step 2: Run and verify backups**
