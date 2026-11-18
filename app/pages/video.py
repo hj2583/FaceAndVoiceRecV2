@@ -1,4 +1,5 @@
 import json
+from pathlib import Path, PureWindowsPath
 
 import pandas as pd
 import streamlit as st
@@ -21,7 +22,13 @@ def render() -> None:
     )
 
     if uploaded:
-        input_path = INITIAL_VIDEO_DIR / uploaded.name
+        safe_name = PureWindowsPath(uploaded.name.replace("/", "\\")).name
+        if not safe_name or Path(safe_name).suffix.lower() not in {
+            ".mp4", ".avi", ".mov", ".mkv", ".mp3",
+        }:
+            st.error("Invalid file name or type.")
+            return
+        input_path = INITIAL_VIDEO_DIR / safe_name
         with open(input_path, "wb") as f:
             f.write(uploaded.getbuffer())
 

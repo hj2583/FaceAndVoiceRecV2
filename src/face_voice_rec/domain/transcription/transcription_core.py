@@ -12,6 +12,7 @@ from pathlib import Path
 import shutil
 import sqlite3
 import subprocess
+from time import perf_counter
 from typing import Callable, Iterable, Optional
 import re
 
@@ -605,8 +606,10 @@ def transcribe_with_diarization(
         )
         if detected_language:
             transcribe_kwargs["language"] = detected_language
-    if config.WHISPER_INITIAL_PROMPT:
-        transcribe_kwargs["initial_prompt"] = config.WHISPER_INITIAL_PROMPT
+    # Glossary terms bias Whisper toward the correct spelling of names and terms.
+    initial_prompt = config.WHISPER_INITIAL_PROMPT or ", ".join(config.TRANSCRIPT_GLOSSARY)
+    if initial_prompt:
+        transcribe_kwargs["initial_prompt"] = initial_prompt
 
     result = model.transcribe(str(audio_path), verbose=False, **transcribe_kwargs)
     segments = []
@@ -960,6 +963,7 @@ def refresh_readable_transcript(meeting_id: int, use_llm: Optional[bool] = None)
     )
     if should_use_llm and detailed:
         transcript_refiner = None
+        refinement_started = perf_counter()
         try:
             from face_voice_rec.domain.transcription import transcript_refiner
 
@@ -972,7 +976,7 @@ def refresh_readable_transcript(meeting_id: int, use_llm: Optional[bool] = None)
                     "text": segment.text,
                 }
                 for segment in detailed
-            ])
+            ], meeting_id=meeting_id)
             by_id = {
                 segment.source_segment_ids[0]: segment
                 for segment in detailed
@@ -994,7 +998,7 @@ def refresh_readable_transcript(meeting_id: int, use_llm: Optional[bool] = None)
             ])
             result_provider = (result.provider or "").strip().lower()
             result_model = (result.model or "").strip()
-            if result_provider in {"foundry", "ollama"} and result_model:
+            if result_provider in {"foundry", "ollama", "openai"} and result_model:
                 method = f"{result_provider}:{result_model}"
             else:
                 method = "deterministic"
@@ -1012,11 +1016,12 @@ def refresh_readable_transcript(meeting_id: int, use_llm: Optional[bool] = None)
                 and isinstance(error, transcript_refiner.TranscriptRefinementError)
                 else _refinement_failure_category(error)
             )
-            logger.warning(
-                "Optional transcript refinement failed for meeting %s (%s); "
+            logger.error(
+                "Optional transcript refinement failed for meeting %s (%s) after %.1fs; "
                 "keeping the deterministic readable transcript",
                 meeting_id,
                 category,
+                perf_counter() - refinement_started,
             )
             status = "fallback"
             error_message = category

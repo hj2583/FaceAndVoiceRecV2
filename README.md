@@ -2,16 +2,7 @@
 
 A Streamlit application for face recognition, active-speaker estimation, and optional video transcription.
 
-This project is built to run comfortably on CPU by default. If CUDA is available, the app can use it automatically. If not, it falls back to CPU instead of failing at startup.
-
-## Overview
-
-The system combines:
-
-- UniFace SCRFD + ArcFace for face detection and embedding extraction
-- UniFace FaceMesh for facial landmarks and mouth-motion measurements
-- OpenCV for fallback detection and video handling
-- SQLite (default) or PostgreSQL for relational records
+- PostgreSQL for relational records
 - Qdrant for face and voice vector search
 - Silero VAD for speech activity detection
 - OpenAI Whisper for optional transcription
@@ -33,7 +24,7 @@ and attendance. The application combines these models and processing stages:
 | Voice embeddings | SpeechBrain ECAPA-TDNN | Represents voice samples numerically; the project uses embeddings to cluster speech and attempt matching against enrolled voice samples. |
 | Active-speaker estimate | Application logic combining VAD timing and FaceMesh lip motion | Estimates which visible face is speaking only when lip movement is measurable and competitive; face-recognition similarity and temporal continuity are not treated as evidence of speaker identity. |
 | Identity storage and matching | Relational database and Qdrant | Stores people and enrollment metadata relationally; searches face and voice embeddings in Qdrant. |
-| Attendance | Application logic and SQLite | Records a known person when the video or realtime pipeline recognizes their face with sufficient confidence. |
+| Attendance | Application logic and PostgreSQL | Records a known person when the video or realtime pipeline recognizes their face with sufficient confidence. |
 | Optional transcript formatting | Local Ollama model (disabled by default) | Formats and groups existing transcript fragments while preserving the spoken words and speaker labels. It does not replace Whisper or determine speaker identities. |
 
 Face and voice enrollment are independent: enroll face samples for visual
@@ -56,12 +47,12 @@ quality, and unresolved/resolved status. Local `.npy` embeddings are retained
 for recovery and backfill; images, audio, and video remain files and are not
 stored in Qdrant. Source scripts belong in version control, not a database.
 
-The relational migration is still staged: SQLite remains the default, while a
-portable PostgreSQL schema and Alembic initial migration are available. Logs,
-transcripts, attendance, and other structured records remain relational data;
-shared object storage for media is not yet implemented. Do not treat this as a
-complete production cutover until PostgreSQL deployment, shared media storage,
-backups, and recovery procedures are configured and verified.
+PostgreSQL is required for application runtime; SQLite is retained only as the
+legacy import source and for isolated tests. Alembic creates the PostgreSQL
+schema. Logs, transcripts, attendance, and other structured records remain
+relational data; shared object storage for media is not yet implemented. Back
+up the SQLite database and its media before importing, then verify the imported
+row counts before starting normal application traffic.
 
 Qdrant collections are initialized from environment settings. The report-first
 `scripts/backfill_qdrant_embeddings.py` migrates existing known and unresolved
@@ -69,13 +60,21 @@ face/voice vectors with deterministic IDs. Run it from the repository root,
 review the report, then pass `--apply`. Re-running it safely upserts the same
 points. It does not migrate relational records or media files.
 
-Set `DATABASE_URL` in the environment or root `.env` before creating a new
-relational schema. For example, use a PostgreSQL URL with the `postgresql+psycopg`
-driver, then run `python -m alembic upgrade head` from the repository root.
-Migrations create schema only; they do not migrate the current `data/db/faces.db`
-or upload local assets. The Qdrant backfill requires the current relational
-schema and readable local embedding files. Keep database and Qdrant credentials
-out of source control.
+Set `DATABASE_URL` in the root `.env` before launching the app. Use a PostgreSQL
+URL with the `postgresql+psycopg` driver, for example:
+
+```dotenv
+DATABASE_URL=postgresql+psycopg://USER:PASSWORD@localhost:5432/face_voice_rec
+```
+
+For a new empty database, create its schema with
+`python -m alembic upgrade head`. To import the current SQLite records, first
+run `python scripts/migrate_sqlite_to_postgres.py` for a report, then
+`python scripts/migrate_sqlite_to_postgres.py --apply`. The importer creates the
+schema and refuses to write into a non-empty target. It copies relational rows,
+not media files. After confirming the imported records, backfill Qdrant vectors
+with `python scripts/backfill_qdrant_embeddings.py --apply`. Keep database and
+Qdrant credentials out of source control.
 
 Voice identity matching compares ECAPA cosine similarity with quality-filtered
 enrollment samples, deduplicates identical vectors, and checks both the best
@@ -124,6 +123,7 @@ Use placeholder values (example only):
 
 ```dotenv
 TRANSCRIPT_REFINEMENT_ENABLED=true
+TRANSCRIPT_REFINEMENT_API=ollama
 TRANSCRIPT_REFINEMENT_USE_CLOUD=true
 ANTHROPIC_API_URL=https://example.services.ai.azure.com/anthropic/v1/messages
 API_KEY=your-foundry-key
@@ -137,8 +137,20 @@ TRANSCRIPT_REFINEMENT_TIMEOUT_SECONDS=90
 Behavior:
 
 - `TRANSCRIPT_REFINEMENT_ENABLED=false` (default): deterministic readable output only.
-- `TRANSCRIPT_REFINEMENT_ENABLED=true` and `TRANSCRIPT_REFINEMENT_USE_CLOUD=false` (default): local Ollama refinement only.
-- `TRANSCRIPT_REFINEMENT_ENABLED=true` and `TRANSCRIPT_REFINEMENT_USE_CLOUD=true`: cloud Foundry first, then automatic local Ollama fallback, then deterministic fallback if both fail.
+- `TRANSCRIPT_REFINEMENT_ENABLED=true` and `TRANSCRIPT_REFINEMENT_USE_CLOUD=false` (default): local refinement only, through the configured local API.
+- `TRANSCRIPT_REFINEMENT_ENABLED=true` and `TRANSCRIPT_REFINEMENT_USE_CLOUD=true`: cloud Foundry first, then automatic local fallback through the configured local API, then deterministic fallback if both fail.
+
+`TRANSCRIPT_GLOSSARY` is an optional comma-separated list of correct names and
+terms, for example `Public Bank Berhad, Tan Sri Dato' Sri Teh Hong Piow`. The
+list is passed to Whisper as its initial prompt (unless `WHISPER_INITIAL_PROMPT`
+is set) and to the refiner, which may correct only clear speech-recognition
+mishearings of these terms. It applies to new transcriptions and regenerated
+refinements.
+
+`TRANSCRIPT_REFINEMENT_THINKING=true` asks local Ollama or OpenAI-compatible
+models to reason before answering. It can improve term correction but makes
+refinement slower and uses more of the output token budget; keep it off unless
+the timeout allows it. Foundry requests are not affected.
 
 If cloud mode is enabled, transcript text (not audio) is sent to the configured
 cloud endpoint. Audio files are never uploaded by this feature. Validation is
@@ -172,6 +184,15 @@ streamlit run app/main.py
 # or from the app directory:
 # streamlit run main.py
 ```
+TRANSCRIPT_REFINEMENT_API=openai
+TRANSCRIPT_REFINEMENT_URL=http://192.168.1.50:30000
+TRANSCRIPT_REFINEMENT_MODEL=your-served-model-name
+TRANSCRIPT_REFINEMENT_TIMEOUT_SECONDS=300
+```
+
+Transcript text is sent to that server, and plain `http://` is unencrypted, so
+use only a trusted network and server. Large models may need a longer timeout.
+Runs are saved as `openai:<model>` and shown as "Local OpenAI-compatible".
 
 Speaker-change suggestions are advisory and never change attribution. Failures
 leave the detailed Whisper transcript intact and show a deterministic readable
@@ -241,21 +262,52 @@ For another Qdrant server, set `QDRANT_URL` and, if required, `QDRANT_API_KEY`
 in the root `.env` or process environment. The default URL is
 `http://localhost:6333`; the application does not start Qdrant itself.
 
-4. Backfill existing vectors from the repository root. Report first, then apply:
+4. Start PostgreSQL locally and configure the root `.env`:
+
+```powershell
+docker run -d --name face-voice-postgres `
+    -e POSTGRES_USER=face_voice_rec `
+    -e POSTGRES_PASSWORD=change-this-password `
+    -e POSTGRES_DB=face_voice_rec `
+    -p 5432:5432 `
+    -v face_voice_postgres:/var/lib/postgresql/data postgres:17
+```
+
+Put the matching connection URL in `.env` (use a private password):
+
+```dotenv
+DATABASE_URL=postgresql+psycopg://face_voice_rec:change-this-password@localhost:5432/face_voice_rec
+```
+
+5. Migrate relational data. If importing the existing SQLite database, run a
+report first, then apply it to the empty PostgreSQL database:
 
 ```powershell
 $env:PYTHONPATH = 'src'
+python scripts/migrate_sqlite_to_postgres.py
+python scripts/migrate_sqlite_to_postgres.py --apply
+```
+
+For a new project with no SQLite data to import, create only the schema:
+
+```powershell
+python -m alembic upgrade head
+```
+
+6. Backfill existing face and voice vectors into Qdrant. Report first, then apply:
+
+```powershell
 python scripts/backfill_qdrant_embeddings.py
 python scripts/backfill_qdrant_embeddings.py --apply
 ```
 
-5. Verify FFmpeg is installed:
+7. Verify FFmpeg is installed:
 
 ```powershell
 ffmpeg -version
 ```
 
-6. Launch the app:
+8. Launch the app:
 
 ```powershell
 streamlit run app/main.py
@@ -272,6 +324,75 @@ pip install -r requirements-gpu.txt
 ```
 
 The project prefers CUDA automatically when it is available. If CUDA is missing or unavailable, it falls back to CPU mode. GPU acceleration covers both face recognition (ONNX Runtime) and the torch-based audio models (Whisper, Silero VAD, SpeechBrain voice embeddings) — `requirements-gpu.txt` pulls a CUDA-enabled build of `torch` from PyTorch's own package index for this reason. If you already have a CPU-only `torch` installed from `requirements.txt`, re-run `pip install -r requirements-gpu.txt` to replace it with the CUDA build.
+
+## Docker Compose (NVIDIA)
+
+The Docker deployment runs the app, PostgreSQL and Qdrant in separate Linux containers and reuses the existing `face_voice_postgres` and `face_voice_qdrant` volumes. The app uses the NVIDIA/CUDA requirements. Compose reads the root `.env` at runtime; it is excluded from the image. The container entrypoint changes only the DB hostname to `postgres`, preserving the existing `DATABASE_URL` credentials. The transcript model remains external.
+
+On Windows Docker Desktop, uploaded/pre-recorded media is supported, but Windows webcam and microphone devices are not passed through to the Linux container. The optional `docker-compose.linux-devices.yml` is only for Linux Docker hosts.
+
+If running Compose from `.worktrees/docker-compose-deployment`, set the env file and data directory to the original repository paths in the same PowerShell session:
+
+```powershell
+$env:APP_ENV_FILE = (Resolve-Path ..\..\.env).Path
+$env:DATA_ROOT = (Resolve-Path ..\..\data).Path
+```
+
+When running from the repository root, leave these variables unset; Compose uses `./.env` and `./data`.
+
+### Back up before handoff
+
+Set the existing `.env` `DATABASE_URL` to the currently working connection. The Docker entrypoint rewrites its host for the Compose network, so no duplicate password variable is needed. The existing Postgres volume is initialized; a fresh empty Postgres volume is not supported by this Compose file.
+
+Create and verify backups before stopping `face-voice-postgres` or `face-voice-qdrant`:
+
+```powershell
+$dataRoot = if ($env:DATA_ROOT) { $env:DATA_ROOT } else { Join-Path $PWD "data" }
+$backupRoot = Join-Path $dataRoot ("backups\docker-handoff-" + (Get-Date -Format "yyyyMMdd-HHmmss"))
+New-Item -ItemType Directory -Path $backupRoot -Force | Out-Null
+
+docker exec face-voice-postgres pg_dump -U face_voice_rec -d face_voice_rec -Fc -f /tmp/face_voice_rec.dump
+if ($LASTEXITCODE -ne 0) { throw "pg_dump failed; leave existing services running" }
+docker cp face-voice-postgres:/tmp/face_voice_rec.dump "$backupRoot\face_voice_rec.dump"
+if ($LASTEXITCODE -ne 0) { throw "Postgres backup copy failed; leave existing services running" }
+if ((Get-Item "$backupRoot\face_voice_rec.dump").Length -le 0) { throw "Postgres backup is empty" }
+docker exec face-voice-postgres rm -f /tmp/face_voice_rec.dump
+
+$collections = (Invoke-RestMethod http://localhost:6333/collections).result.collections
+foreach ($collection in $collections) {
+    $name = [uri]::EscapeDataString($collection.name)
+    $snapshot = Invoke-RestMethod -Method Post -Uri "http://localhost:6333/collections/$name/snapshots"
+    $snapshotName = [uri]::EscapeDataString($snapshot.result.name)
+    $path = Join-Path $backupRoot "$($collection.name).snapshot"
+    Invoke-WebRequest -Uri "http://localhost:6333/collections/$name/snapshots/$snapshotName" -OutFile $path -UseBasicParsing
+    if ((Get-Item $path).Length -le 0) { throw "Qdrant snapshot is empty: $($collection.name)" }
+}
+```
+
+Only hand off the services after every backup file exists and is non-empty. Build first, then start Compose:
+
+```powershell
+docker build --pull -t face-voice-rec:gpu .
+```
+
+When running Compose from this Git worktree, point it at the original root `.env` and `data` directory before starting the stack:
+
+```powershell
+$env:APP_ENV_FILE = (Resolve-Path ..\..\.env).Path
+$env:DATA_ROOT = (Resolve-Path ..\..\data).Path
+```
+
+Then hand off the existing containers and start the stack:
+
+```powershell
+docker stop face-voice-postgres face-voice-qdrant
+docker compose up -d --build
+docker compose ps
+```
+
+Verify the app, Qdrant and Postgres health endpoints, then check that existing database counts and Qdrant collections are still present. Process one prerecorded MP4/MP3 in the Docker app at `http://localhost:8502`; the host-run app remains at `http://localhost:8501`.
+
+Stop the stack with `docker compose down` only. Never use `docker compose down -v`, `docker volume rm`, or remove either named volume. If startup fails, stop Compose without `-v` and start the original containers. Restore backups only after confirming it is necessary.
 
 ## Project structure
 
@@ -405,7 +526,7 @@ FaceAndVoiceRecV2/
 - `transcripts/`: generated transcription outputs
 - `trackedVideo/`: processed output videos
 - `logs/`: runtime logs
-- `faces.db`: SQLite database with identities and logs
+- `faces.db`: legacy SQLite import source; runtime records are stored in PostgreSQL
 - `face_index.npz`: legacy cache path handled during migration; runtime matching uses Qdrant
 
 ## Development and testing

@@ -160,6 +160,7 @@ audio_logs = Table(
     Text("source", nullable=False),
     Text("transcript"),
     Integer("track_id"),
+    Text("source_ref"),
 )
 
 attendance_events = Table(

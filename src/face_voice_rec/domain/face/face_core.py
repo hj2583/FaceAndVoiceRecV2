@@ -30,6 +30,7 @@ from face_voice_rec.storage.qdrant_store import (
     unknown_point_id,
 )
 from qdrant_client import models
+from face_voice_rec.storage.safe_numpy import load_embedding_array
 from face_voice_rec.domain.face.face_backend import get_face_backend
 
 logging.basicConfig(
@@ -53,7 +54,7 @@ def _normalize(vector):
 
 def _load_embedding_file(path):
     """Load an embedding saved by older code paths or by UniFace object arrays."""
-    data = np.load(path, allow_pickle=True)
+    data = load_embedding_array(path)
 
     if isinstance(data, np.ndarray) and data.dtype == object:
         data = np.asarray(data.tolist(), dtype=np.float32)

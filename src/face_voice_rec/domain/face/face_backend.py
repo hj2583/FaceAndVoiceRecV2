@@ -36,6 +36,8 @@ def _cuda_providers():
 
     providers = ort.get_available_providers()
     if "CUDAExecutionProvider" in providers:
+        if sys.platform.startswith("linux") and hasattr(ort, "preload_dlls"):
+            ort.preload_dlls(directory="")
         return ["CUDAExecutionProvider"]
     if "CPUExecutionProvider" in providers:
         logger.warning(

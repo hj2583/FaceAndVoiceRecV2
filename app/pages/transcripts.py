@@ -1,13 +1,12 @@
 import html
 import json
-import sqlite3
 from pathlib import Path
 
 import pandas as pd
 import streamlit as st
 
 from face_voice_rec import config
-from face_voice_rec.config import DB_PATH, TRANSCRIPT_REFINEMENT_ENABLED
+from face_voice_rec.config import TRANSCRIPT_REFINEMENT_ENABLED
 from face_voice_rec.domain.transcription.transcription_core import (
     SENTENCE_TYPES,
     TranscriptionSegment,
@@ -15,6 +14,7 @@ from face_voice_rec.domain.transcription.transcription_core import (
     group_readable_paragraphs,
     refresh_readable_transcript,
 )
+from face_voice_rec.storage import database
 from face_voice_rec.storage.database import (
     confirm_meeting_introduction,
     create_person,
@@ -50,6 +50,8 @@ def _provider_caption(method: str) -> str:
         return f"Cloud Foundry: {model}" if model else "Cloud Foundry"
     if provider == "ollama":
         return f"Local Ollama: {model}" if model else "Local Ollama"
+    if provider == "openai":
+        return f"Local OpenAI-compatible: {model}" if model else "Local OpenAI-compatible"
     if provider == "deterministic":
         return "Deterministic"
     return f"{provider}: {model}" if model else (method or "Unknown method")
@@ -68,9 +70,15 @@ def _refinement_status_caption(status: str, method: str) -> str:
     return f"{provider_label} ({status})"
 
 
+def _local_backend_label() -> str:
+    if config.TRANSCRIPT_REFINEMENT_API == "openai":
+        return "local OpenAI-compatible server"
+    return "local Ollama"
+
+
 def render() -> None:
     st.header("📝 Meeting Transcripts")
-    with sqlite3.connect(DB_PATH) as connection:
+    with database.get_conn() as connection:
         meetings = connection.execute(
             """
             SELECT meeting_id, video_path, transcription_status, error_log
@@ -92,7 +100,7 @@ def render() -> None:
         format_func=lambda meeting_id: options[meeting_id],
     )
 
-    with sqlite3.connect(DB_PATH) as connection:
+    with database.get_conn() as connection:
         rows = connection.execute(
             """
             SELECT speaker_label, start_ms, end_ms, text, original_text,
@@ -203,7 +211,7 @@ def render() -> None:
                     from app.pages.face_database import get_face_index
 
                     get_face_index().rebuild()
-                except (ValueError, OSError, sqlite3.Error) as error:
+                except (ValueError, OSError, *database.DATABASE_ERRORS) as error:
                     st.error(f"Could not confirm introduction: {error}")
                 else:
                     st.success(f"Confirmed {name} as {person_id_to_assign}.")
@@ -217,20 +225,21 @@ def render() -> None:
             refresh_readable_transcript(selected_id, use_llm=False)
         st.rerun()
 
+    local_label = _local_backend_label()
     if TRANSCRIPT_REFINEMENT_ENABLED:
         if config.TRANSCRIPT_REFINEMENT_USE_CLOUD:
             action_label = (
                 "Refine readable transcript with cloud Foundry "
-                "(fallback to local Ollama)"
+                f"(fallback to {local_label})"
             )
             spinner_label = (
                 "Asking the configured cloud Foundry model to format the transcript "
                 "(local fallback on failure)..."
             )
         else:
-            action_label = "Refine readable transcript with local Ollama"
+            action_label = f"Refine readable transcript with {local_label}"
             spinner_label = (
-                "Asking the configured local Ollama model to format the transcript..."
+                f"Asking the configured {local_label} model to format the transcript..."
             )
         if st.button(
             action_label,
@@ -241,9 +250,9 @@ def render() -> None:
             st.rerun()
     else:
         action_hint = (
-            "cloud Foundry (with local fallback)"
+            f"cloud Foundry (with {local_label} fallback)"
             if config.TRANSCRIPT_REFINEMENT_USE_CLOUD
-            else "local Ollama"
+            else local_label
         )
         st.caption(
             "Transcript refinement is disabled. Set TRANSCRIPT_REFINEMENT_ENABLED=1 "

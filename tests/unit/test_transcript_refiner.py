@@ -1,4 +1,6 @@
 import json
+import logging
+import re
 
 import pytest
 
@@ -401,6 +403,76 @@ def test_ollama_request_uses_shared_prompt_and_schema(monkeypatch):
     assert "speaker_change_recommendations" in transcript_refiner._SYSTEM_PROMPT
 
 
+def test_glossary_terms_are_added_to_system_prompt(monkeypatch):
+    monkeypatch.setattr(config, "TRANSCRIPT_GLOSSARY", ("Public Bank Berhad", "Tan Sri"))
+
+    prompt = transcript_refiner._system_prompt()
+
+    assert prompt.startswith(transcript_refiner._SYSTEM_PROMPT)
+    assert "Public Bank Berhad; Tan Sri" in prompt
+    assert "Make no other word substitutions." in prompt
+
+
+def test_system_prompt_is_unchanged_without_glossary(monkeypatch):
+    monkeypatch.setattr(config, "TRANSCRIPT_GLOSSARY", ())
+
+    assert transcript_refiner._system_prompt() == transcript_refiner._SYSTEM_PROMPT
+
+
+def test_thinking_flag_reaches_local_request_payloads(monkeypatch):
+    monkeypatch.setattr(config, "TRANSCRIPT_REFINEMENT_THINKING", True)
+    sent = []
+
+    def fake_urlopen(request, timeout):
+        sent.append(json.loads(request.data.decode("utf-8")))
+        if request.full_url.endswith("/api/chat"):
+            return _FakeResponse(json.dumps({"message": {"content": _GOOD_REPLY_TEXT}}).encode("utf-8"))
+        return _FakeResponse(_openai_envelope(_GOOD_REPLY_TEXT))
+
+    monkeypatch.setattr(transcript_refiner, "urlopen", fake_urlopen)
+
+    transcript_refiner._post_ollama_chat("{}")
+    transcript_refiner._post_openai_compatible_chat("{}")
+
+    assert sent[0]["think"] is True
+    assert sent[1]["chat_template_kwargs"] == {"enable_thinking": True}
+
+
+@pytest.mark.parametrize(
+    ("glossary", "source", "refined"),
+    [
+        (("Berhad",), "Public Bank Bahá'í", "Public Bank Berhad"),
+        (("Public Bank",), "topic bank in 1966", "Public Bank in 1966"),
+        (
+            ("Tan Sri Dato' Sri Teh Hong Piow",),
+            "Tansri Dattel Shree Dr. Teh-O-Pat",
+            "Tan Sri Dato' Sri Teh Hong Piow",
+        ),
+        (("Public Bank",), "the bank", "the bank"),
+    ],
+)
+def test_known_term_corrections_pass_validation(monkeypatch, glossary, source, refined):
+    monkeypatch.setattr(config, "TRANSCRIPT_GLOSSARY", glossary)
+
+    assert transcript_refiner._words_match_source(source, refined)
+
+
+@pytest.mark.parametrize(
+    ("glossary", "source", "refined"),
+    [
+        ((), "Public Bank Bahá'í", "Public Bank Berhad"),
+        (("Public Bank",), "the bank", "a bank"),
+        (("Public Bank",), "hello", "hello world"),
+        (("Public Bank",), "hello world", "hello"),
+        (("Public Bank",), "topic bank", "topic"),
+    ],
+)
+def test_non_term_changes_fail_validation(monkeypatch, glossary, source, refined):
+    monkeypatch.setattr(config, "TRANSCRIPT_GLOSSARY", glossary)
+
+    assert not transcript_refiner._words_match_source(source, refined)
+
+
 # ---- Task 3: Foundry transport, whole-transcript fallback, provenance ----
 
 import email.message
@@ -418,6 +490,7 @@ _ERROR_SENTINEL = "TRANSPORT-ERROR-SENTINEL"
 @pytest.fixture(autouse=True)
 def _isolated_refiner_config(monkeypatch):
     monkeypatch.setattr(config, "TRANSCRIPT_REFINEMENT_USE_CLOUD", False)
+    monkeypatch.setattr(config, "TRANSCRIPT_REFINEMENT_API", "ollama")
     monkeypatch.setattr(config, "ANTHROPIC_API_URL", _FOUNDRY_URL)
     monkeypatch.setattr(config, "API_KEY", _KEY)
     monkeypatch.setattr(config, "ANTHROPIC_VERSION", "2023-06-01")
@@ -1020,3 +1093,432 @@ def test_local_ollama_errors_are_sanitized(monkeypatch, outcome):
     assert config.TRANSCRIPT_REFINEMENT_URL not in str(caught.value)
     assert "localhost" not in str(caught.value)
     _assert_sanitized(caught.value)
+
+
+# ---- OpenAI-compatible local server ----
+
+
+def _openai_envelope(content):
+    return json.dumps(
+        {"choices": [{"message": {"role": "assistant", "content": content}}]}
+    ).encode("utf-8")
+
+
+def test_openai_compatible_request_contract(monkeypatch):
+    monkeypatch.setattr(config, "TRANSCRIPT_REFINEMENT_URL", "http://lan-host.invalid:30000")
+    monkeypatch.setattr(config, "TRANSCRIPT_REFINEMENT_MODEL", "remote-model")
+    sent = {}
+
+    def fake_urlopen(request, timeout):
+        sent["request"] = request
+        sent["timeout"] = timeout
+        return _FakeResponse(_openai_envelope(_GOOD_REPLY_TEXT))
+
+    monkeypatch.setattr(transcript_refiner, "urlopen", fake_urlopen)
+
+    result = transcript_refiner._post_openai_compatible_chat('{"target_segments": []}')
+
+    assert result["groups"][0]["text"] == "Hello."
+    request = sent["request"]
+    assert request.full_url == "http://lan-host.invalid:30000/v1/chat/completions"
+    assert request.get_method() == "POST"
+    headers = {key.lower(): value for key, value in request.header_items()}
+    assert headers["content-type"] == "application/json"
+    assert "authorization" not in headers
+    assert json.loads(request.data.decode("utf-8")) == {
+        "model": "remote-model",
+        "temperature": 0,
+        "stream": False,
+        "max_tokens": 8192,
+        "chat_template_kwargs": {"enable_thinking": False},
+        "messages": [
+            {"role": "system", "content": transcript_refiner._SYSTEM_PROMPT},
+            {"role": "user", "content": '{"target_segments": []}'},
+        ],
+        "response_format": {
+            "type": "json_schema",
+            "json_schema": {
+                "name": "transcript_refinement",
+                "schema": transcript_refiner._OUTPUT_SCHEMA,
+            },
+        },
+    }
+    assert sent["timeout"] == config.TRANSCRIPT_REFINEMENT_TIMEOUT_SECONDS
+
+
+@pytest.mark.parametrize(
+    "content",
+    [
+        f"<think>reasoning about it</think>\n{_GOOD_REPLY_TEXT}",
+        f"<think>\nmulti\nline\n</think>\n\n```json\n{_GOOD_REPLY_TEXT}\n```",
+        f"```json\n{_GOOD_REPLY_TEXT}\n```",
+    ],
+    ids=["think", "think-fenced", "fenced"],
+)
+def test_openai_compatible_strips_think_and_fences(monkeypatch, content):
+    monkeypatch.setattr(
+        transcript_refiner,
+        "urlopen",
+        lambda request, timeout: _FakeResponse(_openai_envelope(content)),
+    )
+
+    assert transcript_refiner._post_openai_compatible_chat("{}")["groups"][0]["text"] == "Hello."
+
+
+@pytest.mark.parametrize(
+    "outcome",
+    [
+        urllib.error.URLError(f"http://lan-host.invalid {_ERROR_SENTINEL}"),
+        _http_error(500),
+        TimeoutError(_ERROR_SENTINEL),
+        OSError(_ERROR_SENTINEL),
+        b"not json " + _BODY_SENTINEL.encode(),
+        b"\xff\xfe",
+        b"[]",
+        json.dumps({"choices": []}).encode(),
+        json.dumps({"choices": [{"message": {"content": None}}]}).encode(),
+        json.dumps({"choices": [{"message": {"content": 5}}]}).encode(),
+        _openai_envelope(f"not json {_BODY_SENTINEL}"),
+        b"[" * 200000,
+    ],
+    ids=[
+        "url-error", "http-500", "timeout", "os-error", "malformed", "non-utf8",
+        "non-object", "no-choices", "null-content", "non-string-content",
+        "bad-content", "deep-nesting",
+    ],
+)
+def test_openai_compatible_errors_are_sanitized(monkeypatch, outcome):
+    monkeypatch.setattr(config, "TRANSCRIPT_REFINEMENT_URL", "http://lan-host.invalid:30000")
+
+    def fake_urlopen(request, timeout):
+        return _FakeOpener(outcome).open(request, timeout)
+
+    monkeypatch.setattr(transcript_refiner, "urlopen", fake_urlopen)
+
+    with pytest.raises(TranscriptRefinementError) as caught:
+        transcript_refiner._post_openai_compatible_chat("{}")
+
+    assert "lan-host" not in str(caught.value)
+    assert str(caught.value).startswith(
+        ("Local OpenAI-compatible server", "Refinement response must be")
+    )
+    _assert_sanitized(caught.value)
+
+
+def test_openai_compatible_http_error_reports_status_only(monkeypatch):
+    monkeypatch.setattr(
+        transcript_refiner,
+        "urlopen",
+        lambda request, timeout: _FakeOpener(_http_error(503)).open(request, timeout),
+    )
+
+    with pytest.raises(TranscriptRefinementError) as caught:
+        transcript_refiner._post_openai_compatible_chat("{}")
+
+    assert str(caught.value) == "Local OpenAI-compatible server request failed (HTTP 503)"
+
+
+def test_openai_compatible_oversized_response_is_rejected(monkeypatch):
+    monkeypatch.setattr(transcript_refiner, "_MAX_RESPONSE_BYTES", 64)
+    body = _openai_envelope(_BODY_SENTINEL + "x" * 200)
+    monkeypatch.setattr(
+        transcript_refiner, "urlopen", lambda request, timeout: _FakeResponse(body)
+    )
+
+    with pytest.raises(TranscriptRefinementError, match="size limit") as caught:
+        transcript_refiner._post_openai_compatible_chat("{}")
+
+    _assert_sanitized(caught.value)
+
+
+def test_openai_api_routes_local_only_refinement(monkeypatch):
+    monkeypatch.setattr(config, "TRANSCRIPT_REFINEMENT_API", "openai")
+    monkeypatch.setattr(config, "TRANSCRIPT_REFINEMENT_MODEL", "remote-model")
+    monkeypatch.setattr(
+        transcript_refiner, "_post_ollama_chat",
+        lambda _payload: pytest.fail("Ollama must not be called"),
+    )
+    monkeypatch.setattr(
+        transcript_refiner,
+        "_post_openai_compatible_chat",
+        lambda payload: _reply(json.loads(payload)["target_segments"]),
+    )
+
+    result = transcript_refiner.refine_transcript(_segments(("Alice", 0, 500, "Hello.")))
+
+    assert (result.provider, result.model) == ("openai", "remote-model")
+    assert result.used_local_fallback is False
+
+
+def test_cloud_failure_falls_back_to_openai_compatible(monkeypatch):
+    monkeypatch.setattr(config, "TRANSCRIPT_REFINEMENT_USE_CLOUD", True)
+    monkeypatch.setattr(config, "TRANSCRIPT_REFINEMENT_API", "openai")
+
+    def cloud(_payload):
+        raise TranscriptRefinementError("Foundry request timed out")
+
+    monkeypatch.setattr(transcript_refiner, "_post_foundry_chat", cloud)
+    monkeypatch.setattr(
+        transcript_refiner,
+        "_post_openai_compatible_chat",
+        lambda payload: _reply(json.loads(payload)["target_segments"]),
+    )
+
+    result = transcript_refiner.refine_transcript(_segments(("Alice", 0, 500, "Hello.")))
+
+    assert result.provider == "openai"
+    assert result.used_local_fallback is True
+    assert result.fallback_reason == "Foundry request timed out"
+
+
+def test_both_failing_names_openai_compatible_local_provider(monkeypatch):
+    monkeypatch.setattr(config, "TRANSCRIPT_REFINEMENT_USE_CLOUD", True)
+    monkeypatch.setattr(config, "TRANSCRIPT_REFINEMENT_API", "openai")
+
+    def fail_cloud(_payload):
+        raise TranscriptRefinementError("Foundry request timed out")
+
+    def fail_local(_payload):
+        raise TranscriptRefinementError("Local OpenAI-compatible server request timed out")
+
+    monkeypatch.setattr(transcript_refiner, "_post_foundry_chat", fail_cloud)
+    monkeypatch.setattr(transcript_refiner, "_post_openai_compatible_chat", fail_local)
+
+    with pytest.raises(TranscriptRefinementError) as caught:
+        transcript_refiner.refine_transcript(_segments(("Alice", 0, 500, "Hello.")))
+
+    assert str(caught.value) == (
+        "Foundry refinement failed (Foundry request timed out); "
+        "local OpenAI-compatible server refinement failed "
+        "(Local OpenAI-compatible server request timed out)"
+    )
+
+
+def test_openai_invalid_chunk_keeps_source_text(monkeypatch):
+    monkeypatch.setattr(config, "TRANSCRIPT_REFINEMENT_API", "openai")
+    items = _segments(("Alice", 0, 500, "Hello."))
+    monkeypatch.setattr(
+        transcript_refiner,
+        "_post_openai_compatible_chat",
+        lambda _payload: _reply(items, text_by_id={1: "Goodbye."}),
+    )
+
+    result = transcript_refiner.refine_transcript(items)
+
+    assert result.provider == "openai"
+    assert [(group.source_segment_ids, group.text) for group in result.groups] == [
+        ((1,), "Hello.")
+    ]
+
+
+def test_rejected_chunk_is_resent_as_halves(monkeypatch):
+    items = _segments(
+        ("Alice", 0, 500, "one two"),
+        ("Alice", 600, 900, "three four"),
+        ("Alice", 1000, 1400, "five six"),
+        ("Alice", 1500, 1900, "seven eight"),
+    )
+    requests = []
+
+    def chat(payload):
+        targets = json.loads(payload)["target_segments"]
+        requests.append([item["segment_id"] for item in targets])
+        # Mimics the model dropping segments on a long chunk.
+        return _reply(targets[:2] if len(targets) > 2 else targets)
+
+    monkeypatch.setattr(transcript_refiner, "_post_ollama_chat", chat)
+
+    result = transcript_refiner.refine_transcript(items)
+
+    assert requests == [[1, 2, 3, 4], [1, 2], [3, 4]]
+    assert [group.source_segment_ids for group in result.groups] == [(1,), (2,), (3,), (4,)]
+    assert [group.text for group in result.groups] == [
+        "one two", "three four", "five six", "seven eight",
+    ]
+
+
+def test_halves_that_all_fail_merge_back_into_one_source_group(monkeypatch):
+    items = _segments(
+        ("Alice", 0, 500, "one two"),
+        ("Alice", 600, 900, "three four"),
+    )
+    requests = []
+
+    def chat(payload):
+        targets = json.loads(payload)["target_segments"]
+        requests.append([item["segment_id"] for item in targets])
+        return {"groups": [], "speaker_change_recommendations": []}
+
+    monkeypatch.setattr(transcript_refiner, "_post_ollama_chat", chat)
+
+    result = transcript_refiner.refine_transcript(items)
+
+    assert requests == [[1, 2], [1], [2]]
+    assert [group.source_segment_ids for group in result.groups] == [(1, 2)]
+    assert result.groups[0].text == "one two three four"
+
+
+def test_request_errors_are_not_retried_by_splitting(monkeypatch):
+    items = _segments(
+        ("Alice", 0, 500, "one two"),
+        ("Alice", 600, 900, "three four"),
+    )
+    requests = []
+
+    def chat(_payload):
+        requests.append(1)
+        raise TranscriptRefinementError("Local Ollama request timed out")
+
+    monkeypatch.setattr(transcript_refiner, "_post_ollama_chat", chat)
+
+    with pytest.raises(TranscriptRefinementError, match="timed out"):
+        transcript_refiner.refine_transcript(items)
+
+    assert requests == [1]
+
+
+def _refiner_records(caplog):
+    return [r for r in caplog.records if r.name == transcript_refiner.logger.name]
+
+
+def test_refinement_logs_run_and_request_events(monkeypatch, caplog):
+    monkeypatch.setattr(
+        config,
+        "TRANSCRIPT_REFINEMENT_URL",
+        "http://sentinel-user:sentinel-pw@lan-host.invalid:30000/x",
+    )
+    monkeypatch.setattr(config, "TRANSCRIPT_REFINEMENT_MODEL", "log-model")
+    monkeypatch.setattr(config, "TRANSCRIPT_REFINEMENT_TIMEOUT_SECONDS", 123)
+    items = _segments(("Alice", 0, 500, "Hello there."))
+    monkeypatch.setattr(
+        transcript_refiner,
+        "_post_ollama_chat",
+        lambda payload: _reply(json.loads(payload)["target_segments"]),
+    )
+    caplog.set_level(logging.INFO)
+
+    transcript_refiner.refine_transcript(items, meeting_id=7)
+
+    started, request, finished = [r.getMessage() for r in _refiner_records(caplog)]
+    assert started == (
+        "refinement started meeting=7 provider=ollama model=log-model "
+        "endpoint=lan-host.invalid:30000 timeout=123s segments=1 chunks=1"
+    )
+    assert re.fullmatch(
+        r"refinement request meeting=7 chunk=1/1 depth=0 segments=1 chars=12 "
+        r"duration=\d+\.\ds outcome=ok",
+        request,
+    )
+    assert re.fullmatch(
+        r"refinement finished meeting=7 status=complete requests=1 rejected=0 "
+        r"repaired_by_split=0 kept_source_segments=0 duration=\d+\.\ds",
+        finished,
+    )
+    assert "sentinel-user" not in caplog.text
+    assert "sentinel-pw" not in caplog.text
+
+
+def test_rejected_chunk_split_is_logged(monkeypatch, caplog):
+    items = _segments(
+        ("Alice", 0, 500, "one two"),
+        ("Alice", 600, 900, "three four"),
+        ("Alice", 1000, 1400, "five six"),
+        ("Alice", 1500, 1900, "seven eight"),
+    )
+
+    def chat(payload):
+        targets = json.loads(payload)["target_segments"]
+        return _reply(targets[:2] if len(targets) > 2 else targets)
+
+    monkeypatch.setattr(transcript_refiner, "_post_ollama_chat", chat)
+    caplog.set_level(logging.INFO)
+
+    transcript_refiner.refine_transcript(items, meeting_id=3)
+
+    records = _refiner_records(caplog)
+    rejected = [r for r in records if "outcome=rejected" in r.getMessage()]
+    assert len(rejected) == 1
+    assert rejected[0].levelno == logging.WARNING
+    assert "chunk=1/1 depth=0 segments=4" in rejected[0].getMessage()
+    assert (
+        "reason=Refinement omitted, duplicated, or reordered source segment references"
+        in rejected[0].getMessage()
+    )
+    ok_depths = [
+        re.search(r"depth=(\d+)", r.getMessage()).group(1)
+        for r in records
+        if "outcome=ok" in r.getMessage()
+    ]
+    assert ok_depths == ["1", "1"]
+    finished = records[-1]
+    assert finished.levelno == logging.INFO
+    assert re.fullmatch(
+        r"refinement finished meeting=3 status=complete requests=3 rejected=1 "
+        r"repaired_by_split=1 kept_source_segments=0 duration=\d+\.\ds",
+        finished.getMessage(),
+    )
+
+
+def test_segments_kept_as_source_are_logged_and_counted(monkeypatch, caplog):
+    items = _segments(
+        ("Alice", 0, 500, "one two"),
+        ("Alice", 600, 900, "three four"),
+    )
+    monkeypatch.setattr(
+        transcript_refiner,
+        "_post_ollama_chat",
+        lambda _payload: {"groups": [], "speaker_change_recommendations": []},
+    )
+    caplog.set_level(logging.INFO)
+
+    transcript_refiner.refine_transcript(items, meeting_id=5)
+
+    records = _refiner_records(caplog)
+    kept = [r for r in records if "kept source text" in r.getMessage()]
+    assert len(kept) == 2
+    assert all(r.levelno == logging.WARNING for r in kept)
+    assert "chunk=1/1 depth=1 segment=1" in kept[0].getMessage()
+    finished = records[-1]
+    assert finished.levelno == logging.WARNING
+    assert re.fullmatch(
+        r"refinement finished meeting=5 status=complete requests=3 rejected=3 "
+        r"repaired_by_split=0 kept_source_segments=2 duration=\d+\.\ds",
+        finished.getMessage(),
+    )
+
+
+def test_request_failure_is_logged_as_error_with_chunk_and_duration(monkeypatch, caplog):
+    items = _segments(("Alice", 0, 500, "Hello."))
+
+    def chat(_payload):
+        raise TranscriptRefinementError("Local Ollama request timed out")
+
+    monkeypatch.setattr(transcript_refiner, "_post_ollama_chat", chat)
+
+    with pytest.raises(TranscriptRefinementError):
+        transcript_refiner.refine_transcript(items, meeting_id=9)
+
+    errors = [r for r in _refiner_records(caplog) if r.levelno == logging.ERROR]
+    assert len(errors) == 1
+    assert re.fullmatch(
+        r"refinement request failed meeting=9 chunk=1/1 depth=0 segments=1 chars=6 "
+        r"duration=\d+\.\ds reason=Local Ollama request timed out",
+        errors[0].getMessage(),
+    )
+
+
+def test_logs_never_contain_transcript_text(monkeypatch, caplog):
+    items = _segments(
+        ("Alice", 0, 500, "SECRETWORD one"),
+        ("Alice", 600, 900, "SECRETWORD two"),
+    )
+    monkeypatch.setattr(
+        transcript_refiner,
+        "_post_ollama_chat",
+        lambda _payload: {"groups": [], "speaker_change_recommendations": []},
+    )
+    caplog.set_level(logging.DEBUG)
+
+    transcript_refiner.refine_transcript(items, meeting_id=1)
+
+    assert "SECRETWORD" not in caplog.text

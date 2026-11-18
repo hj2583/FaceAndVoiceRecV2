@@ -230,7 +230,8 @@ def _make_project(tmp_path):
 
 def _run_copied_settings(project, cwd, body, extra_env=None):
     env = {k: v for k, v in os.environ.items() if k not in _PROVIDER_ENV_KEYS}
-    env.pop("TRANSCRIPT_REFINEMENT_ENABLED", None)
+    for key in [k for k in env if k.startswith("TRANSCRIPT_REFINEMENT_")]:
+        env.pop(key)
     env.update(extra_env or {})
     settings_path = project / "src" / "face_voice_rec" / "config" / "settings.py"
     source = (
@@ -309,6 +310,7 @@ def test_cloud_settings_default_inert_without_dotenv(tmp_path):
         assert copied.TRANSCRIPT_REFINEMENT_ENABLED is False
         assert copied.TRANSCRIPT_REFINEMENT_URL == "http://localhost:11434"
         assert copied.TRANSCRIPT_REFINEMENT_MODEL == "qwen2.5:7b"
+        assert copied.TRANSCRIPT_REFINEMENT_API == "ollama"
         """,
     )
 
@@ -431,3 +433,29 @@ def test_requirements_list_python_dotenv():
     for name in ("requirements.txt", "requirements-gpu.txt"):
         lines = (root / name).read_text(encoding="utf-8").splitlines()
         assert "python-dotenv>=1.0,<2" in lines
+
+
+@pytest.mark.parametrize(
+    ("raw", "expected"),
+    [(None, "ollama"), ("", "ollama"), ("ollama", "ollama"), (" OpenAI ", "openai")],
+)
+def test_refinement_api_accepts_known_values(raw, expected):
+    from face_voice_rec.config import settings
+
+    assert settings._refinement_api(raw) == expected
+
+
+@pytest.mark.parametrize("raw", ["vllm", "openai-compatible", "llama"])
+def test_refinement_api_rejects_unknown_values(raw):
+    from face_voice_rec.config import settings
+
+    with pytest.raises(ValueError, match="TRANSCRIPT_REFINEMENT_API"):
+        settings._refinement_api(raw)
+
+
+def test_refinement_api_is_exported():
+    from face_voice_rec.config import settings
+
+    assert config.TRANSCRIPT_REFINEMENT_API in {"ollama", "openai"}
+    assert "TRANSCRIPT_REFINEMENT_API" in settings.__all__
+    assert "TRANSCRIPT_REFINEMENT_API" in config.__all__

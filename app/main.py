@@ -19,7 +19,9 @@ _install_numpy_compat_aliases()
 
 import streamlit as st
 
+from face_voice_rec import config
 from face_voice_rec.config import initialize_runtime_paths
+from face_voice_rec.logging_setup import setup_logging
 from face_voice_rec.storage.database import init_db
 
 
@@ -141,6 +143,10 @@ def render_application() -> None:
 
 
 def main() -> None:
+    if not config.DATABASE_URL:
+        raise RuntimeError(
+            "PostgreSQL is required. Set DATABASE_URL in the repository-root .env."
+        )
     st.set_page_config(
         page_title="AI Face + Audio Recognition",
         page_icon="🎥",
@@ -149,6 +155,7 @@ def main() -> None:
     st.set_option("client.showSidebarNavigation", False)
 
     initialize_runtime_paths()
+    setup_logging()
     initialize_application_database()
 
     navigation = st.navigation(

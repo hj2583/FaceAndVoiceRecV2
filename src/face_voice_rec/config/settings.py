@@ -6,12 +6,12 @@ from dotenv import load_dotenv
 
 def _load_environment(project_root: Path | None = None) -> None:
     root = project_root if project_root is not None else Path(__file__).resolve().parents[3]
-    load_dotenv(root / ".env", override=False)
+    load_dotenv(root / ".env", override=True)
 
 
 _load_environment()
 
-DATABASE_URL = os.environ.get("DATABASE_URL", "").strip() #reserve for postgreSQL
+DATABASE_URL = os.environ.get("DATABASE_URL", "").strip()
 QDRANT_URL = os.environ.get("QDRANT_URL", "http://localhost:6333").strip()
 QDRANT_API_KEY = os.environ.get("QDRANT_API_KEY", "").strip() or None
 QDRANT_TIMEOUT_SECONDS = float(os.environ.get("QDRANT_TIMEOUT_SECONDS", "10"))
@@ -40,6 +40,19 @@ TRANSCRIPT_REFINEMENT_URL = os.environ.get(
 TRANSCRIPT_REFINEMENT_MODEL = os.environ.get(
     "TRANSCRIPT_REFINEMENT_MODEL", "qwen2.5:7b"
 )
+_REFINEMENT_APIS = ("ollama", "openai")
+
+
+def _refinement_api(value: str | None) -> str:
+    api = (value or "").strip().lower() or "ollama"
+    if api not in _REFINEMENT_APIS:
+        raise ValueError(
+            "TRANSCRIPT_REFINEMENT_API must be one of: " + ", ".join(_REFINEMENT_APIS)
+        )
+    return api
+
+
+TRANSCRIPT_REFINEMENT_API = _refinement_api(os.environ.get("TRANSCRIPT_REFINEMENT_API"))
 TRANSCRIPT_REFINEMENT_USE_CLOUD = os.environ.get(
     "TRANSCRIPT_REFINEMENT_USE_CLOUD", "0"
 ).strip().lower() in {"1", "true", "yes", "on"}
@@ -50,8 +63,16 @@ MODEL = os.environ.get("MODEL", "").strip()
 TRANSCRIPT_REFINEMENT_TIMEOUT_SECONDS = int(
     os.environ.get("TRANSCRIPT_REFINEMENT_TIMEOUT_SECONDS", "90")
 )
+TRANSCRIPT_REFINEMENT_THINKING = os.environ.get(
+    "TRANSCRIPT_REFINEMENT_THINKING", "0"
+).strip().lower() in {"1", "true", "yes", "on"}
 TRANSCRIPT_REFINEMENT_CHUNK_SEGMENTS = 30
 TRANSCRIPT_REFINEMENT_CHUNK_CHARS = 9000
+TRANSCRIPT_GLOSSARY = tuple(
+    term.strip()
+    for term in os.environ.get("TRANSCRIPT_GLOSSARY", "").split(",")
+    if term.strip()
+)
 
 
 __all__ = [
@@ -67,12 +88,15 @@ __all__ = [
     "TRANSCRIPT_REFINEMENT_ENABLED",
     "TRANSCRIPT_REFINEMENT_URL",
     "TRANSCRIPT_REFINEMENT_MODEL",
+    "TRANSCRIPT_REFINEMENT_API",
     "TRANSCRIPT_REFINEMENT_USE_CLOUD",
     "ANTHROPIC_API_URL",
     "API_KEY",
     "ANTHROPIC_VERSION",
     "MODEL",
     "TRANSCRIPT_REFINEMENT_TIMEOUT_SECONDS",
+    "TRANSCRIPT_REFINEMENT_THINKING",
     "TRANSCRIPT_REFINEMENT_CHUNK_SEGMENTS",
     "TRANSCRIPT_REFINEMENT_CHUNK_CHARS",
+    "TRANSCRIPT_GLOSSARY",
 ]
